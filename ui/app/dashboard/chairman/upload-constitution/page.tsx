@@ -91,7 +91,7 @@ export default function UploadConstitutionPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200">
-      <nav className="bg-white shadow-lg border-b-2 border-blue-200">
+      <nav className="fixed top-0 left-0 right-0 z-50 bg-white shadow-lg border-b-2 border-blue-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16 md:h-20">
             <div className="flex items-center space-x-3 md:space-x-4">
@@ -108,7 +108,7 @@ export default function UploadConstitutionPage() {
         </div>
       </nav>
 
-      <main className="max-w-2xl mx-auto py-6 md:py-8 px-4 sm:px-6 lg:px-8">
+      <main className="max-w-2xl mx-auto py-6 md:py-8 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
         <div className="card space-y-6">
           <p className="text-blue-800">
             Upload or replace the constitution PDF. It is used by the AI chat to answer members’ questions

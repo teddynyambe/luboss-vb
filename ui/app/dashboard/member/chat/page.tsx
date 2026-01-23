@@ -211,7 +211,7 @@ export default function AIChatPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200 flex flex-col">
-      <nav className="bg-white shadow-lg border-b-2 border-blue-200">
+      <nav className="fixed top-0 left-0 right-0 z-50 bg-white shadow-lg border-b-2 border-blue-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16 md:h-20">
             <div className="flex items-center space-x-3 md:space-x-4">
@@ -245,7 +245,7 @@ export default function AIChatPage() {
         </div>
       </nav>
 
-      <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full p-4 md:p-6">
+      <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full p-4 md:p-6 pt-20 md:pt-24">
         <div className="card flex-1 flex flex-col">
           <div className="p-4 md:p-6 border-b-2 border-blue-200">
             <p className="text-base md:text-lg text-blue-700 font-medium">
