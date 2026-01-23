@@ -88,9 +88,10 @@ Your role is to assist members with:
 - Use proper spacing and formatting for readability on web
 
 **Tool Usage**:
-- Use the available tools to get information when needed
+- When tools are available, use them to get information when needed
 - Call tools based on what the user is asking about
-- You can call multiple tools if needed to answer a question completely"""
+- You can call multiple tools if needed to answer a question completely
+- If tools are not available, provide answers based on your training knowledge and the context provided"""
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -105,6 +106,10 @@ Your role is to assist members with:
     # Uncomment below to enable function calling when using a tool-use model:
     # if "tool-use" in settings.LLM_MODEL.lower():
     #     use_function_calling = True
+    
+    # Update system prompt to explicitly disable tool usage when function calling is disabled
+    if not use_function_calling:
+        system_prompt += "\n\n**IMPORTANT: You do NOT have access to any tools or function calling. Answer questions directly based on the context provided and your knowledge. Do NOT attempt to call any tools, functions, or APIs.**"
     
     try:
         if use_function_calling and tools:
@@ -303,15 +308,31 @@ Your role is to assist members with:
                         pass
                     tool_calls.append({"tool": "get_policy_answer", "result": {"error": str(e)}})
             
-            # Call LLM with context
-            response = client.chat.completions.create(
-                model=settings.LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Context: {context}\n\nUser question: {query}"}
-                ],
-                temperature=0.7
-            )
+            # Call LLM with context (explicitly disable tool calling)
+            # Note: Some models may not support tool_choice parameter, so we catch errors
+            try:
+                response = client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": f"Context: {context}\n\nUser question: {query}"}
+                    ],
+                    temperature=0.7,
+                    tool_choice="none"  # Explicitly disable tool calling
+                )
+            except Exception as tool_error:
+                # If tool_choice parameter causes issues, retry without it
+                if "tool" in str(tool_error).lower() or "400" in str(tool_error):
+                    response = client.chat.completions.create(
+                        model=settings.LLM_MODEL,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Context: {context}\n\nUser question: {query}"}
+                        ],
+                        temperature=0.7
+                    )
+                else:
+                    raise
             
             ai_response = response.choices[0].message.content
         
@@ -358,8 +379,18 @@ Your role is to assist members with:
         except:
             pass  # Ignore rollback errors
         
+        # Check if error is related to tool calling and provide a clearer message
+        error_message = str(e)
+        if "tool" in error_message.lower() and ("400" in error_message or "invalid_request" in error_message.lower()):
+            # Model tried to use tools when they're disabled
+            return {
+                "response": "I apologize, but I encountered an issue while processing your request. Please try rephrasing your question, and I'll answer based on the information available.",
+                "citations": None,
+                "tool_calls": tool_calls
+            }
+        
         return {
-            "response": f"Error processing query: {str(e)}",
+            "response": f"Error processing query: {error_message}",
             "citations": None,
             "tool_calls": tool_calls
         }
