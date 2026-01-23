@@ -32,8 +32,13 @@ interface Declaration {
 }
 
 export default function DeclarationsPage() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const router = useRouter();
+
+  const handleLogout = () => {
+    logout();
+    router.push('/login');
+  };
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [selectedCycle, setSelectedCycle] = useState<string>('');
   const [effectiveMonth, setEffectiveMonth] = useState<string>('');
@@ -284,6 +289,17 @@ export default function DeclarationsPage() {
                   <h1 className="text-lg md:text-2xl font-bold text-blue-900">
                     {isEditing ? 'Edit Declaration' : 'Make Declaration'}
                   </h1>
+                </div>
+                <div className="flex items-center space-x-3 md:space-x-4">
+                  <span className="text-sm md:text-base text-blue-700 font-medium">
+                    {user?.first_name} {user?.last_name}
+                  </span>
+                  <button
+                    onClick={handleLogout}
+                    className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
+                  >
+                    Logout
+                  </button>
                 </div>
               </div>
             </div>

@@ -5,6 +5,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/lib/api';
 import { memberApi } from '@/lib/memberApi';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 
 interface AccountStatus {
   member_id: string;
@@ -30,6 +31,12 @@ interface Cycle {
 
 export default function MemberDashboard() {
   const { user, logout } = useAuth();
+  const router = useRouter();
+
+  const handleLogout = () => {
+    logout();
+    router.push('/login');
+  };
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [cycles, setCycles] = useState<Cycle[]>([]);
@@ -92,6 +99,17 @@ export default function MemberDashboard() {
                 ← Back
               </Link>
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">Member Dashboard</h1>
+            </div>
+            <div className="flex items-center space-x-3 md:space-x-4">
+              <span className="text-sm md:text-base text-blue-700 font-medium">
+                {user?.first_name} {user?.last_name}
+              </span>
+              <button
+                onClick={handleLogout}
+                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
+              >
+                Logout
+              </button>
             </div>
           </div>
         </div>

@@ -21,8 +21,13 @@ interface Declaration {
 }
 
 export default function UploadDepositProofPage() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const router = useRouter();
+
+  const handleLogout = () => {
+    logout();
+    router.push('/login');
+  };
   const [declarations, setDeclarations] = useState<Declaration[]>([]);
   const [selectedDeclaration, setSelectedDeclaration] = useState<string>('');
   const [amount, setAmount] = useState<string>('');
@@ -153,6 +158,17 @@ export default function UploadDepositProofPage() {
                 ← Back
               </Link>
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">Upload Deposit Proof</h1>
+            </div>
+            <div className="flex items-center space-x-3 md:space-x-4">
+              <span className="text-sm md:text-base text-blue-700 font-medium">
+                {user?.first_name} {user?.last_name}
+              </span>
+              <button
+                onClick={handleLogout}
+                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
+              >
+                Logout
+              </button>
             </div>
           </div>
         </div>

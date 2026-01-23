@@ -1,17 +1,11 @@
-"""AI chat service - LLM integration."""
+"""AI chat service - LLM integration with function calling."""
 from sqlalchemy.orm import Session
 from uuid import UUID
-from typing import Dict, List
+from typing import Dict, List, Optional
 from groq import Groq
+import json
 from app.core.config import settings
-from app.ai.tools import (
-    get_my_account_summary,
-    get_my_loans,
-    get_my_penalties,
-    get_my_declarations,
-    explain_interest_rate,
-    get_policy_answer
-)
+from app.ai.tool_registry import get_tool_schemas, execute_tool
 from app.models.ai import AIAuditLog
 
 
@@ -19,96 +13,338 @@ def process_ai_query(
     db: Session,
     user_id: UUID,
     member_id: UUID,
-    query: str
+    query: str,
+    user_first_name: Optional[str] = None
 ) -> Dict:
     """
-    Process AI query with RAG and tool calls.
+    Process AI query with function calling - LLM dynamically selects which tools to use.
     Enforces constraints: rules/policies only + member's own account status.
     """
-    # Classify query type
-    query_lower = query.lower()
-    is_account_query = any(keyword in query_lower for keyword in [
-        "my", "account", "balance", "loan", "savings", "penalty", "declaration", "status"
-    ])
-    is_policy_query = any(keyword in query_lower for keyword in [
-        "rule", "policy", "constitution", "interest", "rate", "collateral", "how", "what", "explain"
-    ])
-    
-    if not (is_account_query or is_policy_query):
-        return {
-            "response": "I can only answer questions about village banking rules/policies or your own account status. Please rephrase your question.",
-            "citations": None,
-            "tool_calls": None
-        }
-    
-    tool_calls = []
-    context = ""
-    citations = []
-    
-    # Handle account status queries
-    if is_account_query:
-        if "loan" in query_lower:
-            loans = get_my_loans(db, user_id)
-            tool_calls.append({"tool": "get_my_loans", "result": loans})
-            context += f"Member's loans: {loans}\n"
-        
-        if "penalty" in query_lower:
-            penalties = get_my_penalties(db, user_id)
-            tool_calls.append({"tool": "get_my_penalties", "result": penalties})
-            context += f"Member's penalties: {penalties}\n"
-        
-        if "declaration" in query_lower:
-            declarations = get_my_declarations(db, user_id)
-            tool_calls.append({"tool": "get_my_declarations", "result": declarations})
-            context += f"Member's declarations: {declarations}\n"
-        
-        # Always get account summary for account queries
-        summary = get_my_account_summary(db, user_id)
-        tool_calls.append({"tool": "get_my_account_summary", "result": summary})
-        context += f"Account summary: {summary}\n"
-    
-    # Handle policy/rules queries
-    if is_policy_query:
-        policy_result = get_policy_answer(db, query)
-        context += f"Policy context: {policy_result.get('context', '')}\n"
-        citations = policy_result.get("citations", [])
-        tool_calls.append({"tool": "get_policy_answer", "result": policy_result})
-    
-    # Call LLM with context
     client = Groq(api_key=settings.GROQ_API_KEY)
+    tool_calls = []
+    citations = []
+    max_iterations = 3  # Prevent infinite loops
+    iteration = 0
     
-    system_prompt = """You are a helpful assistant for a Village Banking system. 
-    You can only answer questions about:
-    1. Village banking rules, policies, and constitution
-    2. The member's own account status (savings, loans, penalties, declarations)
+    # Get available tools
+    tools = get_tool_schemas()
     
-    You cannot access other members' information or answer unrelated questions.
-    Always cite sources when answering policy questions."""
+    # Personalized system prompt
+    first_name_part = f" (the member's first name is {user_first_name})" if user_first_name else ""
+    system_prompt = f"""You are the Luboss VB Finance Assistant, a helpful and knowledgeable assistant for the Luboss Village Banking system{first_name_part}.
+
+Your role is to assist members with:
+
+1. **App Usage and Navigation**: Help members understand how to use the app, navigate features, make declarations, apply for loans, upload documents, and access their information.
+
+2. **Constitution and Policy Interpretation**: 
+   - Answer questions about the uploaded constitution document
+   - Provide clarity and interpretation on constitutional clauses, rules, and policies
+   - Help members understand what they may be in doubt about regarding the constitution
+   - Cite specific sections, pages, and versions when referencing the constitution
+
+3. **Account and Transaction Information**:
+   - Provide information about the member's own account (savings balance, loan balance, etc.)
+   - Explain transactions, declarations, loans, penalties, and deposits
+   - Help members understand their financial status and history
+   - Only access the current member's own account information - never access other members' data
+
+4. **Credit Rating Information**:
+   - Provide information about the member's credit rating and tier
+   - Explain borrowing limits and maximum loan amounts based on credit rating
+   - Show available interest rates for different loan terms based on credit rating
+   - Help members understand how their credit rating affects loan eligibility
+
+5. **General Village Banking Information**:
+   - Explain village banking rules, policies, and procedures
+   - Help with interest rate calculations and loan terms
+   - Provide guidance on compliance and requirements
+
+**Important Guidelines**:
+- Always be friendly, professional, and helpful
+- When answering questions about the constitution or policies, always cite your sources (document name, version, page number)
+- For account queries, provide clear and accurate information based on the member's actual data
+- For credit rating queries, explain the tier name, borrowing limits, and available loan terms clearly
+- If you don't have enough information, use the available tools to get it
+- Never access or discuss other members' accounts or information
+- If a question is outside your scope, politely redirect to relevant topics you can help with
+
+**Currency and Formatting**:
+- ALWAYS use K (Kwacha) as the currency symbol, NOT ₦ or any other currency
+- Format all monetary amounts as: K1,234.56 (with comma thousands separator and two decimal places)
+- Format responses using Markdown for web display:
+  - Use **bold** for important numbers and labels
+  - Use bullet points (-) or numbered lists for structured information
+  - Use line breaks (double newline) to separate sections
+  - Format account summaries clearly with proper spacing
+  - Example format for account balance:
+    ```
+    Your current account summary:
+    
+    - **Savings balance:** **K2,000.00**
+    - **Outstanding loan balance:** **K5,000.00**
+    ```
+- Keep responses concise but informative
+- Use proper spacing and formatting for readability on web
+
+**Tool Usage**:
+- Use the available tools to get information when needed
+- Call tools based on what the user is asking about
+- You can call multiple tools if needed to answer a question completely"""
     
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Context: {context}\n\nUser question: {query}"}
+        {"role": "user", "content": query}
     ]
     
+    # Check if model supports function calling
+    # Groq's tool-use models: llama-3-groq-70b-tool-use supports it
+    # llama-3.1-70b-versatile does NOT support function calling
+    # For now, use keyword-based approach (can enable function calling when using tool-use model)
+    use_function_calling = False
+    # Uncomment below to enable function calling when using a tool-use model:
+    # if "tool-use" in settings.LLM_MODEL.lower():
+    #     use_function_calling = True
+    
     try:
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=messages,
-            temperature=0.7
-        )
+        if use_function_calling and tools:
+            # Try function calling approach
+            # Iterative function calling - LLM can call tools and we respond with results
+            while iteration < max_iterations:
+                iteration += 1
+                
+                # Call LLM with tools
+                api_params = {
+                    "model": settings.LLM_MODEL,
+                    "messages": messages,
+                    "temperature": 0.7
+                }
+                
+                # Add tools only on first iteration
+                if iteration == 1 and tools:
+                    api_params["tools"] = tools
+                    api_params["tool_choice"] = "auto"
+                
+                try:
+                    response = client.chat.completions.create(**api_params)
+                except Exception as api_error:
+                    # If function calling fails, fall back to keyword-based
+                    if "tool" in str(api_error).lower() or "400" in str(api_error):
+                        use_function_calling = False
+                        break
+                    raise
+                
+                message = response.choices[0].message
+                messages.append({
+                    "role": message.role,
+                    "content": message.content
+                })
+                
+                # Check if LLM wants to call a tool
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    # Execute tool calls
+                    for tool_call in message.tool_calls:
+                        tool_name = tool_call.function.name
+                        try:
+                            arguments = json.loads(tool_call.function.arguments) if tool_call.function.arguments else {}
+                        except:
+                            arguments = {}
+                        
+                        # Execute the tool
+                        try:
+                            result = execute_tool(tool_name, arguments, db, user_id)
+                            tool_calls.append({
+                                "tool": tool_name,
+                                "arguments": arguments,
+                                "result": result
+                            })
+                            
+                            # Handle special cases
+                            if tool_name == "get_policy_answer" and isinstance(result, dict):
+                                citations = result.get("citations", [])
+                            
+                            # Add tool result to conversation
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(result)
+                            })
+                        except Exception as e:
+                            # Rollback on error
+                            try:
+                                db.rollback()
+                            except:
+                                pass
+                            error_result = {"error": str(e)}
+                            tool_calls.append({
+                                "tool": tool_name,
+                                "arguments": arguments,
+                                "result": error_result
+                            })
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": json.dumps(error_result)
+                            })
+                else:
+                    # LLM has finished - return the response
+                    ai_response = message.content
+                    break
+            else:
+                # Max iterations reached
+                if messages and messages[-1].get("content"):
+                    ai_response = messages[-1]["content"]
+                else:
+                    ai_response = "I apologize, but I'm having trouble processing your request. Please try rephrasing your question."
         
-        ai_response = response.choices[0].message.content
+        # Fallback to keyword-based approach if function calling not supported or failed
+        if not use_function_calling or 'ai_response' not in locals():
+            # Use the old keyword-based approach as fallback
+            from app.ai.tools import (
+                get_my_account_summary,
+                get_my_loans,
+                get_my_penalties,
+                get_my_declarations,
+                get_my_credit_rating,
+                get_policy_answer
+            )
+            
+            query_lower = query.lower()
+            is_account_query = any(keyword in query_lower for keyword in [
+                "my", "account", "balance", "loan", "savings", "penalty", "declaration", "status",
+                "transaction", "deposit", "withdrawal", "repayment", "interest", "fund"
+            ])
+            is_credit_rating_query = any(keyword in query_lower for keyword in [
+                "credit rating", "credit", "rating", "tier", "credit tier", "borrowing limit", "max loan"
+            ])
+            is_policy_query = any(keyword in query_lower for keyword in [
+                "rule", "policy", "constitution", "interest", "rate", "collateral", "how", "what", "explain",
+                "app", "use", "help", "documentation", "guide", "interpret", "clarify", "meaning"
+            ])
+            
+            if not (is_account_query or is_credit_rating_query or is_policy_query):
+                is_policy_query = True
+            
+            context = ""
+            
+            # Handle account status queries
+            if is_account_query:
+                try:
+                    if "loan" in query_lower:
+                        loans = get_my_loans(db, user_id)
+                        tool_calls.append({"tool": "get_my_loans", "result": loans})
+                        context += f"Member's loans: {loans}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_my_loans", "result": {"error": str(e)}})
+                
+                try:
+                    if "penalty" in query_lower:
+                        penalties = get_my_penalties(db, user_id)
+                        tool_calls.append({"tool": "get_my_penalties", "result": penalties})
+                        context += f"Member's penalties: {penalties}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_my_penalties", "result": {"error": str(e)}})
+                
+                try:
+                    if "declaration" in query_lower:
+                        declarations = get_my_declarations(db, user_id)
+                        tool_calls.append({"tool": "get_my_declarations", "result": declarations})
+                        context += f"Member's declarations: {declarations}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_my_declarations", "result": {"error": str(e)}})
+                
+                try:
+                    summary = get_my_account_summary(db, user_id)
+                    tool_calls.append({"tool": "get_my_account_summary", "result": summary})
+                    context += f"Account summary: {summary}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_my_account_summary", "result": {"error": str(e)}})
+            
+            # Handle credit rating queries
+            if is_credit_rating_query:
+                try:
+                    credit_rating = get_my_credit_rating(db, user_id)
+                    tool_calls.append({"tool": "get_my_credit_rating", "result": credit_rating})
+                    context += f"Member's credit rating: {credit_rating}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_my_credit_rating", "result": {"error": str(e)}})
+            
+            # Handle policy queries
+            if is_policy_query:
+                try:
+                    policy_result = get_policy_answer(db, query)
+                    context += f"Policy context: {policy_result.get('context', '')}\n"
+                    citations = policy_result.get("citations", [])
+                    tool_calls.append({"tool": "get_policy_answer", "result": policy_result})
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_policy_answer", "result": {"error": str(e)}})
+            
+            # Call LLM with context
+            response = client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Context: {context}\n\nUser question: {query}"}
+                ],
+                temperature=0.7
+            )
+            
+            ai_response = response.choices[0].message.content
         
-        # Log to audit
-        audit_log = AIAuditLog(
-            user_id=user_id,
-            query_text=query,
-            tool_calls=tool_calls,
-            response=ai_response,
-            citations=citations
-        )
-        db.add(audit_log)
-        db.commit()
+        # Ensure we have a response
+        if 'ai_response' not in locals() or not ai_response:
+            ai_response = "I apologize, but I couldn't generate a response. Please try again."
+        
+        # Log to audit in a separate try-except to avoid failing the whole request
+        # Rollback any previous transaction state to ensure clean state for audit log
+        try:
+            # Rollback to clear any failed transaction state from tool calls
+            # (Tool calls are read-only, so this won't lose any data)
+            db.rollback()
+            
+            # Now save audit log in a fresh transaction
+            audit_log = AIAuditLog(
+                user_id=user_id,
+                query_text=query,
+                tool_calls=tool_calls,
+                response=ai_response,
+                citations=citations
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as audit_error:
+            # If audit log fails, rollback and continue without failing the request
+            try:
+                db.rollback()
+            except:
+                pass
+            # Log the error but don't fail the request
+            import logging
+            logging.error(f"Failed to save AI audit log: {str(audit_error)}")
         
         return {
             "response": ai_response,
@@ -116,6 +352,12 @@ def process_ai_query(
             "tool_calls": tool_calls
         }
     except Exception as e:
+        # Rollback any failed transaction
+        try:
+            db.rollback()
+        except:
+            pass  # Ignore rollback errors
+        
         return {
             "response": f"Error processing query: {str(e)}",
             "citations": None,

@@ -9,8 +9,13 @@ import { useRouter } from 'next/navigation';
 import { FaInfoCircle, FaCheckCircle, FaTimesCircle, FaComment, FaChevronDown, FaChevronUp } from 'react-icons/fa';
 
 export default function DepositProofsListPage() {
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
   const router = useRouter();
+
+  const handleLogout = () => {
+    logout();
+    router.push('/login');
+  };
   const [deposits, setDeposits] = useState<DepositProof[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -174,12 +179,23 @@ export default function DepositProofsListPage() {
               </Link>
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">My Deposit Proofs</h1>
             </div>
-            <Link
-              href="/dashboard/member/deposits"
-              className="btn-primary flex items-center gap-2"
-            >
-              Upload New Proof
-            </Link>
+            <div className="flex items-center space-x-3 md:space-x-4">
+              <Link
+                href="/dashboard/member/deposits"
+                className="btn-primary flex items-center gap-2"
+              >
+                Upload New Proof
+              </Link>
+              <span className="text-sm md:text-base text-blue-700 font-medium">
+                {user?.first_name} {user?.last_name}
+              </span>
+              <button
+                onClick={handleLogout}
+                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
+              >
+                Logout
+              </button>
+            </div>
           </div>
         </div>
       </nav>
