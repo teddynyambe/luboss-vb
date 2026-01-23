@@ -242,3 +242,75 @@ def get_policy_answer(
         "context": context,
         "citations": citations
     }
+
+
+def get_member_info(
+    db: Session,
+    search_term: str = None,
+    status: str = None
+) -> Dict:
+    """
+    Get member information (non-financial) by name, email, or status.
+    Returns member details excluding savings, loans, penalties, and other financial information.
+    Use this when users ask about other members, member lists, member status, or member contact information.
+    """
+    from app.models.member import MemberProfile, MemberStatus
+    from app.models.user import User
+    
+    # Build query
+    query = db.query(MemberProfile).join(User, MemberProfile.user_id == User.id)
+    
+    # Apply filters
+    if search_term:
+        search_lower = search_term.lower()
+        # Search by name or email
+        from sqlalchemy import or_, func
+        query = query.filter(
+            or_(
+                User.first_name.ilike(f"%{search_term}%"),
+                User.last_name.ilike(f"%{search_term}%"),
+                User.email.ilike(f"%{search_term}%"),
+                func.concat(User.first_name, " ", User.last_name).ilike(f"%{search_term}%")
+            )
+        )
+    
+    if status:
+        try:
+            status_enum = MemberStatus(status.lower())
+            query = query.filter(MemberProfile.status == status_enum)
+        except ValueError:
+            # Invalid status, ignore filter
+            pass
+    
+    # Get results
+    members = query.all()
+    
+    if not members:
+        return {
+            "members": [],
+            "count": 0,
+            "message": f"No members found matching the search criteria."
+        }
+    
+    # Format results (exclude financial data)
+    member_list = []
+    for member in members:
+        user = member.user
+        member_info = {
+            "member_id": str(member.id),
+            "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "phone_number": user.phone_number,
+            "status": member.status.value,
+            "date_joined": user.date_joined.isoformat() if user.date_joined else None,
+            "activated_at": member.activated_at.isoformat() if member.activated_at else None,
+        }
+        member_list.append(member_info)
+    
+    return {
+        "members": member_list,
+        "count": len(member_list),
+        "message": f"Found {len(member_list)} member(s)."
+    }

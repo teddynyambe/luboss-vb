@@ -4,6 +4,7 @@ from uuid import UUID
 from typing import Dict, List, Optional
 from groq import Groq
 import json
+import re
 from app.core.config import settings
 from app.ai.tool_registry import get_tool_schemas, execute_tool
 from app.models.ai import AIAuditLog
@@ -55,7 +56,15 @@ Your role is to assist members with:
    - Show available interest rates for different loan terms based on credit rating
    - Help members understand how their credit rating affects loan eligibility
 
-5. **General Village Banking Information**:
+5. **Member Information** (Non-Financial):
+   - Help members find information about other members (name, email, phone, status)
+   - Answer questions like "Who is [name]?", "What is [name]'s email?", "Is [name] an active member?"
+   - List members by status (active, pending, suspended)
+   - Show member contact information and join dates
+   - **IMPORTANT**: Do NOT provide financial information about other members (savings, loans, penalties, credit ratings)
+   - Only provide basic member profile information: name, email, phone, status, and dates
+
+6. **General Village Banking Information**:
    - Explain village banking rules, policies, and procedures
    - Help with interest rate calculations and loan terms
    - Provide guidance on compliance and requirements
@@ -65,8 +74,10 @@ Your role is to assist members with:
 - When answering questions about the constitution or policies, always cite your sources (document name, version, page number)
 - For account queries, provide clear and accurate information based on the member's actual data
 - For credit rating queries, explain the tier name, borrowing limits, and available loan terms clearly
+- For member information queries, you can provide basic member details (name, email, phone, status, join date) but NEVER provide financial information about other members
 - If you don't have enough information, use the available tools to get it
-- Never access or discuss other members' accounts or information
+- Never access or discuss other members' financial accounts, savings, loans, penalties, or credit ratings
+- You can help members find contact information and basic profile details of other members
 - If a question is outside your scope, politely redirect to relevant topics you can help with
 
 **Currency and Formatting**:
@@ -211,7 +222,8 @@ Your role is to assist members with:
                 get_my_penalties,
                 get_my_declarations,
                 get_my_credit_rating,
-                get_policy_answer
+                get_policy_answer,
+                get_member_info
             )
             
             query_lower = query.lower()
@@ -226,8 +238,13 @@ Your role is to assist members with:
                 "rule", "policy", "constitution", "interest", "rate", "collateral", "how", "what", "explain",
                 "app", "use", "help", "documentation", "guide", "interpret", "clarify", "meaning"
             ])
+            is_member_info_query = any(keyword in query_lower for keyword in [
+                "member", "who is", "find member", "member list", "active member", "pending member",
+                "suspended member", "member email", "member contact", "member phone", "member status",
+                "list members", "show members", "all members", "members"
+            ])
             
-            if not (is_account_query or is_credit_rating_query or is_policy_query):
+            if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query):
                 is_policy_query = True
             
             context = ""
@@ -293,6 +310,52 @@ Your role is to assist members with:
                     except:
                         pass
                     tool_calls.append({"tool": "get_my_credit_rating", "result": {"error": str(e)}})
+            
+            # Handle member information queries (non-financial)
+            if is_member_info_query:
+                try:
+                    # Extract search term and status from query
+                    search_term = None
+                    status_filter = None
+                    
+                    # Try to extract member name or email from query
+                    # Look for patterns like "who is [name]", "find [name]", "[name]'s email"
+                    name_patterns = [
+                        r"who is (.+?)(?:\?|$)",
+                        r"find (.+?)(?:\?|$)",
+                        r"(.+?)'s (?:email|phone|contact|status)",
+                        r"member (.+?)(?:\?|$)",
+                        r"(.+?) member",
+                        r"email of (.+?)(?:\?|$)",
+                        r"phone of (.+?)(?:\?|$)",
+                        r"contact (.+?)(?:\?|$)"
+                    ]
+                    for pattern in name_patterns:
+                        match = re.search(pattern, query_lower, re.IGNORECASE)
+                        if match:
+                            potential_name = match.group(1).strip()
+                            # Filter out common words
+                            if potential_name and potential_name not in ["the", "a", "an", "all", "active", "pending", "suspended", "list", "show"]:
+                                search_term = potential_name
+                                break
+                    
+                    # Check for status filters
+                    if "active member" in query_lower or "active members" in query_lower:
+                        status_filter = "active"
+                    elif "pending member" in query_lower or "pending members" in query_lower:
+                        status_filter = "pending"
+                    elif "suspended member" in query_lower or "suspended members" in query_lower:
+                        status_filter = "suspended"
+                    
+                    member_info = get_member_info(db, search_term=search_term, status=status_filter)
+                    tool_calls.append({"tool": "get_member_info", "result": member_info})
+                    context += f"Member information: {member_info}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_member_info", "result": {"error": str(e)}})
             
             # Handle policy queries
             if is_policy_query:

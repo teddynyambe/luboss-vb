@@ -88,7 +88,8 @@ def initialize_tools():
         get_my_penalties,
         get_my_declarations,
         get_my_credit_rating,
-        get_policy_answer
+        get_policy_answer,
+        get_member_info
     )
     
     register_tool(
@@ -160,6 +161,27 @@ def initialize_tools():
             "required": ["query"]
         },
         function=get_policy_answer
+    )
+    
+    register_tool(
+        name="get_member_info",
+        description="Get information about other members (non-financial). Use this when users ask about other members, member lists, member status, member contact information, who is a member, or to find members by name or email. Returns member name, email, phone, status, and join date. Does NOT return savings, loans, penalties, or any financial information.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "search_term": {
+                    "type": "string",
+                    "description": "Optional search term to find members by name or email. Leave empty to get all members."
+                },
+                "status": {
+                    "type": "string",
+                    "description": "Optional filter by member status: 'pending', 'active', or 'suspended'. Leave empty to get all statuses.",
+                    "enum": ["pending", "active", "suspended"]
+                }
+            },
+            "required": []
+        },
+        function=get_member_info
     )
 
 
