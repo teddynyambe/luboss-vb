@@ -1,4 +1,4 @@
-# Village Banking v2 (LUBOSS 95)
+# Luboss95 Village Banking v2 (LUBOSS 95)
 
 A comprehensive FastAPI-based Village Banking system with PostgreSQL, double-entry accounting, RBAC, and AI-powered chat assistance.
 

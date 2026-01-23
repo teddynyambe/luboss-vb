@@ -2,7 +2,7 @@
 
 ## Server is Running! 🎉
 
-Your Village Banking v2 API is now running at:
+Your Luboss95 Village Banking v2 API is now running at:
 - **API**: http://localhost:8002
 - **Interactive Docs**: http://localhost:8002/docs
 - **Health Check**: http://localhost:8002/health

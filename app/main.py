@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, admin, chairman, treasurer, compliance, member, ai
 
 app = FastAPI(
-    title="Village Banking v2 API",
+    title="Luboss95 Village Banking v2 API",
     description="LUBOSS 95 Village Banking System",
     version="2.0.0"
 )
@@ -31,7 +31,7 @@ app.include_router(ai.router)
 @app.get("/")
 def root():
     """Root endpoint."""
-    return {"message": "Village Banking v2 API", "version": "2.0.0"}
+    return {"message": "Luboss95 Village Banking v2 API", "version": "2.0.0"}
 
 
 @app.get("/health")

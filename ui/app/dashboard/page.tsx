@@ -38,7 +38,7 @@ export default function DashboardPage() {
           <div className="flex justify-between items-center h-16 md:h-20">
             <div className="flex items-center">
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">
-                Village Banking v2
+                Luboss95 Village Banking v2
               </h1>
             </div>
             <div className="flex items-center space-x-3 md:space-x-4">

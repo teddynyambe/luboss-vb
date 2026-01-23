@@ -32,7 +32,7 @@ export default function LoginPage() {
       <div className="max-w-md w-full space-y-6 md:space-y-8">
         <div>
           <h2 className="mt-6 text-center text-3xl md:text-4xl font-extrabold text-blue-900">
-            Village Banking v2
+            Luboss95 Village Banking v2
           </h2>
           <p className="mt-2 text-center text-base md:text-lg text-blue-700 font-medium">
             Sign in to your account

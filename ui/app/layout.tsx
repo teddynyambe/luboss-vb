@@ -6,7 +6,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Village Banking v2 - LUBOSS 95",
+  title: "Luboss95 Village Banking v2 - LUBOSS 95",
   description: "Village Banking System",
 };
 

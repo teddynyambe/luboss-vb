@@ -1,4 +1,4 @@
-# Village Banking v2 - Frontend
+# Luboss95 Village Banking v2 - Frontend
 
 Next.js frontend for the Village Banking system.
 
