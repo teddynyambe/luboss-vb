@@ -13,6 +13,13 @@ interface RegisterData {
   last_name: string;
   phone_number: string;
   nrc_number: string;
+  physical_address: string;
+  bank_account: string;
+  bank_name: string;
+  bank_branch: string;
+  first_name_next_of_kin: string;
+  last_name_next_of_kin: string;
+  phone_number_next_of_kin: string;
 }
 
 export default function RegisterPage() {
@@ -25,13 +32,20 @@ export default function RegisterPage() {
     last_name: '',
     phone_number: '',
     nrc_number: '',
+    physical_address: '',
+    bank_account: '',
+    bank_name: '',
+    bank_branch: '',
+    first_name_next_of_kin: '',
+    last_name_next_of_kin: '',
+    phone_number_next_of_kin: '',
   });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { register } = useAuth();
   const router = useRouter();
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
@@ -82,7 +96,7 @@ export default function RegisterPage() {
             Register for Village Banking
           </h2>
           <p className="mt-2 text-center text-base md:text-lg text-blue-700 font-medium">
-            Step {step} of 2
+            Step {step} of 3
           </p>
         </div>
 
@@ -92,7 +106,7 @@ export default function RegisterPage() {
           </div>
         )}
 
-        <form onSubmit={step === 2 ? handleSubmit : (e) => { e.preventDefault(); handleNext(); }}>
+        <form onSubmit={step === 3 ? handleSubmit : (e) => { e.preventDefault(); handleNext(); }}>
           {step === 1 && (
             <div className="space-y-4 md:space-y-6">
               <div>
@@ -209,10 +223,139 @@ export default function RegisterPage() {
                   onChange={handleChange}
                 />
               </div>
+              <div>
+                <label htmlFor="physical_address" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                  Physical Address
+                </label>
+                <textarea
+                  id="physical_address"
+                  name="physical_address"
+                  className="w-full min-h-[100px]"
+                  placeholder="Enter your physical address"
+                  value={formData.physical_address}
+                  onChange={handleChange}
+                />
+              </div>
               <div className="flex flex-col sm:flex-row gap-3 md:gap-4">
                 <button
                   type="button"
                   onClick={() => setStep(1)}
+                  className="btn-secondary flex-1"
+                >
+                  Back
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary flex-1"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="space-y-4 md:space-y-6">
+              <div className="border-b-2 border-blue-200 pb-4">
+                <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-4">Bank Details</h3>
+                <div className="space-y-4 md:space-y-6">
+                  <div>
+                    <label htmlFor="bank_account" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Bank Account
+                    </label>
+                    <input
+                      id="bank_account"
+                      name="bank_account"
+                      type="text"
+                      className="w-full"
+                      placeholder="Enter your bank account number"
+                      value={formData.bank_account}
+                      onChange={handleChange}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="bank_name" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Bank Name
+                    </label>
+                    <input
+                      id="bank_name"
+                      name="bank_name"
+                      type="text"
+                      className="w-full"
+                      placeholder="Enter your bank name"
+                      value={formData.bank_name}
+                      onChange={handleChange}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="bank_branch" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Bank Branch
+                    </label>
+                    <input
+                      id="bank_branch"
+                      name="bank_branch"
+                      type="text"
+                      className="w-full"
+                      placeholder="Enter your bank branch"
+                      value={formData.bank_branch}
+                      onChange={handleChange}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-b-2 border-blue-200 pb-4">
+                <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-4">Next of Kin Information</h3>
+                <div className="space-y-4 md:space-y-6">
+                  <div>
+                    <label htmlFor="first_name_next_of_kin" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Next of Kin First Name
+                    </label>
+                    <input
+                      id="first_name_next_of_kin"
+                      name="first_name_next_of_kin"
+                      type="text"
+                      className="w-full"
+                      placeholder="Enter next of kin first name"
+                      value={formData.first_name_next_of_kin}
+                      onChange={handleChange}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="last_name_next_of_kin" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Next of Kin Last Name
+                    </label>
+                    <input
+                      id="last_name_next_of_kin"
+                      name="last_name_next_of_kin"
+                      type="text"
+                      className="w-full"
+                      placeholder="Enter next of kin last name"
+                      value={formData.last_name_next_of_kin}
+                      onChange={handleChange}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="phone_number_next_of_kin" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Next of Kin Phone Number
+                    </label>
+                    <input
+                      id="phone_number_next_of_kin"
+                      name="phone_number_next_of_kin"
+                      type="tel"
+                      className="w-full"
+                      placeholder="Enter next of kin phone number"
+                      value={formData.phone_number_next_of_kin}
+                      onChange={handleChange}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-3 md:gap-4">
+                <button
+                  type="button"
+                  onClick={() => setStep(2)}
                   className="btn-secondary flex-1"
                 >
                   Back

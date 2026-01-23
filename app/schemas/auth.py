@@ -9,6 +9,13 @@ class UserRegister(BaseModel):
     last_name: Optional[str] = None
     phone_number: Optional[str] = None
     nrc_number: Optional[str] = None
+    physical_address: Optional[str] = None
+    bank_account: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_branch: Optional[str] = None
+    first_name_next_of_kin: Optional[str] = None
+    last_name_next_of_kin: Optional[str] = None
+    phone_number_next_of_kin: Optional[str] = None
 
 
 class UserLogin(BaseModel):

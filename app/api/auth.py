@@ -21,7 +21,14 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
             first_name=user_data.first_name,
             last_name=user_data.last_name,
             phone_number=user_data.phone_number,
-            nrc_number=user_data.nrc_number
+            nrc_number=user_data.nrc_number,
+            physical_address=user_data.physical_address,
+            bank_account=user_data.bank_account,
+            bank_name=user_data.bank_name,
+            bank_branch=user_data.bank_branch,
+            first_name_next_of_kin=user_data.first_name_next_of_kin,
+            last_name_next_of_kin=user_data.last_name_next_of_kin,
+            phone_number_next_of_kin=user_data.phone_number_next_of_kin
         )
         return UserResponse(
             id=str(user.id),
