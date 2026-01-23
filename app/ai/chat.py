@@ -239,9 +239,11 @@ Your role is to assist members with:
                 "app", "use", "help", "documentation", "guide", "interpret", "clarify", "meaning"
             ])
             is_member_info_query = any(keyword in query_lower for keyword in [
-                "member", "who is", "find member", "member list", "active member", "pending member",
+                "member", "who is", "who are", "find member", "member list", "active member", "pending member",
                 "suspended member", "member email", "member contact", "member phone", "member status",
-                "list members", "show members", "all members", "members"
+                "list members", "show members", "all members", "members", "who are the members",
+                "members of the group", "group members", "village banking members", "luboss members",
+                "who are all", "show all", "list all", "everyone", "people in", "who belongs"
             ])
             
             if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query):
@@ -318,35 +320,42 @@ Your role is to assist members with:
                     search_term = None
                     status_filter = None
                     
-                    # Try to extract member name or email from query
-                    # Look for patterns like "who is [name]", "find [name]", "[name]'s email"
-                    name_patterns = [
-                        r"who is (.+?)(?:\?|$)",
-                        r"find (.+?)(?:\?|$)",
-                        r"(.+?)'s (?:email|phone|contact|status)",
-                        r"member (.+?)(?:\?|$)",
-                        r"(.+?) member",
-                        r"email of (.+?)(?:\?|$)",
-                        r"phone of (.+?)(?:\?|$)",
-                        r"contact (.+?)(?:\?|$)"
-                    ]
-                    for pattern in name_patterns:
-                        match = re.search(pattern, query_lower, re.IGNORECASE)
-                        if match:
-                            potential_name = match.group(1).strip()
-                            # Filter out common words
-                            if potential_name and potential_name not in ["the", "a", "an", "all", "active", "pending", "suspended", "list", "show"]:
-                                search_term = potential_name
-                                break
-                    
-                    # Check for status filters
-                    if "active member" in query_lower or "active members" in query_lower:
+                    # Check for status filters first (before name extraction)
+                    if "active member" in query_lower or "active members" in query_lower or "who are active" in query_lower:
                         status_filter = "active"
-                    elif "pending member" in query_lower or "pending members" in query_lower:
+                    elif "pending member" in query_lower or "pending members" in query_lower or "who are pending" in query_lower:
                         status_filter = "pending"
-                    elif "suspended member" in query_lower or "suspended members" in query_lower:
+                    elif "suspended member" in query_lower or "suspended members" in query_lower or "who are suspended" in query_lower:
                         status_filter = "suspended"
                     
+                    # Try to extract member name or email from query
+                    # Look for patterns like "who is [name]", "find [name]", "[name]'s email"
+                    # Only extract if it's not a general "list all" type query
+                    if not any(phrase in query_lower for phrase in [
+                        "who are the members", "members of the group", "all members", "list members",
+                        "show members", "everyone", "group members", "who are all"
+                    ]):
+                        name_patterns = [
+                            r"who is (.+?)(?:\?|$)",
+                            r"find (.+?)(?:\?|$)",
+                            r"(.+?)'s (?:email|phone|contact|status)",
+                            r"member (.+?)(?:\?|$)",
+                            r"(.+?) member",
+                            r"email of (.+?)(?:\?|$)",
+                            r"phone of (.+?)(?:\?|$)",
+                            r"contact (.+?)(?:\?|$)"
+                        ]
+                        for pattern in name_patterns:
+                            match = re.search(pattern, query_lower, re.IGNORECASE)
+                            if match:
+                                potential_name = match.group(1).strip()
+                                # Filter out common words
+                                if potential_name and potential_name not in ["the", "a", "an", "all", "active", "pending", "suspended", "list", "show", "group", "village", "banking", "luboss"]:
+                                    search_term = potential_name
+                                    break
+                    
+                    # If no specific search term and no status filter, get all members
+                    # (search_term=None and status=None will return all members)
                     member_info = get_member_info(db, search_term=search_term, status=status_filter)
                     tool_calls.append({"tool": "get_member_info", "result": member_info})
                     context += f"Member information: {member_info}\n"
