@@ -69,6 +69,10 @@ export default function RegisterPage() {
     if (step === 1 && validateStep1()) {
       setError('');
       setStep(2);
+    } else if (step === 2) {
+      // Step 2 has no required fields, so we can proceed directly
+      setError('');
+      setStep(3);
     }
   };
 
