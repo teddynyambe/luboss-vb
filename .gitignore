@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+app/venv/
+app/env/
+app/.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/.env.local
+ui/.env.development.local
+ui/.env.test.local
+ui/.env.production.local
+ui/npm-debug.log*
+ui/yarn-debug.log*
+ui/yarn-error.log*
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Uploads (keep structure, ignore files)
+uploads/constitution/*.pdf
+uploads/deposit_proofs/*.pdf
+uploads/**/*.pdf
+uploads/**/*.jpg
+uploads/**/*.jpeg
+uploads/**/*.png
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Alembic
+alembic/__pycache__/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp

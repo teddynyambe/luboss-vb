@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+:root {
+  --background: #f0f7ff;
+  --foreground: #1e3a5f;
+  --primary-blue: #3b82f6;
+  --light-blue: #60a5fa;
+  --lighter-blue: #93c5fd;
+  --lightest-blue: #dbeafe;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+/* Mobile-first button styles */
+.btn-primary {
+  @apply px-6 py-4 text-lg font-semibold text-white bg-blue-500 rounded-lg shadow-md active:bg-blue-600 active:shadow-inner transition-all duration-200 min-h-[48px] min-w-[120px];
+}
+
+.btn-secondary {
+  @apply px-6 py-4 text-lg font-semibold text-blue-600 bg-white border-2 border-blue-500 rounded-lg shadow-md active:bg-blue-50 active:shadow-inner transition-all duration-200 min-h-[48px] min-w-[120px];
+}
+
+/* Touch-friendly input fields */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="date"],
+input[type="month"],
+select,
+textarea {
+  @apply px-4 py-3 text-base border-2 border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-500 min-h-[48px];
+}
+
+/* Card styles */
+.card {
+  @apply bg-white rounded-xl shadow-lg p-6 border border-blue-100;
+}
+
+/* Animation for expand/collapse */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-in-out;
+}
