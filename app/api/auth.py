@@ -1,9 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.schemas.auth import UserRegister, UserLogin, Token, UserResponse
+from app.schemas.auth import UserRegister, UserLogin, Token, UserResponse, UserProfileUpdate, PasswordChange
 from app.services.auth import authenticate_user, create_user, create_access_token_for_user
 from app.core.dependencies import get_current_user
+from app.core.security import verify_password, get_password_hash
 from app.services.rbac import get_user_roles
 from app.models.user import User
 
@@ -75,5 +76,119 @@ def get_current_user_info(
         first_name=current_user.first_name,
         last_name=current_user.last_name,
         approved=current_user.approved,
-        roles=roles
+        roles=roles,
+        phone_number=current_user.phone_number,
+        nrc_number=current_user.nrc_number,
+        physical_address=current_user.physical_address,
+        bank_account=current_user.bank_account,
+        bank_name=current_user.bank_name,
+        bank_branch=current_user.bank_branch,
+        first_name_next_of_kin=current_user.first_name_next_of_kin,
+        last_name_next_of_kin=current_user.last_name_next_of_kin,
+        phone_number_next_of_kin=current_user.phone_number_next_of_kin
     )
+
+
+@router.put("/profile", response_model=UserResponse)
+def update_profile(
+    profile_data: UserProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's profile information."""
+    # Update only provided fields
+    if profile_data.first_name is not None:
+        current_user.first_name = profile_data.first_name
+    if profile_data.last_name is not None:
+        current_user.last_name = profile_data.last_name
+    if profile_data.phone_number is not None:
+        current_user.phone_number = profile_data.phone_number
+    if profile_data.nrc_number is not None:
+        # Check if NRC number is already taken by another user
+        existing_user = db.query(User).filter(
+            User.nrc_number == profile_data.nrc_number,
+            User.id != current_user.id
+        ).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="NRC number already registered to another user"
+            )
+        current_user.nrc_number = profile_data.nrc_number
+    if profile_data.physical_address is not None:
+        current_user.physical_address = profile_data.physical_address
+    if profile_data.bank_account is not None:
+        current_user.bank_account = profile_data.bank_account
+    if profile_data.bank_name is not None:
+        current_user.bank_name = profile_data.bank_name
+    if profile_data.bank_branch is not None:
+        current_user.bank_branch = profile_data.bank_branch
+    if profile_data.first_name_next_of_kin is not None:
+        current_user.first_name_next_of_kin = profile_data.first_name_next_of_kin
+    if profile_data.last_name_next_of_kin is not None:
+        current_user.last_name_next_of_kin = profile_data.last_name_next_of_kin
+    if profile_data.phone_number_next_of_kin is not None:
+        current_user.phone_number_next_of_kin = profile_data.phone_number_next_of_kin
+    
+    try:
+        db.commit()
+        db.refresh(current_user)
+        roles = get_user_roles(current_user, db)
+        return UserResponse(
+            id=str(current_user.id),
+            email=current_user.email,
+            first_name=current_user.first_name,
+            last_name=current_user.last_name,
+            approved=current_user.approved,
+            roles=roles,
+            phone_number=current_user.phone_number,
+            nrc_number=current_user.nrc_number,
+            physical_address=current_user.physical_address,
+            bank_account=current_user.bank_account,
+            bank_name=current_user.bank_name,
+            bank_branch=current_user.bank_branch,
+            first_name_next_of_kin=current_user.first_name_next_of_kin,
+            last_name_next_of_kin=current_user.last_name_next_of_kin,
+            phone_number_next_of_kin=current_user.phone_number_next_of_kin
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update profile: {str(e)}"
+        )
+
+
+@router.post("/change-password")
+def change_password(
+    password_data: PasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Change user's password."""
+    # Verify current password
+    if not verify_password(password_data.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+    
+    # Validate new password
+    if len(password_data.new_password) < 6:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be at least 6 characters long"
+        )
+    
+    # Update password
+    current_user.password_hash = get_password_hash(password_data.new_password)
+    
+    try:
+        db.commit()
+        return {"message": "Password changed successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to change password: {str(e)}"
+        )

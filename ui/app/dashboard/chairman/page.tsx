@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
+import UserMenu from '@/components/UserMenu';
 
 interface Member {
   id: string;
@@ -22,17 +23,12 @@ interface Member {
 type FilterStatus = 'pending' | 'active' | 'all';
 
 export default function ChairmanDashboard() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
   const [members, setMembers] = useState<Member[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('pending');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
-  };
 
   useEffect(() => {
     loadMembers();
@@ -96,17 +92,7 @@ export default function ChairmanDashboard() {
               </Link>
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">Chairman Dashboard</h1>
             </div>
-            <div className="flex items-center space-x-3 md:space-x-4">
-              <span className="text-sm md:text-base text-blue-700 font-medium">
-                {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
-              >
-                Logout
-              </button>
-            </div>
+            <UserMenu />
           </div>
         </div>
       </nav>

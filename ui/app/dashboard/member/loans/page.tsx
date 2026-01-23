@@ -6,6 +6,7 @@ import { memberApi, LoanApplicationCreate } from '@/lib/memberApi';
 import { api } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import UserMenu from '@/components/UserMenu';
 
 interface Cycle {
   id: string;
@@ -16,13 +17,8 @@ interface Cycle {
 }
 
 export default function LoanApplicationPage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
-
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
-  };
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [selectedCycle, setSelectedCycle] = useState<string>('');
   const [formData, setFormData] = useState<LoanApplicationCreate>({
@@ -261,17 +257,7 @@ export default function LoanApplicationPage() {
               </Link>
               <h1 className="text-lg md:text-2xl font-bold text-blue-900">Loan Management</h1>
             </div>
-            <div className="flex items-center space-x-3 md:space-x-4">
-              <span className="text-sm md:text-base text-blue-700 font-medium">
-                {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
-              >
-                Logout
-              </button>
-            </div>
+            <UserMenu />
           </div>
         </div>
       </nav>

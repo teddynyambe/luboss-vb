@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import Link from 'next/link';
 import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
+import UserMenu from '@/components/UserMenu';
 
 interface Cycle {
   id: string;
@@ -48,15 +49,10 @@ interface CreditRatingScheme {
 }
 
 export default function ManageCyclesPage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
   const [cycles, setCycles] = useState<Cycle[]>([]);
   const [loading, setLoading] = useState(true);
-
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
-  };
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [editingCycleId, setEditingCycleId] = useState<string | null>(null);
   const [activating, setActivating] = useState<string | null>(null);
@@ -426,15 +422,7 @@ export default function ManageCyclesPage() {
               >
                 {showCreateForm ? 'Cancel' : '+ New Cycle'}
               </button>
-              <span className="text-sm md:text-base text-blue-700 font-medium">
-                {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
-              >
-                Logout
-              </button>
+              <UserMenu />
             </div>
           </div>
         </div>

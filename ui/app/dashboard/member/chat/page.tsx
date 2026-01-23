@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import Link from 'next/link';
+import UserMenu from '@/components/UserMenu';
 
 interface ChatMessage {
   role: 'user' | 'assistant';
@@ -115,7 +116,7 @@ function renderMarkdown(text: string) {
 }
 
 export default function AIChatPage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -125,11 +126,6 @@ export default function AIChatPage() {
 
   const handleClose = () => {
     router.push('/dashboard/member');
-  };
-
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
   };
 
   const scrollToBottom = () => {
@@ -243,15 +239,7 @@ export default function AIChatPage() {
                   />
                 </svg>
               </button>
-              <span className="text-sm md:text-base text-blue-700 font-medium">
-                {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
-              >
-                Logout
-              </button>
+              <UserMenu />
             </div>
           </div>
         </div>

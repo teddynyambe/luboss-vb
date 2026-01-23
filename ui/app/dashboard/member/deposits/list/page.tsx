@@ -7,15 +7,11 @@ import { api } from '@/lib/api';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FaInfoCircle, FaCheckCircle, FaTimesCircle, FaComment, FaChevronDown, FaChevronUp } from 'react-icons/fa';
+import UserMenu from '@/components/UserMenu';
 
 export default function DepositProofsListPage() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const router = useRouter();
-
-  const handleLogout = () => {
-    logout();
-    router.push('/login');
-  };
   const [deposits, setDeposits] = useState<DepositProof[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -186,15 +182,7 @@ export default function DepositProofsListPage() {
               >
                 Upload New Proof
               </Link>
-              <span className="text-sm md:text-base text-blue-700 font-medium">
-                {user?.first_name} {user?.last_name}
-              </span>
-              <button
-                onClick={handleLogout}
-                className="text-sm md:text-base text-blue-600 hover:text-blue-800 font-semibold px-3 py-2 rounded-lg hover:bg-blue-50 transition-colors duration-200"
-              >
-                Logout
-              </button>
+              <UserMenu />
             </div>
           </div>
         </div>
