@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.core.dependencies import require_treasurer, get_current_user
+from app.core.dependencies import require_treasurer, require_any_role, get_current_user
 from app.models.user import User
 from app.models.transaction import DepositProof, DepositProofStatus, DepositApproval, PenaltyRecord, PenaltyType, Declaration, DeclarationStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus
 from app.models.member import MemberProfile
@@ -170,13 +170,15 @@ def approve_deposit_proof(
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
     
-    # Get organization accounts
-    social_fund = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "SOCIAL_FUND"
+    # Get member-specific Social Fund and Admin Fund accounts
+    member_social_fund = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == deposit.member_id,
+        LedgerAccount.account_name.ilike("%social fund%")
     ).first()
     
-    admin_fund = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "ADMIN_FUND"
+    member_admin_fund = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == deposit.member_id,
+        LedgerAccount.account_name.ilike("%admin fund%")
     ).first()
     
     penalties_payable = db.query(LedgerAccount).filter(
@@ -193,8 +195,11 @@ def approve_deposit_proof(
         LedgerAccount.account_name.ilike("%loan%receivable%")
     ).first()
     
-    if not all([bank_cash, member_savings, social_fund, admin_fund]):
+    if not all([bank_cash, member_savings]):
         raise HTTPException(status_code=500, detail="Required ledger accounts not found")
+    
+    # Member-specific social/admin fund accounts may not exist if member hasn't made first declaration yet
+    # In that case, they'll be None and approve_deposit will handle it
     
     approval = approve_deposit(
         db=db,
@@ -202,8 +207,8 @@ def approve_deposit_proof(
         approved_by=current_user.id,
         bank_cash_account_id=bank_cash.id,
         member_savings_account_id=member_savings.id,
-        social_fund_account_id=social_fund.id,
-        admin_fund_account_id=admin_fund.id,
+        member_social_fund_account_id=member_social_fund.id if member_social_fund else None,
+        member_admin_fund_account_id=member_admin_fund.id if member_admin_fund else None,
         penalties_payable_account_id=penalties_payable.id if penalties_payable else None,
         interest_income_account_id=interest_income.id if interest_income else None,
         loans_receivable_account_id=loans_receivable.id if loans_receivable else None
@@ -354,10 +359,10 @@ def create_penalty_type(
     name: str,
     description: str,
     fee_amount: float,
-    current_user: User = Depends(require_treasurer),
+    current_user: User = Depends(require_any_role("Treasurer", "Compliance", "Admin", "Chairman")),
     db: Session = Depends(get_db)
 ):
-    """Create a new penalty type."""
+    """Create a new penalty type. Accessible by Treasurer, Compliance, Admin, and Chairman."""
     penalty_type = PenaltyType(
         name=name,
         description=description,
@@ -367,7 +372,15 @@ def create_penalty_type(
     db.add(penalty_type)
     db.commit()
     db.refresh(penalty_type)
-    return {"message": "Penalty type created successfully", "penalty_type": penalty_type}
+    return {
+        "message": "Penalty type created successfully",
+        "penalty_type": {
+            "id": str(penalty_type.id),
+            "name": penalty_type.name,
+            "description": penalty_type.description,
+            "fee_amount": str(penalty_type.fee_amount)
+        }
+    }
 
 
 @router.get("/penalties/pending")
@@ -386,18 +399,26 @@ def get_pending_penalties(
         result = []
         for penalty in penalties:
             penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty.penalty_type_id).first()
+            member = db.query(MemberProfile).filter(MemberProfile.id == penalty.member_id).first()
+            user = None
+            if member:
+                user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+            
             result.append({
                 "id": str(penalty.id),
                 "member_id": str(penalty.member_id),
+                "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+                "member_email": user.email if user else None,
                 "date_issued": penalty.date_issued.isoformat() if penalty.date_issued else None,
+                "notes": penalty.notes,
                 "penalty_type": {
                     "name": penalty_type.name if penalty_type else None,
                     "fee_amount": str(penalty_type.fee_amount) if penalty_type else None
                 } if penalty_type else None
             })
         return result
-    except Exception:
-        return {"message": "To be done - pending penalties functionality"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading pending penalties: {str(e)}")
 
 
 @router.post("/penalties/{penalty_id}/approve")
@@ -409,21 +430,63 @@ def approve_penalty_record(
     """Approve penalty and post to ledger."""
     from app.models.ledger import LedgerAccount
     
-    # Get account IDs
-    member_savings = db.query(LedgerAccount).filter(LedgerAccount.account_code.like("MEMBER_SAVINGS%")).first()
+    try:
+        penalty_uuid = UUID(penalty_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid penalty ID format")
+    
+    # Get penalty record
+    penalty = db.query(PenaltyRecord).filter(PenaltyRecord.id == penalty_uuid).first()
+    if not penalty:
+        raise HTTPException(status_code=404, detail="Penalty record not found")
+    
+    # Get member to find their specific savings account
+    member = db.query(MemberProfile).filter(MemberProfile.id == penalty.member_id).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+    
+    # Get or create member-specific savings account
+    member_savings = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member.id,
+        LedgerAccount.account_name.ilike("%savings%")
+    ).first()
+    
+    if not member_savings:
+        # Create savings account if it doesn't exist
+        from app.models.ledger import AccountType
+        short_id = str(member.id).replace('-', '')[:8]
+        member_savings = LedgerAccount(
+            account_code=f"MEM_SAV_{short_id}",
+            account_name=f"Member Savings - {member.id}",
+            account_type=AccountType.LIABILITY,
+            member_id=member.id,
+            description=f"Savings account for member {member.id}"
+        )
+        db.add(member_savings)
+        db.flush()
+    
+    # Get penalty income account
     penalty_income = db.query(LedgerAccount).filter(LedgerAccount.account_code == "PENALTY_INCOME").first()
     
-    if not all([member_savings, penalty_income]):
-        raise HTTPException(status_code=500, detail="Required ledger accounts not found")
+    if not penalty_income:
+        raise HTTPException(status_code=500, detail="Penalty income account not found. Please run the setup script to create required accounts.")
     
-    penalty = approve_penalty(
-        db=db,
-        penalty_record_id=penalty_id,
-        approved_by=current_user.id,
-        member_savings_account_id=member_savings.id,
-        penalty_income_account_id=penalty_income.id
-    )
-    return {"message": "Penalty approved and posted successfully", "penalty_id": str(penalty.id)}
+    try:
+        penalty = approve_penalty(
+            db=db,
+            penalty_record_id=penalty_uuid,
+            approved_by=current_user.id,
+            member_savings_account_id=member_savings.id,
+            penalty_income_account_id=penalty_income.id
+        )
+        return {"message": "Penalty approved and charged to member account successfully", "penalty_id": str(penalty.id)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error approving penalty: {str(e)}")
 
 
 @router.get("/credit-rating/scheme")

@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { api } from '@/lib/api';
 import Link from 'next/link';
 import UserMenu from '@/components/UserMenu';
+import NotificationModal from '@/components/NotificationModal';
 
 interface UserProfile {
   id: string;
@@ -23,6 +24,8 @@ interface UserProfile {
   phone_number_next_of_kin?: string;
 }
 
+type TabType = 'personal' | 'bank' | 'kin' | 'password';
+
 export default function ProfilePage() {
   const { user, logout } = useAuth();
   const router = useRouter();
@@ -31,6 +34,7 @@ export default function ProfilePage() {
   const [changingPassword, setChangingPassword] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [activeTab, setActiveTab] = useState<TabType>('personal');
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [formData, setFormData] = useState<Partial<UserProfile>>({});
   const [passwordData, setPasswordData] = useState({
@@ -172,21 +176,74 @@ export default function ProfilePage() {
 
       <main className="max-w-4xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
         {error && (
-          <div className="mb-4 md:mb-6 bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
-            {error}
-          </div>
+          <NotificationModal
+            type="error"
+            message={error}
+            onClose={() => setError('')}
+          />
         )}
 
         {success && (
-          <div className="mb-4 md:mb-6 bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
-            {success}
-          </div>
+          <NotificationModal
+            type="success"
+            message={success}
+            onClose={() => setSuccess('')}
+          />
         )}
 
-        <div className="space-y-4 md:space-y-6">
-          {/* Personal Information */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Personal Information</h2>
+        <div className="card">
+          {/* Tabs Navigation */}
+          <div className="border-b-2 border-blue-200 mb-6">
+            <nav className="flex flex-wrap gap-2 -mb-px" aria-label="Profile sections">
+              <button
+                onClick={() => setActiveTab('personal')}
+                className={`px-4 py-3 text-sm md:text-base font-semibold transition-colors border-b-2 ${
+                  activeTab === 'personal'
+                    ? 'text-blue-600 border-blue-600'
+                    : 'text-blue-500 border-transparent hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                Personal Information
+              </button>
+              <button
+                onClick={() => setActiveTab('bank')}
+                className={`px-4 py-3 text-sm md:text-base font-semibold transition-colors border-b-2 ${
+                  activeTab === 'bank'
+                    ? 'text-blue-600 border-blue-600'
+                    : 'text-blue-500 border-transparent hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                Bank Details
+              </button>
+              <button
+                onClick={() => setActiveTab('kin')}
+                className={`px-4 py-3 text-sm md:text-base font-semibold transition-colors border-b-2 ${
+                  activeTab === 'kin'
+                    ? 'text-blue-600 border-blue-600'
+                    : 'text-blue-500 border-transparent hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                Next of Kin
+              </button>
+              <button
+                onClick={() => setActiveTab('password')}
+                className={`px-4 py-3 text-sm md:text-base font-semibold transition-colors border-b-2 ${
+                  activeTab === 'password'
+                    ? 'text-blue-600 border-blue-600'
+                    : 'text-blue-500 border-transparent hover:text-blue-600 hover:border-blue-300'
+                }`}
+              >
+                Change Password
+              </button>
+            </nav>
+          </div>
+
+          {/* Tab Content */}
+          <div className="min-h-[400px]">
+            {/* Personal Information Tab */}
+            {activeTab === 'personal' && (
+              <div>
+                <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Personal Information</h2>
             <form onSubmit={handleSaveProfile} className="space-y-4 md:space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
                 <div>
@@ -272,19 +329,21 @@ export default function ProfilePage() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={saving}
-                className="btn-primary w-full md:w-auto disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
-            </form>
-          </div>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="btn-primary w-full md:w-auto disabled:opacity-50"
+                >
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </form>
+              </div>
+            )}
 
-          {/* Bank Details */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Bank Details</h2>
+            {/* Bank Details Tab */}
+            {activeTab === 'bank' && (
+              <div>
+                <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Bank Details</h2>
             <form onSubmit={handleSaveProfile} className="space-y-4 md:space-y-6">
               <div>
                 <label htmlFor="bank_account" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
@@ -328,19 +387,21 @@ export default function ProfilePage() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={saving}
-                className="btn-primary w-full md:w-auto disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
-            </form>
-          </div>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="btn-primary w-full md:w-auto disabled:opacity-50"
+                >
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </form>
+              </div>
+            )}
 
-          {/* Next of Kin */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Next of Kin Information</h2>
+            {/* Next of Kin Tab */}
+            {activeTab === 'kin' && (
+              <div>
+                <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Next of Kin Information</h2>
             <form onSubmit={handleSaveProfile} className="space-y-4 md:space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
                 <div>
@@ -385,19 +446,21 @@ export default function ProfilePage() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={saving}
-                className="btn-primary w-full md:w-auto disabled:opacity-50"
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
-            </form>
-          </div>
+                <button
+                  type="submit"
+                  disabled={saving}
+                  className="btn-primary w-full md:w-auto disabled:opacity-50"
+                >
+                  {saving ? 'Saving...' : 'Save Changes'}
+                </button>
+              </form>
+              </div>
+            )}
 
-          {/* Change Password */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Change Password</h2>
+            {/* Change Password Tab */}
+            {activeTab === 'password' && (
+              <div>
+                <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Change Password</h2>
             <form onSubmit={handleChangePassword} className="space-y-4 md:space-y-6">
               <div>
                 <label htmlFor="current_password" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
@@ -445,14 +508,16 @@ export default function ProfilePage() {
                 />
               </div>
 
-              <button
-                type="submit"
-                disabled={changingPassword}
-                className="btn-primary w-full md:w-auto disabled:opacity-50"
-              >
-                {changingPassword ? 'Changing Password...' : 'Change Password'}
-              </button>
-            </form>
+                <button
+                  type="submit"
+                  disabled={changingPassword}
+                  className="btn-primary w-full md:w-auto disabled:opacity-50"
+                >
+                  {changingPassword ? 'Changing Password...' : 'Change Password'}
+                </button>
+              </form>
+              </div>
+            )}
           </div>
         </div>
       </main>

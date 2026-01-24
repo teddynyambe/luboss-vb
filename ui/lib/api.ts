@@ -28,6 +28,13 @@ class ApiClient {
     }
   }
 
+  private getToken(): string | null {
+    if (typeof window === 'undefined') return this.token;
+    const stored = localStorage.getItem('token');
+    if (stored) this.token = stored;
+    return this.token;
+  }
+
   private async request<T>(
     endpoint: string,
     options: RequestInit = {}
@@ -38,8 +45,9 @@ class ApiClient {
       ...options.headers,
     };
 
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    const token = this.getToken();
+    if (token) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
     }
 
     try {
@@ -47,6 +55,13 @@ class ApiClient {
         ...options,
         headers,
       });
+
+      if (response.status === 401) {
+        this.setToken(null);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        }
+      }
 
       // Handle non-JSON responses
       const contentType = response.headers.get('content-type');
@@ -113,8 +128,9 @@ class ApiClient {
   async getFileBlob(endpoint: string): Promise<string> {
     const url = `${this.baseUrl}${endpoint}`;
     const headers: HeadersInit = {};
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    const token = this.getToken();
+    if (token) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
     }
 
     try {
@@ -138,8 +154,9 @@ class ApiClient {
   async postFormData<T>(endpoint: string, formData: FormData): Promise<ApiResponse<T>> {
     const url = `${this.baseUrl}${endpoint}`;
     const headers: HeadersInit = {};
-    if (this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
+    const token = this.getToken();
+    if (token) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
     }
 
     try {
@@ -148,6 +165,72 @@ class ApiClient {
         headers,
         body: formData,
       });
+
+      if (response.status === 401) {
+        this.setToken(null);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        }
+      }
+
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        const text = await response.text();
+        return {
+          error: text || `HTTP ${response.status}: ${response.statusText}`,
+        };
+      }
+
+      const data = await response.json();
+      if (!response.ok) {
+        // Handle FastAPI validation errors (array of error objects)
+        let errorMessage = 'An error occurred';
+        if (Array.isArray(data.detail)) {
+          // Validation errors: extract messages from each error
+          errorMessage = data.detail.map((err: any) => {
+            const loc = Array.isArray(err.loc) ? err.loc.slice(1).join('.') : '';
+            return `${loc ? `${loc}: ` : ''}${err.msg || err.message || 'Validation error'}`;
+          }).join('; ');
+        } else if (typeof data.detail === 'string') {
+          errorMessage = data.detail;
+        } else if (data.message) {
+          errorMessage = data.message;
+        }
+        return {
+          error: errorMessage,
+          detail: data.detail,
+        };
+      }
+      return { data };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Network error',
+      };
+    }
+  }
+
+  /** PUT with FormData (e.g. file upload). Do not set Content-Type; browser sets multipart boundary. */
+  async putFormData<T>(endpoint: string, formData: FormData): Promise<ApiResponse<T>> {
+    const url = `${this.baseUrl}${endpoint}`;
+    const headers: HeadersInit = {};
+    const token = this.getToken();
+    if (token) {
+      (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
+    }
+
+    try {
+      const response = await fetch(url, {
+        method: 'PUT',
+        headers,
+        body: formData,
+      });
+
+      if (response.status === 401) {
+        this.setToken(null);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        }
+      }
 
       const contentType = response.headers.get('content-type');
       if (!contentType || !contentType.includes('application/json')) {

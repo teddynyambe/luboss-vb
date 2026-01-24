@@ -36,6 +36,9 @@ class UserListItem(BaseModel):
     last_name: Optional[str] = None
     role: str
     approved: Optional[bool] = None
+    member_id: Optional[str] = None
+    member_status: Optional[str] = None
+    member_activated_at: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -47,7 +50,8 @@ def get_all_members(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Get list of all members, optionally filtered by status (pending, active, suspended)."""
+    """Get list of all members, optionally filtered by status (pending, active, suspended).
+    Automatically syncs User.approved with MemberProfile.status to fix discrepancies."""
     try:
         query = db.query(MemberProfile)
         
@@ -65,10 +69,18 @@ def get_all_members(
         if not members:
             return []
         
-        # Format response with user data
+        # Format response with user data and auto-sync discrepancies
+        from app.services.member import sync_user_and_member_status
         result = []
         for member in members:
             user = db.query(User).filter(User.id == member.user_id).first()
+            
+            # Auto-sync if there's a discrepancy
+            if user:
+                sync_user_and_member_status(db, member.user_id)
+                # Refresh member to get updated status
+                db.refresh(member)
+            
             result.append({
                 "id": str(member.id),
                 "user_id": str(member.user_id),
@@ -327,19 +339,69 @@ def list_cycles(
     db: Session = Depends(get_db)
 ):
     """List all cycles."""
-    from app.models.cycle import Cycle
-    cycles = db.query(Cycle).order_by(Cycle.year.desc()).all()
-    return [
-        {
+    from app.models.cycle import Cycle, CyclePhase
+    from sqlalchemy.orm import load_only
+    
+    try:
+        cycles = db.query(Cycle).order_by(Cycle.year.desc()).all()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error loading cycles: {str(e)}")
+    
+    result = []
+    for c in cycles:
+        try:
+            # Try to load with all columns first
+            phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == c.id).all()
+        except Exception:
+            # If that fails (columns don't exist), load only existing columns
+            try:
+                phases = db.query(CyclePhase).options(
+                    load_only(
+                        CyclePhase.id,
+                        CyclePhase.phase_type,
+                        CyclePhase.monthly_start_day,
+                        CyclePhase.monthly_end_day,
+                        CyclePhase.penalty_amount
+                    )
+                ).filter(CyclePhase.cycle_id == c.id).all()
+            except Exception:
+                # If even that fails, return empty phases
+                phases = []
+        
+        phase_list = []
+        for p in phases:
+            phase_dict = {
+                "id": str(p.id),
+                "phase_type": p.phase_type.value,
+                "monthly_start_day": p.monthly_start_day,
+                "monthly_end_day": getattr(p, 'monthly_end_day', None),
+                "penalty_amount": float(getattr(p, 'penalty_amount', None)) if getattr(p, 'penalty_amount', None) else None,
+            }
+            # Safely get new fields that might not exist in database yet
+            try:
+                penalty_type_id = getattr(p, 'penalty_type_id', None)
+                phase_dict["penalty_type_id"] = str(penalty_type_id) if penalty_type_id else None
+            except Exception:
+                phase_dict["penalty_type_id"] = None
+            
+            try:
+                phase_dict["auto_apply_penalty"] = getattr(p, 'auto_apply_penalty', False)
+            except Exception:
+                phase_dict["auto_apply_penalty"] = None
+            
+            phase_list.append(phase_dict)
+        
+        cycle_data = {
             "id": str(c.id),
             "year": c.year,
             "start_date": c.start_date.isoformat(),
             "end_date": c.end_date.isoformat(),
             "status": c.status.value,
             "created_at": c.created_at.isoformat(),
+            "phases": phase_list,
         }
-        for c in cycles
-    ]
+        result.append(cycle_data)
+    return result
 
 
 @router.post("/cycles", response_model=CycleResponse)
@@ -400,13 +462,28 @@ def create_cycle(
                 detail=f"Invalid phase type: {phase_config.phase_type}"
             )
         
-        phase = CyclePhase(
-            cycle_id=cycle.id,
-            phase_type=phase_type,
-            phase_order=phase_order_map.get(phase_type, "0"),
-            monthly_start_day=phase_config.monthly_start_day,
-            is_open=False
-        )
+        phase_kwargs = {
+            "cycle_id": cycle.id,
+            "phase_type": phase_type,
+            "phase_order": phase_order_map.get(phase_type, "0"),
+            "monthly_start_day": phase_config.monthly_start_day,
+            "monthly_end_day": phase_config.monthly_end_day,
+            "penalty_amount": Decimal(str(phase_config.penalty_amount)) if phase_config.penalty_amount is not None else None,
+            "is_open": False
+        }
+        # Only add new fields if they're provided (will fail if columns don't exist - migration needed)
+        if phase_config.penalty_type_id:
+            try:
+                phase_kwargs["penalty_type_id"] = UUID(phase_config.penalty_type_id)
+            except Exception:
+                pass  # Column might not exist yet
+        if phase_config.auto_apply_penalty is not None:
+            try:
+                phase_kwargs["auto_apply_penalty"] = phase_config.auto_apply_penalty
+            except Exception:
+                pass  # Column might not exist yet
+        
+        phase = CyclePhase(**phase_kwargs)
         db.add(phase)
     
     # Create credit rating scheme if provided
@@ -482,6 +559,8 @@ def get_cycle(
     """Get cycle details with phases and credit rating scheme."""
     from app.models.cycle import Cycle, CyclePhase
     from app.models.policy import CreditRatingScheme, CreditRatingTier, BorrowingLimitPolicy, CreditRatingInterestRange
+    from sqlalchemy import text
+    import logging
     
     try:
         cycle_uuid = UUID(cycle_id)
@@ -491,84 +570,141 @@ def get_cycle(
             detail="Invalid cycle ID format"
         )
     
-    cycle = db.query(Cycle).filter(Cycle.id == cycle_uuid).first()
-    if not cycle:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Cycle not found"
-        )
+    try:
+        cycle = db.query(Cycle).filter(Cycle.id == cycle_uuid).first()
+        if not cycle:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Cycle not found"
+            )
+        
+        # Get phases - use raw SQL to avoid issues with missing columns
+        phases = []
+        try:
+            # First try using ORM
+            phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == cycle.id).all()
+        except Exception as e:
+            # If ORM fails (likely due to missing columns), use raw SQL
+            logging.warning(f"ORM query failed, using raw SQL: {str(e)}")
+            try:
+                sql = text("""
+                    SELECT id, phase_type, monthly_start_day, monthly_end_day, penalty_amount
+                    FROM cycle_phase
+                    WHERE cycle_id = :cycle_id::uuid
+                """)
+                rows = db.execute(sql, {"cycle_id": str(cycle.id)}).fetchall()
+                # Create simple objects from the rows
+                class SimplePhase:
+                    def __init__(self, row_data):
+                        self.id = row_data[0]
+                        # Create a simple enum-like object
+                        class PhaseType:
+                            def __init__(self, value):
+                                self.value = value
+                        self.phase_type = PhaseType(row_data[1])
+                        self.monthly_start_day = row_data[2]
+                        self.monthly_end_day = row_data[3]
+                        self.penalty_amount = row_data[4]
+                        self.penalty_type_id = None
+                        self.auto_apply_penalty = None
+                phases = [SimplePhase(row) for row in rows]
+            except Exception as e2:
+                # If even raw SQL fails, log and return empty phases
+                logging.error(f"Error loading phases with raw SQL: {str(e2)}")
+                phases = []
     
-    # Get phases
-    phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == cycle.id).all()
-    
-    # Get credit rating scheme (if any)
-    scheme = db.query(CreditRatingScheme).filter(
-        CreditRatingScheme.effective_from <= cycle.end_date
-    ).order_by(CreditRatingScheme.effective_from.desc()).first()
-    
-    result = {
-        "id": str(cycle.id),
-        "year": cycle.year,
-        "start_date": cycle.start_date.isoformat(),
-        "end_date": cycle.end_date.isoformat(),
-        "status": cycle.status.value,
-        "created_at": cycle.created_at.isoformat(),
-        "social_fund_required": float(cycle.social_fund_required) if cycle.social_fund_required else None,
-        "admin_fund_required": float(cycle.admin_fund_required) if cycle.admin_fund_required else None,
-        "phases": [
-            {
+        phase_list = []
+        for p in phases:
+            phase_dict = {
                 "id": str(p.id),
                 "phase_type": p.phase_type.value,
                 "monthly_start_day": p.monthly_start_day,
+                "monthly_end_day": getattr(p, 'monthly_end_day', None),
+                "penalty_amount": float(getattr(p, 'penalty_amount', None)) if getattr(p, 'penalty_amount', None) else None,
             }
-            for p in phases
-        ],
-    }
+            # Safely get new fields that might not exist in database yet
+            try:
+                penalty_type_id = getattr(p, 'penalty_type_id', None)
+                phase_dict["penalty_type_id"] = str(penalty_type_id) if penalty_type_id else None
+            except Exception:
+                phase_dict["penalty_type_id"] = None
+            
+            try:
+                phase_dict["auto_apply_penalty"] = getattr(p, 'auto_apply_penalty', False)
+            except Exception:
+                phase_dict["auto_apply_penalty"] = None
+            
+            phase_list.append(phase_dict)
     
-    if scheme:
-        tiers = db.query(CreditRatingTier).filter(
-            CreditRatingTier.scheme_id == scheme.id
-        ).order_by(CreditRatingTier.tier_order).all()
-        
-        scheme_data = {
-            "id": str(scheme.id),
-            "name": scheme.name,
-            "description": scheme.description,
-            "tiers": []
+        result = {
+            "id": str(cycle.id),
+            "year": cycle.year,
+            "start_date": cycle.start_date.isoformat(),
+            "end_date": cycle.end_date.isoformat(),
+            "status": cycle.status.value,
+            "created_at": cycle.created_at.isoformat(),
+            "social_fund_required": float(cycle.social_fund_required) if cycle.social_fund_required else None,
+            "admin_fund_required": float(cycle.admin_fund_required) if cycle.admin_fund_required else None,
+            "phases": phase_list,
         }
         
-        for tier in tiers:
-            # Get borrowing limit
-            borrowing_limit = db.query(BorrowingLimitPolicy).filter(
-                BorrowingLimitPolicy.tier_id == tier.id
-            ).order_by(BorrowingLimitPolicy.effective_from.desc()).first()
-            
-            # Get interest ranges
-            interest_ranges = db.query(CreditRatingInterestRange).filter(
-                CreditRatingInterestRange.tier_id == tier.id,
-                CreditRatingInterestRange.cycle_id == cycle.id
-            ).all()
-            
-            tier_data = {
-                "id": str(tier.id),
-                "tier_name": tier.tier_name,
-                "tier_order": tier.tier_order,
-                "description": tier.description,
-                "multiplier": float(borrowing_limit.multiplier) if borrowing_limit else None,
-                "interest_ranges": [
-                    {
-                        "id": str(ir.id),
-                        "term_months": ir.term_months,
-                        "effective_rate_percent": float(ir.effective_rate_percent),
-                    }
-                    for ir in interest_ranges
-                ]
-            }
-            scheme_data["tiers"].append(tier_data)
+        # Get credit rating scheme (if any)
+        scheme = db.query(CreditRatingScheme).filter(
+            CreditRatingScheme.effective_from <= cycle.end_date
+        ).order_by(CreditRatingScheme.effective_from.desc()).first()
         
-        result["credit_rating_scheme"] = scheme_data
-    
-    return result
+        if scheme:
+            tiers = db.query(CreditRatingTier).filter(
+                CreditRatingTier.scheme_id == scheme.id
+            ).order_by(CreditRatingTier.tier_order).all()
+            
+            scheme_data = {
+                "id": str(scheme.id),
+                "name": scheme.name,
+                "description": scheme.description,
+                "tiers": []
+            }
+            
+            for tier in tiers:
+                # Get borrowing limit
+                borrowing_limit = db.query(BorrowingLimitPolicy).filter(
+                    BorrowingLimitPolicy.tier_id == tier.id
+                ).order_by(BorrowingLimitPolicy.effective_from.desc()).first()
+                
+                # Get interest ranges
+                interest_ranges = db.query(CreditRatingInterestRange).filter(
+                    CreditRatingInterestRange.tier_id == tier.id,
+                    CreditRatingInterestRange.cycle_id == cycle.id
+                ).all()
+                
+                tier_data = {
+                    "id": str(tier.id),
+                    "tier_name": tier.tier_name,
+                    "tier_order": tier.tier_order,
+                    "description": tier.description,
+                    "multiplier": float(borrowing_limit.multiplier) if borrowing_limit else None,
+                    "interest_ranges": [
+                        {
+                            "id": str(ir.id),
+                            "term_months": ir.term_months,
+                            "effective_rate_percent": float(ir.effective_rate_percent),
+                        }
+                        for ir in interest_ranges
+                    ]
+                }
+                scheme_data["tiers"].append(tier_data)
+            
+            result["credit_rating_scheme"] = scheme_data
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error in get_cycle: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error loading cycle: {str(e)}"
+        )
 
 
 @router.put("/cycles/{cycle_id}", response_model=CycleResponse)
@@ -669,13 +805,28 @@ def update_cycle(
                     detail=f"Invalid phase type: {phase_config.phase_type}"
                 )
             
-            phase = CyclePhase(
-                cycle_id=cycle.id,
-                phase_type=phase_type,
-                phase_order=phase_order_map.get(phase_type, "0"),
-                monthly_start_day=phase_config.monthly_start_day,
-                is_open=False
-            )
+            phase_kwargs = {
+                "cycle_id": cycle.id,
+                "phase_type": phase_type,
+                "phase_order": phase_order_map.get(phase_type, "0"),
+                "monthly_start_day": phase_config.monthly_start_day,
+                "monthly_end_day": phase_config.monthly_end_day,
+                "penalty_amount": Decimal(str(phase_config.penalty_amount)) if phase_config.penalty_amount is not None else None,
+                "is_open": False
+            }
+            # Only add new fields if they're provided (will fail if columns don't exist - migration needed)
+            if phase_config.penalty_type_id:
+                try:
+                    phase_kwargs["penalty_type_id"] = UUID(phase_config.penalty_type_id)
+                except Exception:
+                    pass  # Column might not exist yet
+            if phase_config.auto_apply_penalty is not None:
+                try:
+                    phase_kwargs["auto_apply_penalty"] = phase_config.auto_apply_penalty
+                except Exception:
+                    pass  # Column might not exist yet
+            
+            phase = CyclePhase(**phase_kwargs)
             db.add(phase)
     
     # Update credit rating scheme if provided
@@ -980,19 +1131,40 @@ def list_users(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """List all users (Chairman/Vice-Chairman/Admin only)."""
+    """List all users (Chairman/Vice-Chairman/Admin only).
+    Automatically syncs User.approved with MemberProfile.status to fix discrepancies.
+    Returns users with member profile information included."""
+    from app.services.member import sync_user_and_member_status
     users = db.query(User).all()
-    return [
-        UserListItem(
-            id=str(user.id),
-            email=user.email,
-            first_name=user.first_name,
-            last_name=user.last_name,
-            role=user.role.value if user.role else "member",
-            approved=user.approved
-        )
-        for user in users
-    ]
+    
+    # Auto-sync discrepancies for users with member profiles
+    for user in users:
+        member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+        if member_profile:
+            sync_user_and_member_status(db, user.id)
+            # Refresh user to get updated approved status
+            db.refresh(user)
+    
+    # Build response with member information
+    result = []
+    for user in users:
+        member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+        user_dict = {
+            "id": str(user.id),
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "role": user.role.value if user.role else "member",
+            "approved": user.approved
+        }
+        # Add member information if available
+        if member_profile:
+            user_dict["member_id"] = str(member_profile.id)
+            user_dict["member_status"] = member_profile.status.value
+            user_dict["member_activated_at"] = member_profile.activated_at.isoformat() if member_profile.activated_at else None
+        result.append(user_dict)
+    
+    return result
 
 
 @router.put("/users/{user_id}/approve")
@@ -1001,22 +1173,53 @@ def approve_user(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Approve a user (Chairman/Vice-Chairman/Admin only)."""
+    """Approve a user (Chairman/Vice-Chairman/Admin only). Also activates member profile if one exists."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    user.approved = True
-    db.commit()
-    db.refresh(user)
-    return {
-        "message": "User approved successfully",
-        "user": {
-            "id": str(user.id),
-            "email": user.email,
-            "approved": user.approved
+    # Also activate member profile if one exists (this will also set user.approved = True)
+    member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+    if member_profile and member_profile.status != MemberStatus.ACTIVE:
+        from app.services.member import activate_member
+        try:
+            activate_member(db, member_profile.id, current_user.id)
+            # activate_member already commits and sets user.approved, so we're done
+            db.refresh(user)
+            return {
+                "message": "User approved successfully",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "approved": user.approved
+                }
+            }
+        except Exception as e:
+            # If activation fails, still approve the user manually
+            user.approved = True
+            db.commit()
+            db.refresh(user)
+            return {
+                "message": "User approved successfully (member activation failed)",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "approved": user.approved
+                }
+            }
+    else:
+        # No member profile or already active, just approve the user
+        user.approved = True
+        db.commit()
+        db.refresh(user)
+        return {
+            "message": "User approved successfully",
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "approved": user.approved
+            }
         }
-    }
 
 
 @router.put("/users/{user_id}/suspend")
@@ -1025,14 +1228,29 @@ def suspend_user(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Suspend/disable a user (Chairman/Vice-Chairman/Admin only)."""
+    """Suspend/disable a user (Chairman/Vice-Chairman/Admin only). Also suspends member profile if one exists."""
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
-    user.approved = False
-    db.commit()
-    return {"message": "User suspended successfully"}
+    # Also suspend member profile if one exists (this will also set user.approved = False)
+    member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+    if member_profile and member_profile.status != MemberStatus.SUSPENDED:
+        from app.services.member import suspend_member
+        try:
+            suspend_member(db, member_profile.id, current_user.id)
+            # suspend_member already commits and sets user.approved = False, so we're done
+            return {"message": "User suspended successfully"}
+        except Exception:
+            # If suspension fails, still unapprove the user manually
+            user.approved = False
+            db.commit()
+            return {"message": "User suspended successfully (member suspension failed)"}
+    else:
+        # No member profile or already suspended, just unapprove the user
+        user.approved = False
+        db.commit()
+        return {"message": "User suspended successfully"}
 
 
 @router.put("/users/{user_id}/role")

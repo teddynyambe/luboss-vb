@@ -14,7 +14,9 @@ interface User {
   last_name?: string;
   role: string;
   approved?: boolean;
-  member_id?: string; // Add member_id if user has a member profile
+  member_id?: string;
+  member_status?: string; // pending, active, suspended
+  member_activated_at?: string;
 }
 
 interface Cycle {
@@ -37,16 +39,20 @@ interface UserCreditRating {
 }
 
 const ROLES = ['admin', 'treasurer', 'member', 'compliance', 'chairman'] as const;
+type FilterStatus = 'pending' | 'approved' | 'all';
 
 export default function UserManagementPage() {
   const { user } = useAuth();
   const router = useRouter();
   const [users, setUsers] = useState<User[]>([]);
+  const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
   const [approving, setApproving] = useState<string | null>(null);
+  const [suspending, setSuspending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
   
   // Credit rating assignment state
   const [showCreditRatingModal, setShowCreditRatingModal] = useState<string | null>(null);
@@ -60,6 +66,7 @@ export default function UserManagementPage() {
 
   useEffect(() => {
     loadUsers();
+    loadMembers();
     loadCycles();
   }, []);
 
@@ -68,6 +75,11 @@ export default function UserManagementPage() {
       loadTiersForCycle(selectedCycle);
     }
   }, [selectedCycle, showCreditRatingModal]);
+
+  useEffect(() => {
+    loadUsers();
+    loadMembers();
+  }, [filterStatus]);
 
   const loadUsers = async () => {
     setLoading(true);
@@ -79,6 +91,35 @@ export default function UserManagementPage() {
       setError(response.error || 'Failed to load users');
     }
     setLoading(false);
+  };
+
+  const loadMembers = async () => {
+    try {
+      const endpoint = filterStatus === 'all' 
+        ? '/api/chairman/members'
+        : filterStatus === 'pending'
+        ? '/api/chairman/members?status=pending'
+        : '/api/chairman/members?status=active';
+      const response = await api.get<any[]>(endpoint);
+      if (response.data) {
+        setMembers(response.data);
+        // Merge member data with users
+        const memberMap = new Map(response.data.map((m: any) => [m.user_id, m]));
+        setUsers(prevUsers => 
+          prevUsers.map(user => {
+            const member = memberMap.get(user.id);
+            return {
+              ...user,
+              member_id: member?.id,
+              member_status: member?.status,
+              member_activated_at: member?.activated_at
+            };
+          })
+        );
+      }
+    } catch (err) {
+      console.error('Error loading members:', err);
+    }
   };
 
   const showMessage = (type: 'success' | 'error', text: string) => {
@@ -93,6 +134,7 @@ export default function UserManagementPage() {
     if (!response.error) {
       showMessage('success', 'User role updated successfully');
       await loadUsers();
+      await loadMembers();
     } else {
       setError(response.error || 'Failed to update user role');
       showMessage('error', response.error || 'Failed to update user role');
@@ -107,9 +149,55 @@ export default function UserManagementPage() {
     if (!response.error) {
       showMessage('success', 'User approved successfully');
       await loadUsers();
+      await loadMembers();
     } else {
       setError(response.error || 'Failed to approve user');
       showMessage('error', response.error || 'Failed to approve user');
+    }
+    setApproving(null);
+  };
+
+  const handleApproveMember = async (memberId: string) => {
+    setApproving(memberId);
+    setError(null);
+    const response = await api.post(`/api/chairman/members/${memberId}/approve`);
+    if (!response.error) {
+      showMessage('success', 'Member approved successfully');
+      await loadUsers();
+      await loadMembers();
+    } else {
+      setError(response.error || 'Failed to approve member');
+      showMessage('error', response.error || 'Failed to approve member');
+    }
+    setApproving(null);
+  };
+
+  const handleSuspendMember = async (memberId: string) => {
+    setSuspending(memberId);
+    setError(null);
+    const response = await api.post(`/api/chairman/members/${memberId}/suspend`);
+    if (!response.error) {
+      showMessage('success', 'Member suspended successfully');
+      await loadUsers();
+      await loadMembers();
+    } else {
+      setError(response.error || 'Failed to suspend member');
+      showMessage('error', response.error || 'Failed to suspend member');
+    }
+    setSuspending(null);
+  };
+
+  const handleReactivateMember = async (memberId: string) => {
+    setApproving(memberId);
+    setError(null);
+    const response = await api.post(`/api/chairman/members/${memberId}/activate`);
+    if (!response.error) {
+      showMessage('success', 'Member reactivated successfully');
+      await loadUsers();
+      await loadMembers();
+    } else {
+      setError(response.error || 'Failed to reactivate member');
+      showMessage('error', response.error || 'Failed to reactivate member');
     }
     setApproving(null);
   };
@@ -251,6 +339,20 @@ export default function UserManagementPage() {
     }
   };
 
+  // Filter users based on filterStatus
+  const filteredUsers = users.filter(user => {
+    if (filterStatus === 'all') return true;
+    if (filterStatus === 'pending') {
+      // Show if user is not approved OR member status is pending
+      return user.approved !== true || user.member_status === 'pending';
+    }
+    if (filterStatus === 'approved') {
+      // Show if user is approved AND (no member profile OR member is active)
+      return user.approved === true && (!user.member_status || user.member_status === 'active');
+    }
+    return true;
+  });
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200">
       <nav className="fixed top-0 left-0 right-0 z-50 bg-white shadow-lg border-b-2 border-blue-200">
@@ -286,125 +388,334 @@ export default function UserManagementPage() {
         )}
 
         <div className="card">
-          <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">
-            Manage User Roles
-          </h2>
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 md:mb-6 gap-4">
+            <h2 className="text-xl md:text-2xl font-bold text-blue-900">
+              Manage User Roles & Members
+            </h2>
+            
+            {/* Filter Toggle */}
+            <div className="flex gap-2 bg-blue-100 p-1 rounded-lg border-2 border-blue-300">
+              <button
+                onClick={() => setFilterStatus('pending')}
+                className={`px-3 md:px-4 py-2 rounded-md font-semibold text-xs md:text-sm transition-all ${
+                  filterStatus === 'pending'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-blue-700 hover:bg-blue-200'
+                }`}
+              >
+                Pending
+              </button>
+              <button
+                onClick={() => setFilterStatus('approved')}
+                className={`px-3 md:px-4 py-2 rounded-md font-semibold text-xs md:text-sm transition-all ${
+                  filterStatus === 'approved'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-blue-700 hover:bg-blue-200'
+                }`}
+              >
+                Approved
+              </button>
+              <button
+                onClick={() => setFilterStatus('all')}
+                className={`px-3 md:px-4 py-2 rounded-md font-semibold text-xs md:text-sm transition-all ${
+                  filterStatus === 'all'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'text-blue-700 hover:bg-blue-200'
+                }`}
+              >
+                All
+              </button>
+            </div>
+          </div>
 
           {loading ? (
             <div className="text-center py-12">
               <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
               <p className="mt-4 text-blue-700 text-lg">Loading users...</p>
             </div>
-          ) : users.length === 0 ? (
+          ) : filteredUsers.length === 0 ? (
             <div className="text-center py-12">
-              <p className="text-blue-700 text-lg">No users found.</p>
+              <p className="text-blue-700 text-lg">No {filterStatus === 'all' ? '' : filterStatus} users found.</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr className="bg-blue-100 border-b-2 border-blue-300">
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Name
-                    </th>
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Email
-                    </th>
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Current Role
-                    </th>
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Status
-                    </th>
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Actions
-                    </th>
-                    <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                      Credit Rating
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {users.map((user) => (
-                    <tr
-                      key={user.id}
-                      className="border-b border-blue-200 hover:bg-blue-50 transition-colors"
-                    >
-                      <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+            <>
+              {/* Desktop Table View */}
+              <div className="hidden md:block overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="bg-blue-100 border-b-2 border-blue-300">
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Name
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Email
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Role
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Status
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Member Status
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Actions
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Credit Rating
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredUsers.map((user) => (
+                      <tr
+                        key={user.id}
+                        className="border-b border-blue-200 hover:bg-blue-50 transition-colors"
+                      >
+                        <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                          {user.first_name || user.last_name
+                            ? `${user.first_name || ''} ${user.last_name || ''}`.trim()
+                            : 'N/A'}
+                        </td>
+                        <td className="p-3 md:p-4 text-sm md:text-base text-blue-800 break-words">
+                          {user.email}
+                        </td>
+                        <td className="p-3 md:p-4">
+                          <span className="inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold bg-blue-200 text-blue-800 capitalize">
+                            {user.role}
+                          </span>
+                        </td>
+                        <td className="p-3 md:p-4">
+                          <span
+                            className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
+                              user.approved === true
+                                ? 'bg-green-200 text-green-800'
+                                : 'bg-yellow-200 text-yellow-800'
+                            }`}
+                          >
+                            {user.approved === true ? 'Approved' : 'Pending'}
+                          </span>
+                        </td>
+                        <td className="p-3 md:p-4">
+                          {user.member_status ? (
+                            <span
+                              className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold capitalize ${
+                                user.member_status === 'active'
+                                  ? 'bg-green-200 text-green-800'
+                                  : user.member_status === 'pending'
+                                  ? 'bg-yellow-200 text-yellow-800'
+                                  : 'bg-red-200 text-red-800'
+                              }`}
+                            >
+                              {user.member_status}
+                              {user.member_activated_at && user.member_status === 'active' && (
+                                <span className="ml-1 text-xs">
+                                  ({new Date(user.member_activated_at).toLocaleDateString()})
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-blue-600">No member profile</span>
+                          )}
+                        </td>
+                        <td className="p-3 md:p-4">
+                          <div className="flex flex-col gap-2">
+                            <select
+                              value={user.role}
+                              onChange={(e) => handleRoleUpdate(user.id, e.target.value)}
+                              disabled={updating === user.id || approving === user.id}
+                              className="px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {ROLES.map((role) => (
+                                <option key={role} value={role} className="capitalize">
+                                  {role}
+                                </option>
+                              ))}
+                            </select>
+                            <div className="flex gap-2">
+                              {user.approved !== true && (
+                                <button
+                                  onClick={() => handleApprove(user.id)}
+                                  disabled={approving === user.id || updating === user.id}
+                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
+                                >
+                                  {approving === user.id ? 'Approving...' : 'Approve User'}
+                                </button>
+                              )}
+                              {user.member_id && user.member_status === 'pending' && (
+                                <button
+                                  onClick={() => handleApproveMember(user.member_id!)}
+                                  disabled={approving === user.member_id || updating === user.id}
+                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
+                                >
+                                  {approving === user.member_id ? 'Approving...' : 'Approve Member'}
+                                </button>
+                              )}
+                              {user.member_id && user.member_status === 'active' && (
+                                <button
+                                  onClick={() => handleSuspendMember(user.member_id!)}
+                                  disabled={suspending === user.member_id || updating === user.id}
+                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-red-500 to-red-600 border-2 border-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
+                                >
+                                  {suspending === user.member_id ? 'Suspending...' : 'Suspend'}
+                                </button>
+                              )}
+                              {user.member_id && user.member_status === 'suspended' && (
+                                <button
+                                  onClick={() => handleReactivateMember(user.member_id!)}
+                                  disabled={approving === user.member_id || updating === user.id}
+                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
+                                >
+                                  {approving === user.member_id ? 'Reactivating...' : 'Reactivate'}
+                                </button>
+                              )}
+                            </div>
+                            {updating === user.id && (
+                              <span className="text-blue-600 text-xs">Updating role...</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-3 md:p-4">
+                          {user.role !== 'admin' && (
+                            <div className="flex flex-col gap-2">
+                              <button
+                                onClick={() => openCreditRatingModal(user.id)}
+                                className="px-3 py-2 bg-gradient-to-br from-purple-500 to-purple-600 border-2 border-purple-600 text-white rounded-xl hover:from-purple-600 hover:to-purple-700 text-xs md:text-sm font-semibold transition-all duration-200"
+                              >
+                                Assign Rating
+                              </button>
+                              {userCreditRatings[user.id] && (
+                                <div className="text-xs text-blue-700 font-medium">
+                                  <span className="text-blue-600">Rating: </span>
+                                  <span className="font-semibold text-blue-900">{userCreditRatings[user.id].tier_name}</span>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Mobile Card View */}
+              <div className="md:hidden space-y-4">
+                {filteredUsers.map((user) => (
+                  <div
+                    key={user.id}
+                    className="bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-xl p-4 space-y-3"
+                  >
+                    <div>
+                      <h3 className="font-bold text-base text-blue-900">
                         {user.first_name || user.last_name
                           ? `${user.first_name || ''} ${user.last_name || ''}`.trim()
                           : 'N/A'}
-                      </td>
-                      <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
-                        {user.email}
-                      </td>
-                      <td className="p-3 md:p-4">
-                        <span className="inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold bg-blue-200 text-blue-800 capitalize">
-                          {user.role}
-                        </span>
-                      </td>
-                      <td className="p-3 md:p-4">
+                      </h3>
+                      <p className="text-sm text-blue-700 break-words">{user.email}</p>
+                    </div>
+                    
+                    <div className="flex flex-wrap gap-2">
+                      <span className="inline-block px-3 py-1 rounded-full text-xs font-semibold bg-blue-200 text-blue-800 capitalize">
+                        {user.role}
+                      </span>
+                      <span
+                        className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
+                          user.approved === true
+                            ? 'bg-green-200 text-green-800'
+                            : 'bg-yellow-200 text-yellow-800'
+                        }`}
+                      >
+                        {user.approved === true ? 'Approved' : 'Pending'}
+                      </span>
+                      {user.member_status && (
                         <span
-                          className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
-                            user.approved === true
+                          className={`inline-block px-3 py-1 rounded-full text-xs font-semibold capitalize ${
+                            user.member_status === 'active'
                               ? 'bg-green-200 text-green-800'
-                              : 'bg-yellow-200 text-yellow-800'
+                              : user.member_status === 'pending'
+                              ? 'bg-yellow-200 text-yellow-800'
+                              : 'bg-red-200 text-red-800'
                           }`}
                         >
-                          {user.approved === true ? 'Approved' : 'Pending'}
+                          {user.member_status}
                         </span>
-                      </td>
-                      <td className="p-3 md:p-4">
-                        <div className="flex flex-col md:flex-row gap-2 md:gap-3">
-                          <select
-                            value={user.role}
-                            onChange={(e) => handleRoleUpdate(user.id, e.target.value)}
-                            disabled={updating === user.id || approving === user.id}
-                            className="flex-1 md:flex-none px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 text-sm md:text-base focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      )}
+                    </div>
+
+                    <div className="space-y-2">
+                      <select
+                        value={user.role}
+                        onChange={(e) => handleRoleUpdate(user.id, e.target.value)}
+                        disabled={updating === user.id || approving === user.id}
+                        className="w-full px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {ROLES.map((role) => (
+                          <option key={role} value={role} className="capitalize">
+                            {role}
+                          </option>
+                        ))}
+                      </select>
+                      
+                      <div className="flex flex-col gap-2">
+                        {user.approved !== true && (
+                          <button
+                            onClick={() => handleApprove(user.id)}
+                            disabled={approving === user.id || updating === user.id}
+                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
                           >
-                            {ROLES.map((role) => (
-                              <option key={role} value={role} className="capitalize">
-                                {role}
-                              </option>
-                            ))}
-                          </select>
-                          {user.approved !== true && (
-                            <button
-                              onClick={() => handleApprove(user.id)}
-                              disabled={approving === user.id || updating === user.id}
-                              className="px-4 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200"
-                            >
-                              {approving === user.id ? 'Approving...' : 'Approve'}
-                            </button>
-                          )}
-                          {updating === user.id && (
-                            <span className="text-blue-600 text-sm self-center">Updating role...</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-3 md:p-4">
-                        {user.role !== 'admin' && (
-                          <div className="flex flex-col gap-2">
-                            <button
-                              onClick={() => openCreditRatingModal(user.id)}
-                              className="px-3 py-2 bg-gradient-to-br from-purple-500 to-purple-600 border-2 border-purple-600 text-white rounded-xl hover:from-purple-600 hover:to-purple-700 text-sm md:text-base font-semibold transition-all duration-200"
-                            >
-                              Assign Rating
-                            </button>
-                            {userCreditRatings[user.id] && (
-                              <div className="text-xs md:text-sm text-blue-700 font-medium">
-                                <span className="text-blue-600">Rating: </span>
-                                <span className="font-semibold text-blue-900">{userCreditRatings[user.id].tier_name}</span>
-                              </div>
-                            )}
-                          </div>
+                            {approving === user.id ? 'Approving...' : 'Approve User'}
+                          </button>
                         )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                        {user.member_id && user.member_status === 'pending' && (
+                          <button
+                            onClick={() => handleApproveMember(user.member_id!)}
+                            disabled={approving === user.member_id || updating === user.id}
+                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
+                          >
+                            {approving === user.member_id ? 'Approving...' : 'Approve Member'}
+                          </button>
+                        )}
+                        {user.member_id && user.member_status === 'active' && (
+                          <button
+                            onClick={() => handleSuspendMember(user.member_id!)}
+                            disabled={suspending === user.member_id || updating === user.id}
+                            className="w-full px-3 py-2 bg-gradient-to-br from-red-500 to-red-600 border-2 border-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
+                          >
+                            {suspending === user.member_id ? 'Suspending...' : 'Suspend Member'}
+                          </button>
+                        )}
+                        {user.member_id && user.member_status === 'suspended' && (
+                          <button
+                            onClick={() => handleReactivateMember(user.member_id!)}
+                            disabled={approving === user.member_id || updating === user.id}
+                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
+                          >
+                            {approving === user.member_id ? 'Reactivating...' : 'Reactivate Member'}
+                          </button>
+                        )}
+                        {user.role !== 'admin' && (
+                          <button
+                            onClick={() => openCreditRatingModal(user.id)}
+                            className="w-full px-3 py-2 bg-gradient-to-br from-purple-500 to-purple-600 border-2 border-purple-600 text-white rounded-xl hover:from-purple-600 hover:to-purple-700 text-sm font-semibold transition-all duration-200"
+                          >
+                            Assign Credit Rating
+                          </button>
+                        )}
+                      </div>
+                      
+                      {userCreditRatings[user.id] && (
+                        <div className="text-xs text-blue-700 font-medium">
+                          <span className="text-blue-600">Rating: </span>
+                          <span className="font-semibold text-blue-900">{userCreditRatings[user.id].tier_name}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
         </div>
 
@@ -425,7 +736,7 @@ export default function UserManagementPage() {
                     <select
                       value={selectedCycle}
                       onChange={(e) => setSelectedCycle(e.target.value)}
-                      className="w-full"
+                      className="w-full px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                       required
                     >
                       <option value="">Select a cycle</option>
@@ -446,7 +757,7 @@ export default function UserManagementPage() {
                         <select
                           value={selectedTier}
                           onChange={(e) => setSelectedTier(e.target.value)}
-                          className="w-full"
+                          className="w-full px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           required
                         >
                           <option value="">Select a tier</option>
@@ -465,7 +776,7 @@ export default function UserManagementPage() {
                         <textarea
                           value={ratingNotes}
                           onChange={(e) => setRatingNotes(e.target.value)}
-                          className="w-full"
+                          className="w-full px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                           rows={3}
                           placeholder="Add any notes about this credit rating assignment..."
                         />

@@ -53,6 +53,18 @@ def create_ledger_accounts(db: Session):
             "account_type": AccountType.INCOME,
             "description": "Penalty income from late payments"
         },
+        {
+            "account_code": "SOC_FUND_REC",
+            "account_name": "Social Fund Receivable",
+            "account_type": AccountType.ASSET,
+            "description": "Social fund receivables from members (contra account for member social fund accounts)"
+        },
+        {
+            "account_code": "ADM_FUND_REC",
+            "account_name": "Admin Fund Receivable",
+            "account_type": AccountType.ASSET,
+            "description": "Admin fund receivables from members (contra account for member admin fund accounts)"
+        },
     ]
     
     created_count = 0
@@ -136,6 +148,44 @@ def create_ledger_accounts(db: Session):
             db.add(loans_account)
             member_accounts_created += 1
             print(f"✓ Created loans receivable account for member {member.id}")
+        
+        # Social Fund Account (member-specific, ASSET type for receivable tracking)
+        social_fund_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member.id,
+            LedgerAccount.account_name.ilike("%social fund%")
+        ).first()
+        
+        if not social_fund_account:
+            short_id = str(member.id).replace('-', '')[:8]
+            social_fund_account = LedgerAccount(
+                account_code=f"MEM_SOC_{short_id}",
+                account_name=f"Social Fund - {member.id}",
+                account_type=AccountType.ASSET,  # ASSET for receivable tracking
+                member_id=member.id,
+                description=f"Social fund receivable account for member {member.id}"
+            )
+            db.add(social_fund_account)
+            member_accounts_created += 1
+            print(f"✓ Created social fund account for member {member.id}")
+        
+        # Admin Fund Account (member-specific, ASSET type for receivable tracking)
+        admin_fund_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member.id,
+            LedgerAccount.account_name.ilike("%admin fund%")
+        ).first()
+        
+        if not admin_fund_account:
+            short_id = str(member.id).replace('-', '')[:8]
+            admin_fund_account = LedgerAccount(
+                account_code=f"MEM_ADM_{short_id}",
+                account_name=f"Admin Fund - {member.id}",
+                account_type=AccountType.ASSET,  # ASSET for receivable tracking
+                member_id=member.id,
+                description=f"Admin fund receivable account for member {member.id}"
+            )
+            db.add(admin_fund_account)
+            member_accounts_created += 1
+            print(f"✓ Created admin fund account for member {member.id}")
     
     db.commit()
     

@@ -229,6 +229,272 @@ def get_active_cycles(
         return []
 
 
+@router.get("/penalties/pending")
+def get_pending_penalties(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get pending penalties for the current member."""
+    from app.models.transaction import PenaltyRecord, PenaltyRecordStatus
+    
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        return {"total_amount": 0.0, "penalties": []}
+    
+    # Get all pending penalties for this member (exclude POSTED ones)
+    pending_penalties = db.query(PenaltyRecord).filter(
+        PenaltyRecord.member_id == member_profile.id,
+        PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING, PenaltyRecordStatus.APPROVED])
+    ).all()
+    
+    total_amount = Decimal("0.00")
+    penalties_list = []
+    
+    for penalty in pending_penalties:
+        # Get penalty type to get fee amount
+        penalty_type = penalty.penalty_type
+        fee_amount = penalty_type.fee_amount if penalty_type else Decimal("0.00")
+        total_amount += fee_amount
+        
+        penalties_list.append({
+            "id": str(penalty.id),
+            "penalty_type_name": penalty_type.name if penalty_type else "Unknown",
+            "fee_amount": float(fee_amount),
+            "date_issued": penalty.date_issued.isoformat() if penalty.date_issued else None,
+            "notes": penalty.notes
+        })
+    
+    return {
+        "total_amount": float(total_amount),
+        "penalties": penalties_list
+    }
+
+
+@router.get("/declarations/applicable-penalties")
+def get_applicable_penalties(
+    cycle_id: str,
+    effective_month: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all applicable penalties for a declaration, including pending penalty records and late declaration penalty.
+    
+    Excludes penalties that were already paid (included in an approved declaration).
+    """
+    from datetime import date
+    from app.models.cycle import Cycle, CyclePhase, PhaseType
+    from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, Declaration, DeclarationStatus
+    from sqlalchemy import extract
+    from uuid import UUID
+    
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        return {"total_amount": 0.0, "penalties": []}
+    
+    try:
+        cycle_uuid = UUID(cycle_id)
+        effective_date = date.fromisoformat(effective_month)
+    except (ValueError, TypeError):
+        return {"total_amount": 0.0, "penalties": []}
+    
+    penalties_list = []
+    total_amount = Decimal("0.00")
+    
+    # 1. Get all unpaid penalty records (PENDING, APPROVED, and POSTED)
+    # POSTED penalties are charged but not yet paid - they need to be included in declaration
+    # We'll exclude penalties that were already included in an approved declaration
+    all_penalty_records = db.query(PenaltyRecord).filter(
+        PenaltyRecord.member_id == member_profile.id,
+        PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING, PenaltyRecordStatus.APPROVED, PenaltyRecordStatus.POSTED])
+    ).all()
+    
+    # Check if there's an approved declaration for this month that might have already paid some penalties
+    existing_approved = db.query(Declaration).filter(
+        Declaration.member_id == member_profile.id,
+        Declaration.cycle_id == cycle_uuid,
+        extract('year', Declaration.effective_month) == effective_date.year,
+        extract('month', Declaration.effective_month) == effective_date.month,
+        Declaration.status == DeclarationStatus.APPROVED
+    ).first()
+    
+    # If there's an approved declaration with penalties, we need to be careful
+    # For now, include all penalties - the member should see all unpaid penalties
+    # The Treasurer will verify the amounts match when approving the deposit
+    pending_penalty_records = all_penalty_records
+    
+    for penalty in pending_penalty_records:
+        penalty_type = penalty.penalty_type
+        fee_amount = penalty_type.fee_amount if penalty_type else Decimal("0.00")
+        total_amount += fee_amount
+        
+        penalties_list.append({
+            "id": str(penalty.id),
+            "penalty_type_name": penalty_type.name if penalty_type else "Unknown",
+            "fee_amount": float(fee_amount),
+            "date_issued": penalty.date_issued.isoformat() if penalty.date_issued else None,
+            "notes": penalty.notes,
+            "source": "penalty_record"
+        })
+    
+    # 2. Check for late declaration penalty
+    # If there's an approved declaration with penalties, don't include late penalty again
+    late_penalty_already_paid = False
+    if existing_approved and existing_approved.declared_penalties and existing_approved.declared_penalties > 0:
+        # Check if late penalty was likely included (this is a heuristic - we can't be 100% sure)
+        # But if there's an approved declaration with penalties for this month, assume late penalty was paid
+        late_penalty_already_paid = True
+    
+    if not late_penalty_already_paid:
+        # Get the cycle and declaration phase
+        cycle = db.query(Cycle).filter(Cycle.id == cycle_uuid).first()
+        if cycle:
+            declaration_phase = db.query(CyclePhase).filter(
+                CyclePhase.cycle_id == cycle_uuid,
+                CyclePhase.phase_type == PhaseType.DECLARATION
+            ).first()
+            
+            if declaration_phase:
+                auto_apply = getattr(declaration_phase, 'auto_apply_penalty', False)
+                monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
+                
+                if auto_apply and monthly_end_day:
+                    today = date.today()
+                    is_late = False
+                    
+                    # Check if declaration is late
+                    if today.year == effective_date.year and today.month == effective_date.month:
+                        if today.day > monthly_end_day:
+                            is_late = True
+                    elif today.year > effective_date.year or (today.year == effective_date.year and today.month > effective_date.month):
+                        is_late = True
+                    
+                    if is_late:
+                        penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
+                        if penalty_type_id:
+                            from app.models.transaction import PenaltyType
+                            penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+                            if penalty_type:
+                                late_penalty_amount = Decimal(str(penalty_type.fee_amount))
+                                total_amount += late_penalty_amount
+                                
+                                penalties_list.append({
+                                    "id": None,  # Late penalty doesn't have a record ID
+                                    "penalty_type_name": penalty_type.name,
+                                    "fee_amount": float(late_penalty_amount),
+                                    "date_issued": None,
+                                    "notes": f"Declaration made after day {monthly_end_day} of the month (Declaration period ends on day {monthly_end_day})",
+                                    "source": "late_declaration"
+                                })
+                        else:
+                            # Fallback to deprecated penalty_amount
+                            penalty_amount = getattr(declaration_phase, 'penalty_amount', None)
+                            if penalty_amount:
+                                late_penalty_amount = Decimal(str(penalty_amount))
+                                total_amount += late_penalty_amount
+                                
+                                penalties_list.append({
+                                    "id": None,
+                                    "penalty_type_name": "Late Declaration Penalty",
+                                    "fee_amount": float(late_penalty_amount),
+                                    "date_issued": None,
+                                    "notes": f"Declaration made after day {monthly_end_day} of the month (Declaration period ends on day {monthly_end_day})",
+                                    "source": "late_declaration"
+                                })
+    
+    return {
+        "total_amount": float(total_amount),
+        "penalties": penalties_list
+    }
+
+
+@router.get("/declarations/late-penalty")
+def get_late_declaration_penalty(
+    cycle_id: str,
+    effective_month: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get penalty amount for late declaration based on cycle phase configuration.
+    
+    Checks if the declaration is being made after the declaration period end day,
+    and if auto_apply_penalty is enabled, returns the penalty amount from the cycle phase.
+    """
+    from datetime import date
+    from app.models.cycle import Cycle, CyclePhase, PhaseType
+    from uuid import UUID
+    
+    try:
+        cycle_uuid = UUID(cycle_id)
+        effective_date = date.fromisoformat(effective_month)
+    except (ValueError, TypeError):
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Invalid cycle_id or effective_month"}
+    
+    # Get the cycle
+    cycle = db.query(Cycle).filter(Cycle.id == cycle_uuid).first()
+    if not cycle:
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Cycle not found"}
+    
+    # Get the declaration phase for this cycle
+    declaration_phase = db.query(CyclePhase).filter(
+        CyclePhase.cycle_id == cycle_uuid,
+        CyclePhase.phase_type == PhaseType.DECLARATION
+    ).first()
+    
+    if not declaration_phase:
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Declaration phase not configured"}
+    
+    # Check if auto_apply_penalty is enabled
+    if not getattr(declaration_phase, 'auto_apply_penalty', False):
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Auto-apply penalty not enabled"}
+    
+    # Check if monthly_end_day is set
+    monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
+    if not monthly_end_day:
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Declaration period end day not configured"}
+    
+    # Check if today's date is after the end day of the effective month
+    today = date.today()
+    is_late = False
+    
+    # If declaration is for current month and today is after the end day
+    if today.year == effective_date.year and today.month == effective_date.month:
+        if today.day > monthly_end_day:
+            is_late = True
+    # Also check if declaration is for a past month (always late)
+    elif today.year > effective_date.year or (today.year == effective_date.year and today.month > effective_date.month):
+        is_late = True
+    
+    if not is_late:
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Declaration is not late"}
+    
+    # Get penalty type and amount
+    penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
+    if not penalty_type_id:
+        # Fallback to deprecated penalty_amount if penalty_type_id not set
+        penalty_amount = getattr(declaration_phase, 'penalty_amount', None)
+        if penalty_amount:
+            return {
+                "penalty_amount": float(penalty_amount),
+                "penalty_type_name": "Late Declaration Penalty",
+                "reason": f"Declaration made after day {monthly_end_day} of the month"
+            }
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "No penalty type configured"}
+    
+    # Get penalty type details
+    from app.models.transaction import PenaltyType
+    penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+    if not penalty_type:
+        return {"penalty_amount": 0.0, "penalty_type_name": None, "reason": "Penalty type not found"}
+    
+    return {
+        "penalty_amount": float(penalty_type.fee_amount),
+        "penalty_type_name": penalty_type.name,
+        "penalty_type_id": str(penalty_type.id),
+        "reason": f"Declaration made after day {monthly_end_day} of the month",
+        "monthly_end_day": monthly_end_day
+    }
+
+
 @router.get("/declarations")
 def get_my_declarations(
     current_user: User = Depends(get_current_user),
@@ -327,18 +593,19 @@ def get_current_month_declaration(
 
 
 def _can_edit_declaration(effective_month: date) -> bool:
-    """Check if a declaration can still be edited (before 20th of the month)."""
+    """Check if a declaration can still be edited.
+    
+    Members can now edit declarations anytime for the current month (removed 20th day restriction).
+    The one-declaration-per-month rule still applies.
+    """
     from datetime import date
     today = date.today()
     
-    # Cannot edit declarations from previous months
+    # Cannot edit declarations from previous months (only current month can be edited)
     if today.year > effective_month.year or (today.year == effective_month.year and today.month > effective_month.month):
         return False
     
-    # Cannot edit after the 20th of the current month
-    if today.year == effective_month.year and today.month == effective_month.month and today.day > 20:
-        return False
-    
+    # Allow editing current month declarations anytime (removed 20th day restriction)
     return True
 
 
@@ -349,7 +616,7 @@ def update_declaration_endpoint(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Update a declaration. Only allowed before the 20th of the month."""
+    """Update a declaration. Allowed for current month declarations (one per month rule still applies)."""
     from uuid import UUID
     
     member_profile = get_member_profile_by_user_id(db, current_user.id)
@@ -1013,6 +1280,349 @@ def get_statement(
             }
             for entry in journal_entries
         ]
+    }
+
+
+@router.get("/transactions")
+def get_account_transactions(
+    type: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get transaction history for a specific account type.
+    
+    Types: savings, penalties, social_fund, admin_fund
+    """
+    from typing import Literal
+    from app.models.ledger import LedgerAccount, JournalEntry, JournalLine
+    from app.models.transaction import DepositProof, DepositApproval
+    
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=404, detail="Member profile not found")
+    
+    valid_types = ["savings", "penalties", "social_fund", "admin_fund"]
+    if type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type. Must be one of: {', '.join(valid_types)}"
+        )
+    
+    transactions = []
+    
+    if type == "savings":
+        from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositApproval
+        
+        # Get member's savings account
+        savings_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_profile.id,
+            LedgerAccount.account_name.ilike("%savings%")
+        ).first()
+        
+        if savings_account:
+            # Get journal lines for this account, but EXCLUDE penalty-related entries
+            # Only include credits from deposit approvals (actual savings deposits)
+            journal_lines = db.query(JournalLine).join(JournalEntry).filter(
+                JournalLine.ledger_account_id == savings_account.id,
+                JournalEntry.reversed_by.is_(None),  # Exclude reversed entries
+                JournalEntry.source_type == "deposit_approval",  # Only deposit approvals
+                JournalLine.credit_amount > 0  # Only credits (deposits)
+            ).order_by(JournalEntry.entry_date.desc()).all()
+            
+            for line in journal_lines:
+                # Get the deposit proof to show more details
+                deposit_approval = db.query(DepositApproval).filter(
+                    DepositApproval.journal_entry_id == line.journal_entry.id
+                ).first()
+                
+                description = "Member savings deposit"
+                if deposit_approval and deposit_approval.deposit_proof:
+                    declaration = deposit_approval.deposit_proof.declaration
+                    if declaration:
+                        description = f"Deposit approved for {declaration.effective_month.strftime('%B %Y')} declaration"
+                
+                transactions.append({
+                    "id": str(line.id),
+                    "date": line.journal_entry.entry_date.isoformat(),
+                    "description": description,
+                    "debit": 0.0,
+                    "credit": float(line.credit_amount),
+                    "amount": float(line.credit_amount)
+                })
+        
+        # Add declarations as debit entries (informational - shows when member declared savings)
+        declarations = db.query(Declaration).filter(
+            Declaration.member_id == member_profile.id,
+            Declaration.declared_savings_amount.isnot(None),
+            Declaration.declared_savings_amount > 0
+        ).order_by(Declaration.created_at.desc()).all()
+        
+        for declaration in declarations:
+            transactions.append({
+                "id": f"declaration_{declaration.id}",
+                "date": declaration.created_at.isoformat() if declaration.created_at else declaration.effective_month.isoformat(),
+                "description": f"Declaration for {declaration.effective_month.strftime('%B %Y')}",
+                "debit": float(declaration.declared_savings_amount),
+                "credit": 0.0,
+                "amount": float(declaration.declared_savings_amount),
+                "is_declaration": True
+            })
+        
+        # Sort all transactions by date (most recent first)
+        transactions.sort(key=lambda x: x["date"], reverse=True)
+    
+    elif type == "penalties":
+        from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, Declaration, DeclarationStatus
+        from app.models.cycle import Cycle, CyclePhase, PhaseType
+        from sqlalchemy import extract
+        from datetime import date as date_type
+        
+        # Get member's penalties account
+        penalties_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_profile.id,
+            LedgerAccount.account_name.ilike("%penalties%")
+        ).first()
+        
+        # 1. Get journal lines (payment entries) for this account
+        if penalties_account:
+            journal_lines = db.query(JournalLine).join(JournalEntry).filter(
+                JournalLine.ledger_account_id == penalties_account.id,
+                JournalEntry.reversed_by.is_(None)  # Exclude reversed entries
+            ).order_by(JournalEntry.entry_date.desc()).all()
+            
+            for line in journal_lines:
+                amount = float(line.debit_amount) if line.debit_amount > 0 else float(line.credit_amount)
+                transactions.append({
+                    "id": str(line.id),
+                    "date": line.journal_entry.entry_date.isoformat(),
+                    "description": line.description or line.journal_entry.description,
+                    "debit": float(line.debit_amount),
+                    "credit": float(line.credit_amount),
+                    "amount": amount,
+                    "is_penalty_record": False
+                })
+        
+        # 2. Get individual penalty records (all statuses to show complete history)
+        # These show the individual penalties that were charged
+        penalty_records = db.query(PenaltyRecord).filter(
+            PenaltyRecord.member_id == member_profile.id
+        ).order_by(PenaltyRecord.date_issued.desc()).all()
+        
+        for penalty in penalty_records:
+            penalty_type = penalty.penalty_type
+            fee_amount = float(penalty_type.fee_amount) if penalty_type else 0.0
+            
+            # Build description with penalty type name and notes
+            description = penalty_type.name if penalty_type else "Penalty"
+            if penalty.notes:
+                description += f" - {penalty.notes}"
+            
+            # Add status indicator for non-POSTED penalties
+            if penalty.status != PenaltyRecordStatus.POSTED:
+                description += f" ({penalty.status.value})"
+            
+            # All penalty records are shown as debits (charges)
+            transactions.append({
+                "id": f"penalty_{penalty.id}",
+                "date": penalty.date_issued.isoformat(),
+                "description": description,
+                "debit": fee_amount,
+                "credit": 0.0,
+                "amount": fee_amount,
+                "is_penalty_record": True,
+                "penalty_status": penalty.status.value
+            })
+        
+        # 3. Get late declaration penalties from declarations
+        # These are penalties that were automatically applied when declarations were made late
+        # They're stored in declared_penalties but don't have PenaltyRecord entries
+        declarations = db.query(Declaration).filter(
+            Declaration.member_id == member_profile.id,
+            Declaration.declared_penalties.isnot(None),
+            Declaration.declared_penalties > 0
+        ).order_by(Declaration.created_at.desc()).all()
+        
+        for declaration in declarations:
+            # Get the cycle and declaration phase to check if late penalty applies
+            cycle = db.query(Cycle).filter(Cycle.id == declaration.cycle_id).first()
+            if not cycle:
+                continue
+            
+            declaration_phase = db.query(CyclePhase).filter(
+                CyclePhase.cycle_id == declaration.cycle_id,
+                CyclePhase.phase_type == PhaseType.DECLARATION
+            ).first()
+            
+            if not declaration_phase:
+                continue
+            
+            auto_apply = getattr(declaration_phase, 'auto_apply_penalty', False)
+            monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
+            
+            if not (auto_apply and monthly_end_day):
+                continue
+            
+            # Check if declaration was made late
+            declaration_date = declaration.created_at.date() if declaration.created_at else None
+            if not declaration_date:
+                continue
+            
+            effective_date = declaration.effective_month
+            is_late = False
+            
+            # Check if declaration is late
+            if declaration_date.year == effective_date.year and declaration_date.month == effective_date.month:
+                if declaration_date.day > monthly_end_day:
+                    is_late = True
+            elif declaration_date.year > effective_date.year or (declaration_date.year == effective_date.year and declaration_date.month > effective_date.month):
+                is_late = True
+            
+            if is_late:
+                # Get penalty type for late declaration
+                penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
+                if penalty_type_id:
+                    from app.models.transaction import PenaltyType
+                    penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+                    if penalty_type:
+                        late_penalty_amount = float(penalty_type.fee_amount)
+                        
+                        # Only add if this penalty amount matches (to avoid duplicates)
+                        # We'll add it as a late declaration penalty
+                        transactions.append({
+                            "id": f"late_declaration_{declaration.id}",
+                            "date": declaration.created_at.isoformat() if declaration.created_at else effective_date.isoformat(),
+                            "description": f"{penalty_type.name} - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')}",
+                            "debit": late_penalty_amount,
+                            "credit": 0.0,
+                            "amount": late_penalty_amount,
+                            "is_penalty_record": True,
+                            "penalty_status": "POSTED",
+                            "is_late_declaration": True
+                        })
+                else:
+                    # Fallback to deprecated penalty_amount
+                    penalty_amount = getattr(declaration_phase, 'penalty_amount', None)
+                    if penalty_amount:
+                        late_penalty_amount = float(penalty_amount)
+                        transactions.append({
+                            "id": f"late_declaration_{declaration.id}",
+                            "date": declaration.created_at.isoformat() if declaration.created_at else effective_date.isoformat(),
+                            "description": f"Late Declaration Penalty - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')}",
+                            "debit": late_penalty_amount,
+                            "credit": 0.0,
+                            "amount": late_penalty_amount,
+                            "is_penalty_record": True,
+                            "penalty_status": "POSTED",
+                            "is_late_declaration": True
+                        })
+    
+    elif type == "social_fund":
+        # Get member's social fund account (member-specific)
+        member_social_fund_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_profile.id,
+            LedgerAccount.account_name.ilike("%social fund%")
+        ).first()
+        
+        if member_social_fund_account:
+            # Get all journal lines for this member's social fund account
+            journal_lines = db.query(JournalLine).join(JournalEntry).filter(
+                JournalLine.ledger_account_id == member_social_fund_account.id,
+                JournalEntry.reversed_by.is_(None)  # Exclude reversed entries
+            ).order_by(JournalEntry.entry_date.desc()).all()
+            
+            for line in journal_lines:
+                # Determine if this is initial requirement or payment
+                is_initial = line.journal_entry.source_type == "cycle_initial_requirement"
+                is_payment = line.journal_entry.source_type == "deposit_approval"
+                
+                if is_initial:
+                    # Initial required amount (debit)
+                    amount = float(line.debit_amount) if line.debit_amount and line.debit_amount > 0 else 0.0
+                    if amount > 0:
+                        transactions.append({
+                            "id": str(line.id),
+                            "date": line.journal_entry.entry_date.isoformat(),
+                            "description": line.description or line.journal_entry.description,
+                            "debit": amount,
+                            "credit": 0.0,
+                            "amount": amount,
+                            "is_initial_requirement": True
+                        })
+                elif is_payment:
+                    # Payment - check both debit and credit (handle legacy credits and new debits)
+                    # Handle None values and Decimal comparisons properly
+                    debit_val = line.debit_amount if line.debit_amount is not None else Decimal("0.00")
+                    credit_val = line.credit_amount if line.credit_amount is not None else Decimal("0.00")
+                    debit_amount = float(debit_val) if debit_val and debit_val > Decimal("0.00") else 0.0
+                    credit_amount = float(credit_val) if credit_val and credit_val > Decimal("0.00") else 0.0
+                    amount = debit_amount if debit_amount > 0 else credit_amount
+                    
+                    # Always show payment transactions, even if amount is 0 (for debugging)
+                    transactions.append({
+                        "id": str(line.id),
+                        "date": line.journal_entry.entry_date.isoformat(),
+                        "description": line.description or line.journal_entry.description,
+                        "debit": debit_amount,
+                        "credit": credit_amount,
+                        "amount": amount,
+                        "is_payment": True
+                    })
+    
+    elif type == "admin_fund":
+        # Get member's admin fund account (member-specific)
+        member_admin_fund_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_profile.id,
+            LedgerAccount.account_name.ilike("%admin fund%")
+        ).first()
+        
+        if member_admin_fund_account:
+            # Get all journal lines for this member's admin fund account
+            journal_lines = db.query(JournalLine).join(JournalEntry).filter(
+                JournalLine.ledger_account_id == member_admin_fund_account.id,
+                JournalEntry.reversed_by.is_(None)  # Exclude reversed entries
+            ).order_by(JournalEntry.entry_date.desc()).all()
+            
+            for line in journal_lines:
+                # Determine if this is initial requirement or payment
+                is_initial = line.journal_entry.source_type == "cycle_initial_requirement"
+                is_payment = line.journal_entry.source_type == "deposit_approval"
+                
+                if is_initial:
+                    # Initial required amount (debit)
+                    amount = float(line.debit_amount) if line.debit_amount > 0 else 0.0
+                    if amount > 0:
+                        transactions.append({
+                            "id": str(line.id),
+                            "date": line.journal_entry.entry_date.isoformat(),
+                            "description": line.description or line.journal_entry.description,
+                            "debit": amount,
+                            "credit": 0.0,
+                            "amount": amount,
+                            "is_initial_requirement": True
+                        })
+                elif is_payment:
+                    # Payment - check both debit and credit (handle legacy credits and new debits)
+                    # Handle None values and Decimal comparisons properly
+                    debit_val = line.debit_amount if line.debit_amount is not None else Decimal("0.00")
+                    credit_val = line.credit_amount if line.credit_amount is not None else Decimal("0.00")
+                    debit_amount = float(debit_val) if debit_val and debit_val > Decimal("0.00") else 0.0
+                    credit_amount = float(credit_val) if credit_val and credit_val > Decimal("0.00") else 0.0
+                    amount = debit_amount if debit_amount > 0 else credit_amount
+                    
+                    # Always show payment transactions, even if amount is 0 (for debugging)
+                    transactions.append({
+                        "id": str(line.id),
+                        "date": line.journal_entry.entry_date.isoformat(),
+                        "description": line.description or line.journal_entry.description,
+                        "debit": debit_amount,
+                        "credit": credit_amount,
+                        "amount": amount,
+                        "is_payment": True
+                    })
+    
+    return {
+        "type": type,
+        "transactions": transactions
     }
 
 

@@ -61,6 +61,7 @@ def get_my_penalties(
 ) -> List[Dict]:
     """Get member's penalties (user-scoped)."""
     from app.services.member import get_member_profile_by_user_id
+    from app.models.transaction import PenaltyType
     
     member_profile = get_member_profile_by_user_id(db, user_id)
     if not member_profile:
@@ -72,14 +73,29 @@ def get_my_penalties(
         pass
     
     penalties = query.all()
-    return [
-        {
+    result = []
+    for penalty in penalties:
+        penalty_info = {
             "penalty_id": str(penalty.id),
             "date_issued": penalty.date_issued.isoformat(),
-            "status": penalty.status.value
+            "status": penalty.status.value,
+            "notes": penalty.notes or ""
         }
-        for penalty in penalties
-    ]
+        
+        # Get penalty type information if available
+        try:
+            if penalty.penalty_type:
+                penalty_info["penalty_type"] = {
+                    "name": penalty.penalty_type.name,
+                    "description": penalty.penalty_type.description or "",
+                    "fee_amount": float(penalty.penalty_type.fee_amount)
+                }
+        except Exception:
+            pass
+        
+        result.append(penalty_info)
+    
+    return result
 
 
 def get_my_declarations(
@@ -241,6 +257,77 @@ def get_policy_answer(
     return {
         "context": context,
         "citations": citations
+    }
+
+
+def get_penalty_information(
+    db: Session
+) -> Dict:
+    """Get penalty types and cycle phase penalty configurations. Use this when users ask about penalties, penalty types, when penalties are applied, automatic penalties, or penalty rules."""
+    from app.models.transaction import PenaltyType
+    from app.models.cycle import Cycle, CyclePhase
+    from app.services.cycle import get_current_cycle
+    
+    # Get current active cycle
+    current_cycle = get_current_cycle(db)
+    if not current_cycle:
+        return {
+            "error": "No active cycle found",
+            "penalty_types": [],
+            "phase_penalties": []
+        }
+    
+    # Get all enabled penalty types
+    penalty_types = db.query(PenaltyType).filter(PenaltyType.enabled == "1").order_by(PenaltyType.name).all()
+    penalty_types_list = [
+        {
+            "id": str(pt.id),
+            "name": pt.name,
+            "description": pt.description or "",
+            "fee_amount": float(pt.fee_amount)
+        }
+        for pt in penalty_types
+    ]
+    
+    # Get cycle phases with penalty configurations
+    phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == current_cycle.id).all()
+    phase_penalties = []
+    
+    for phase in phases:
+        phase_info = {
+            "phase_type": phase.phase_type.value,
+            "phase_name": phase.phase_type.value.replace("_", " ").title(),
+            "monthly_start_day": phase.monthly_start_day,
+            "monthly_end_day": phase.monthly_end_day,
+            "has_penalty": False,
+            "penalty_type": None,
+            "auto_apply": False
+        }
+        
+        # Safely get penalty information (columns might not exist yet)
+        try:
+            penalty_type_id = getattr(phase, 'penalty_type_id', None)
+            if penalty_type_id:
+                # Find the penalty type
+                penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+                if penalty_type:
+                    phase_info["has_penalty"] = True
+                    phase_info["penalty_type"] = {
+                        "id": str(penalty_type.id),
+                        "name": penalty_type.name,
+                        "description": penalty_type.description or "",
+                        "fee_amount": float(penalty_type.fee_amount)
+                    }
+                    phase_info["auto_apply"] = getattr(phase, 'auto_apply_penalty', False)
+        except Exception:
+            pass
+        
+        phase_penalties.append(phase_info)
+    
+    return {
+        "cycle_year": current_cycle.year,
+        "penalty_types": penalty_types_list,
+        "phase_penalties": phase_penalties
     }
 
 

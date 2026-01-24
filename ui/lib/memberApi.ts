@@ -65,6 +65,26 @@ export interface DepositProof {
   upload_path: string;
 }
 
+export interface Transaction {
+  id: string;
+  date: string;
+  description: string;
+  debit: number;
+  credit: number;
+  amount: number;
+  is_penalty_record?: boolean;
+  penalty_status?: string;
+  is_late_declaration?: boolean;
+  is_declaration?: boolean;
+  is_initial_requirement?: boolean;
+  is_payment?: boolean;
+}
+
+export interface AccountTransactionsResponse {
+  type: string;
+  transactions: Transaction[];
+}
+
 export const memberApi = {
   createDeclaration: (data: DeclarationCreate) =>
     api.post<{ message: string; declaration_id: string }>('/api/member/declarations', data),
@@ -101,4 +121,7 @@ export const memberApi = {
   
   getCurrentLoan: () =>
     api.get<any>('/api/member/loans/current'),
+  
+  getAccountTransactions: (type: 'savings' | 'penalties' | 'social_fund' | 'admin_fund') =>
+    api.get<AccountTransactionsResponse>(`/api/member/transactions?type=${type}`),
 };

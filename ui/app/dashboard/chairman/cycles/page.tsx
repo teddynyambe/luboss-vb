@@ -24,6 +24,17 @@ interface Phase {
   id: string;
   phase_type: string;
   monthly_start_day: number | null;
+  monthly_end_day: number | null;
+  penalty_amount: number | null;
+  penalty_type_id?: string | null;
+  auto_apply_penalty?: boolean | null;
+}
+
+interface PenaltyType {
+  id: string;
+  name: string;
+  description: string;
+  fee_amount: string;
 }
 
 interface CreditRatingTier {
@@ -67,8 +78,21 @@ export default function ManageCyclesPage() {
   const [socialFundRequired, setSocialFundRequired] = useState('');
   const [adminFundRequired, setAdminFundRequired] = useState('');
   const [declarationStartDay, setDeclarationStartDay] = useState<number>(1);
+  const [declarationEndDay, setDeclarationEndDay] = useState<number | null>(null);
+  const [declarationPenalty, setDeclarationPenalty] = useState<string>('');
+  const [declarationPenaltyTypeId, setDeclarationPenaltyTypeId] = useState<string>('');
+  const [declarationAutoApplyPenalty, setDeclarationAutoApplyPenalty] = useState<boolean>(false);
   const [loanApplicationStartDay, setLoanApplicationStartDay] = useState<number>(1);
+  const [loanApplicationEndDay, setLoanApplicationEndDay] = useState<number | null>(null);
+  const [loanApplicationPenalty, setLoanApplicationPenalty] = useState<string>('');
+  const [loanApplicationPenaltyTypeId, setLoanApplicationPenaltyTypeId] = useState<string>('');
+  const [loanApplicationAutoApplyPenalty, setLoanApplicationAutoApplyPenalty] = useState<boolean>(false);
   const [depositsStartDay, setDepositsStartDay] = useState<number>(1);
+  const [depositsEndDay, setDepositsEndDay] = useState<number | null>(null);
+  const [depositsPenalty, setDepositsPenalty] = useState<string>('');
+  const [depositsPenaltyTypeId, setDepositsPenaltyTypeId] = useState<string>('');
+  const [depositsAutoApplyPenalty, setDepositsAutoApplyPenalty] = useState<boolean>(false);
+  const [penaltyTypes, setPenaltyTypes] = useState<PenaltyType[]>([]);
   
   // Credit rating scheme
   const [schemeName, setSchemeName] = useState('');
@@ -85,7 +109,19 @@ export default function ManageCyclesPage() {
 
   useEffect(() => {
     loadCycles();
+    loadPenaltyTypes();
   }, []);
+
+  const loadPenaltyTypes = async () => {
+    try {
+      const response = await api.get<PenaltyType[]>('/api/compliance/penalty-types');
+      if (response.data) {
+        setPenaltyTypes(response.data);
+      }
+    } catch (err) {
+      // Silently fail - penalty types are optional
+    }
+  };
 
   const loadCycles = async () => {
     try {
@@ -161,9 +197,21 @@ export default function ManageCyclesPage() {
     setStartDate('');
     setSocialFundRequired('');
     setAdminFundRequired('');
-    setDeclarationStartDay(1);
-    setLoanApplicationStartDay(1);
-    setDepositsStartDay(1);
+        setDeclarationStartDay(1);
+        setDeclarationEndDay(null);
+        setDeclarationPenalty('');
+        setDeclarationPenaltyTypeId('');
+        setDeclarationAutoApplyPenalty(false);
+        setLoanApplicationStartDay(1);
+        setLoanApplicationEndDay(null);
+        setLoanApplicationPenalty('');
+        setLoanApplicationPenaltyTypeId('');
+        setLoanApplicationAutoApplyPenalty(false);
+        setDepositsStartDay(1);
+        setDepositsEndDay(null);
+        setDepositsPenalty('');
+        setDepositsPenaltyTypeId('');
+        setDepositsAutoApplyPenalty(false);
     setSchemeName('');
     setSchemeDescription('');
     setTiers([{
@@ -197,10 +245,22 @@ export default function ManageCyclesPage() {
           cycle.phases.forEach(phase => {
             if (phase.phase_type === 'declaration') {
               setDeclarationStartDay(phase.monthly_start_day || 1);
+              setDeclarationEndDay(phase.monthly_end_day || null);
+              setDeclarationPenalty(phase.penalty_amount?.toString() || '');
+              setDeclarationPenaltyTypeId(phase.penalty_type_id || '');
+              setDeclarationAutoApplyPenalty(phase.auto_apply_penalty || false);
             } else if (phase.phase_type === 'loan_application') {
               setLoanApplicationStartDay(phase.monthly_start_day || 1);
+              setLoanApplicationEndDay(phase.monthly_end_day || null);
+              setLoanApplicationPenalty(phase.penalty_amount?.toString() || '');
+              setLoanApplicationPenaltyTypeId(phase.penalty_type_id || '');
+              setLoanApplicationAutoApplyPenalty(phase.auto_apply_penalty || false);
             } else if (phase.phase_type === 'deposits') {
               setDepositsStartDay(phase.monthly_start_day || 1);
+              setDepositsEndDay(phase.monthly_end_day || null);
+              setDepositsPenalty(phase.penalty_amount?.toString() || '');
+              setDepositsPenaltyTypeId(phase.penalty_type_id || '');
+              setDepositsAutoApplyPenalty(phase.auto_apply_penalty || false);
             }
           });
         }
@@ -250,6 +310,20 @@ export default function ManageCyclesPage() {
       return;
     }
 
+    // Validate end days if provided
+    if (declarationEndDay !== null && (declarationEndDay < 1 || declarationEndDay > 31)) {
+      setError('Declaration end day must be between 1 and 31');
+      return;
+    }
+    if (loanApplicationEndDay !== null && (loanApplicationEndDay < 1 || loanApplicationEndDay > 31)) {
+      setError('Loan application end day must be between 1 and 31');
+      return;
+    }
+    if (depositsEndDay !== null && (depositsEndDay < 1 || depositsEndDay > 31)) {
+      setError('Deposits end day must be between 1 and 31');
+      return;
+    }
+
     if (schemeName && tiers.some(t => !t.tier_name || t.multiplier <= 0)) {
       setError('Please fill in all credit rating tier details');
       return;
@@ -263,9 +337,30 @@ export default function ManageCyclesPage() {
         admin_fund_required: adminFundRequired ? parseFloat(adminFundRequired) : undefined
       },
       phase_configs: [
-        { phase_type: 'declaration', monthly_start_day: declarationStartDay },
-        { phase_type: 'loan_application', monthly_start_day: loanApplicationStartDay },
-        { phase_type: 'deposits', monthly_start_day: depositsStartDay }
+        { 
+          phase_type: 'declaration', 
+          monthly_start_day: declarationStartDay,
+          monthly_end_day: declarationEndDay || undefined,
+          penalty_amount: declarationPenalty ? parseFloat(declarationPenalty) : undefined,
+          penalty_type_id: declarationPenaltyTypeId || undefined,
+          auto_apply_penalty: declarationAutoApplyPenalty
+        },
+        { 
+          phase_type: 'loan_application', 
+          monthly_start_day: loanApplicationStartDay,
+          monthly_end_day: loanApplicationEndDay || undefined,
+          penalty_amount: loanApplicationPenalty ? parseFloat(loanApplicationPenalty) : undefined,
+          penalty_type_id: loanApplicationPenaltyTypeId || undefined,
+          auto_apply_penalty: loanApplicationAutoApplyPenalty
+        },
+        { 
+          phase_type: 'deposits', 
+          monthly_start_day: depositsStartDay,
+          monthly_end_day: depositsEndDay || undefined,
+          penalty_amount: depositsPenalty ? parseFloat(depositsPenalty) : undefined,
+          penalty_type_id: depositsPenaltyTypeId || undefined,
+          auto_apply_penalty: depositsAutoApplyPenalty
+        }
       ],
       credit_rating_scheme: schemeName ? {
         name: schemeName,
@@ -519,55 +614,229 @@ export default function ManageCyclesPage() {
 
               {/* Phase Configuration */}
               <div className="border-b-2 border-blue-200 pb-4">
-                <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-4">Monthly Phase Start Days</h3>
+                <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-2">Monthly Phase Date Ranges</h3>
                 <p className="text-sm md:text-base text-blue-700 mb-4">
-                  Configure the day of month (1-31) when each phase starts. If a month doesn't have that day, it will use the last day of the month.
+                  Configure the day of month (1-31) when each phase starts and optionally ends. If a month doesn't have that day, it will use the last day of the month. Optionally set a penalty for transactions outside these dates.
                 </p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
-                  <div>
-                    <label htmlFor="declarationDay" className="block text-base font-semibold text-blue-900 mb-2">
-                      Declaration Start Day *
-                    </label>
-                    <input
-                      type="number"
-                      id="declarationDay"
-                      min="1"
-                      max="31"
-                      value={declarationStartDay}
-                      onChange={(e) => setDeclarationStartDay(parseInt(e.target.value) || 1)}
-                      required
-                      className="w-full"
-                    />
+                
+                <div className="space-y-4">
+                  {/* Declaration Phase */}
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                    <h4 className="text-base font-bold text-blue-900 mb-3">Declaration Period</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label htmlFor="declarationStartDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          Start Day *
+                        </label>
+                        <input
+                          type="number"
+                          id="declarationStartDay"
+                          min="1"
+                          max="31"
+                          value={declarationStartDay}
+                          onChange={(e) => setDeclarationStartDay(parseInt(e.target.value) || 1)}
+                          required
+                          className="w-full"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="declarationEndDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          End Day (Optional)
+                        </label>
+                        <input
+                          type="number"
+                          id="declarationEndDay"
+                          min="1"
+                          max="31"
+                          value={declarationEndDay || ''}
+                          onChange={(e) => setDeclarationEndDay(e.target.value ? parseInt(e.target.value) : null)}
+                          className="w-full"
+                          placeholder="Leave empty for no end"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="declarationPenaltyType" className="block text-sm font-semibold text-blue-900 mb-1">
+                        Penalty Type (Optional)
+                      </label>
+                      <select
+                        id="declarationPenaltyType"
+                        value={declarationPenaltyTypeId}
+                        onChange={(e) => setDeclarationPenaltyTypeId(e.target.value)}
+                        className="w-full"
+                      >
+                        <option value="">Select a penalty type</option>
+                        {penaltyTypes.map((type) => (
+                          <option key={type.id} value={type.id}>
+                            {type.name} - K{parseFloat(type.fee_amount).toLocaleString()}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="mt-2">
+                        <label className="flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={declarationAutoApplyPenalty}
+                            onChange={(e) => setDeclarationAutoApplyPenalty(e.target.checked)}
+                            className="mr-2"
+                          />
+                          <span className="text-sm text-blue-900">
+                            Automatically apply penalty when declaration is made outside the date range
+                          </span>
+                        </label>
+                      </div>
+                      <p className="text-xs text-blue-600 mt-1">
+                        {declarationAutoApplyPenalty 
+                          ? 'Penalty will be automatically added when members make declarations outside the date range'
+                          : 'Penalty will not be automatically added. Compliance can manually add penalties if needed.'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <label htmlFor="loanApplicationDay" className="block text-base font-semibold text-blue-900 mb-2">
-                      Loan Application Start Day *
-                    </label>
-                    <input
-                      type="number"
-                      id="loanApplicationDay"
-                      min="1"
-                      max="31"
-                      value={loanApplicationStartDay}
-                      onChange={(e) => setLoanApplicationStartDay(parseInt(e.target.value) || 1)}
-                      required
-                      className="w-full"
-                    />
+
+                  {/* Loan Application Phase */}
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                    <h4 className="text-base font-bold text-blue-900 mb-3">Loan Application Period</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label htmlFor="loanApplicationStartDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          Start Day *
+                        </label>
+                        <input
+                          type="number"
+                          id="loanApplicationStartDay"
+                          min="1"
+                          max="31"
+                          value={loanApplicationStartDay}
+                          onChange={(e) => setLoanApplicationStartDay(parseInt(e.target.value) || 1)}
+                          required
+                          className="w-full"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="loanApplicationEndDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          End Day (Optional)
+                        </label>
+                        <input
+                          type="number"
+                          id="loanApplicationEndDay"
+                          min="1"
+                          max="31"
+                          value={loanApplicationEndDay || ''}
+                          onChange={(e) => setLoanApplicationEndDay(e.target.value ? parseInt(e.target.value) : null)}
+                          className="w-full"
+                          placeholder="Leave empty for no end"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="loanApplicationPenaltyType" className="block text-sm font-semibold text-blue-900 mb-1">
+                        Penalty Type (Optional)
+                      </label>
+                      <select
+                        id="loanApplicationPenaltyType"
+                        value={loanApplicationPenaltyTypeId}
+                        onChange={(e) => setLoanApplicationPenaltyTypeId(e.target.value)}
+                        className="w-full"
+                      >
+                        <option value="">Select a penalty type</option>
+                        {penaltyTypes.map((type) => (
+                          <option key={type.id} value={type.id}>
+                            {type.name} - K{parseFloat(type.fee_amount).toLocaleString()}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="mt-2">
+                        <label className="flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={loanApplicationAutoApplyPenalty}
+                            onChange={(e) => setLoanApplicationAutoApplyPenalty(e.target.checked)}
+                            className="mr-2"
+                          />
+                          <span className="text-sm text-blue-900">
+                            Automatically apply penalty when loan application is made outside the date range
+                          </span>
+                        </label>
+                      </div>
+                      <p className="text-xs text-blue-600 mt-1">
+                        {loanApplicationAutoApplyPenalty 
+                          ? 'Penalty will be automatically added when members apply for loans outside the date range'
+                          : 'Penalty will not be automatically added. Compliance can manually add penalties if needed.'}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <label htmlFor="depositsDay" className="block text-base font-semibold text-blue-900 mb-2">
-                      Deposits Start Day *
-                    </label>
-                    <input
-                      type="number"
-                      id="depositsDay"
-                      min="1"
-                      max="31"
-                      value={depositsStartDay}
-                      onChange={(e) => setDepositsStartDay(parseInt(e.target.value) || 1)}
-                      required
-                      className="w-full"
-                    />
+
+                  {/* Deposits Phase */}
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-4">
+                    <h4 className="text-base font-bold text-blue-900 mb-3">Deposits Period</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+                      <div>
+                        <label htmlFor="depositsStartDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          Start Day *
+                        </label>
+                        <input
+                          type="number"
+                          id="depositsStartDay"
+                          min="1"
+                          max="31"
+                          value={depositsStartDay}
+                          onChange={(e) => setDepositsStartDay(parseInt(e.target.value) || 1)}
+                          required
+                          className="w-full"
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="depositsEndDay" className="block text-sm font-semibold text-blue-900 mb-1">
+                          End Day (Optional)
+                        </label>
+                        <input
+                          type="number"
+                          id="depositsEndDay"
+                          min="1"
+                          max="31"
+                          value={depositsEndDay || ''}
+                          onChange={(e) => setDepositsEndDay(e.target.value ? parseInt(e.target.value) : null)}
+                          className="w-full"
+                          placeholder="Leave empty for no end"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label htmlFor="depositsPenaltyType" className="block text-sm font-semibold text-blue-900 mb-1">
+                        Penalty Type (Optional)
+                      </label>
+                      <select
+                        id="depositsPenaltyType"
+                        value={depositsPenaltyTypeId}
+                        onChange={(e) => setDepositsPenaltyTypeId(e.target.value)}
+                        className="w-full"
+                      >
+                        <option value="">Select a penalty type</option>
+                        {penaltyTypes.map((type) => (
+                          <option key={type.id} value={type.id}>
+                            {type.name} - K{parseFloat(type.fee_amount).toLocaleString()}
+                          </option>
+                        ))}
+                      </select>
+                      <div className="mt-2">
+                        <label className="flex items-center">
+                          <input
+                            type="checkbox"
+                            checked={depositsAutoApplyPenalty}
+                            onChange={(e) => setDepositsAutoApplyPenalty(e.target.checked)}
+                            className="mr-2"
+                          />
+                          <span className="text-sm text-blue-900">
+                            Automatically apply penalty when deposit is made outside the date range
+                          </span>
+                        </label>
+                      </div>
+                      <p className="text-xs text-blue-600 mt-1">
+                        {depositsAutoApplyPenalty 
+                          ? 'Penalty will be automatically added when members make deposits outside the date range'
+                          : 'Penalty will not be automatically added. Compliance can manually add penalties if needed.'}
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -844,11 +1113,13 @@ export default function ManageCyclesPage() {
                       </p>
                       {cycle.phases && cycle.phases.length > 0 && (
                         <div className="mt-2 text-sm text-blue-700">
-                          <p className="font-semibold">Phase Start Days:</p>
-                          <ul className="list-disc list-inside ml-2">
+                          <p className="font-semibold">Phase Date Ranges:</p>
+                          <ul className="list-disc list-inside ml-2 space-y-1">
                             {cycle.phases.map((phase) => (
                               <li key={phase.id}>
                                 {phase.phase_type.replace('_', ' ')}: Day {phase.monthly_start_day || 'N/A'}
+                                {phase.monthly_end_day && ` - Day ${phase.monthly_end_day}`}
+                                {phase.penalty_amount && ` (Penalty: ${phase.penalty_amount})`}
                               </li>
                             ))}
                           </ul>

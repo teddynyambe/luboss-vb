@@ -7,6 +7,7 @@ import { memberApi } from '@/lib/memberApi';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import UserMenu from '@/components/UserMenu';
+import TransactionHistoryModal from '@/components/TransactionHistoryModal';
 
 interface AccountStatus {
   member_id: string;
@@ -39,6 +40,8 @@ export default function MemberDashboard() {
   const [cyclesLoading, setCyclesLoading] = useState(true);
   const [hasActiveCycles, setHasActiveCycles] = useState(true);
   const [hasCurrentMonthDeclaration, setHasCurrentMonthDeclaration] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalType, setModalType] = useState<'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null>(null);
 
   useEffect(() => {
     loadStatus();
@@ -85,6 +88,31 @@ export default function MemberDashboard() {
     }
   };
 
+  const handleCardClick = (type: 'savings' | 'penalties' | 'social_fund' | 'admin_fund') => {
+    setModalType(type);
+    setModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setModalOpen(false);
+    setModalType(null);
+  };
+
+  const getModalTitle = (type: 'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null): string => {
+    switch (type) {
+      case 'savings':
+        return 'Savings to Date - Transaction History';
+      case 'penalties':
+        return 'Penalties - Transaction History';
+      case 'social_fund':
+        return 'Social Fund - Transaction History';
+      case 'admin_fund':
+        return 'Admin Fund - Transaction History';
+      default:
+        return 'Transaction History';
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200">
       <nav className="fixed top-0 left-0 right-0 z-50 bg-white shadow-lg border-b-2 border-blue-200">
@@ -123,7 +151,10 @@ export default function MemberDashboard() {
                 <div className="mt-8 pt-8 border-t-2 border-blue-200">
                   <h3 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Account Status</h3>
                   <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4">
-                    <div className="bg-gradient-to-br from-blue-100 to-blue-200 p-4 md:p-6 rounded-xl border-2 border-blue-300">
+                    <div
+                      onClick={() => handleCardClick('savings')}
+                      className="bg-gradient-to-br from-blue-100 to-blue-200 p-4 md:p-6 rounded-xl border-2 border-blue-300 cursor-pointer hover:ring-2 hover:ring-blue-400 hover:shadow-lg transition-all duration-200"
+                    >
                       <p className="text-xs md:text-sm text-blue-700 font-medium mb-2">Savings to Date</p>
                       <p className="text-xl md:text-3xl font-bold text-blue-900">
                         K{status.savings_balance.toLocaleString()}
@@ -138,19 +169,28 @@ export default function MemberDashboard() {
                         {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
                       </p>
                     </div>
-                    <div className="bg-gradient-to-br from-purple-100 to-purple-200 p-4 md:p-6 rounded-xl border-2 border-purple-300">
+                    <div
+                      onClick={() => handleCardClick('social_fund')}
+                      className="bg-gradient-to-br from-purple-100 to-purple-200 p-4 md:p-6 rounded-xl border-2 border-purple-300 cursor-pointer hover:ring-2 hover:ring-purple-400 hover:shadow-lg transition-all duration-200"
+                    >
                       <p className="text-xs md:text-sm text-purple-700 font-medium mb-2">Social Fund</p>
                       <p className="text-xl md:text-3xl font-bold text-purple-900">
                         K{status.social_fund_balance.toLocaleString()}
                       </p>
                     </div>
-                    <div className="bg-gradient-to-br from-indigo-100 to-indigo-200 p-4 md:p-6 rounded-xl border-2 border-indigo-300">
+                    <div
+                      onClick={() => handleCardClick('admin_fund')}
+                      className="bg-gradient-to-br from-indigo-100 to-indigo-200 p-4 md:p-6 rounded-xl border-2 border-indigo-300 cursor-pointer hover:ring-2 hover:ring-indigo-400 hover:shadow-lg transition-all duration-200"
+                    >
                       <p className="text-xs md:text-sm text-indigo-700 font-medium mb-2">Admin Fund</p>
                       <p className="text-xl md:text-3xl font-bold text-indigo-900">
                         K{status.admin_fund_balance.toLocaleString()}
                       </p>
                     </div>
-                    <div className="bg-gradient-to-br from-yellow-100 to-yellow-200 p-4 md:p-6 rounded-xl border-2 border-yellow-300">
+                    <div
+                      onClick={() => handleCardClick('penalties')}
+                      className="bg-gradient-to-br from-yellow-100 to-yellow-200 p-4 md:p-6 rounded-xl border-2 border-yellow-300 cursor-pointer hover:ring-2 hover:ring-yellow-400 hover:shadow-lg transition-all duration-200"
+                    >
                       <p className="text-xs md:text-sm text-yellow-700 font-medium mb-2">Penalties</p>
                       <p className="text-xl md:text-3xl font-bold text-yellow-900">
                         K{status.penalties_balance.toLocaleString()}
@@ -167,7 +207,10 @@ export default function MemberDashboard() {
             <div className="card">
               <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Account Status</h2>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4">
-                <div className="bg-gradient-to-br from-blue-100 to-blue-200 p-4 md:p-6 rounded-xl border-2 border-blue-300">
+                <div
+                  onClick={() => handleCardClick('savings')}
+                  className="bg-gradient-to-br from-blue-100 to-blue-200 p-4 md:p-6 rounded-xl border-2 border-blue-300 cursor-pointer hover:ring-2 hover:ring-blue-400 hover:shadow-lg transition-all duration-200"
+                >
                   <p className="text-xs md:text-sm text-blue-700 font-medium mb-2">Savings to Date</p>
                   <p className="text-xl md:text-3xl font-bold text-blue-900">
                     K{status.savings_balance.toLocaleString()}
@@ -182,7 +225,10 @@ export default function MemberDashboard() {
                     {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
                   </p>
                 </div>
-                <div className="bg-gradient-to-br from-purple-100 to-purple-200 p-4 md:p-6 rounded-xl border-2 border-purple-300">
+                <div
+                  onClick={() => handleCardClick('social_fund')}
+                  className="bg-gradient-to-br from-purple-100 to-purple-200 p-4 md:p-6 rounded-xl border-2 border-purple-300 cursor-pointer hover:ring-2 hover:ring-purple-400 hover:shadow-lg transition-all duration-200"
+                >
                   <p className="text-xs md:text-sm text-purple-700 font-medium mb-2">Social Fund</p>
                   <p className="text-xl md:text-3xl font-bold text-purple-900">
                     K{status.social_fund_balance.toLocaleString()}
@@ -193,7 +239,10 @@ export default function MemberDashboard() {
                     </p>
                   )}
                 </div>
-                <div className="bg-gradient-to-br from-indigo-100 to-indigo-200 p-4 md:p-6 rounded-xl border-2 border-indigo-300">
+                <div
+                  onClick={() => handleCardClick('admin_fund')}
+                  className="bg-gradient-to-br from-indigo-100 to-indigo-200 p-4 md:p-6 rounded-xl border-2 border-indigo-300 cursor-pointer hover:ring-2 hover:ring-indigo-400 hover:shadow-lg transition-all duration-200"
+                >
                   <p className="text-xs md:text-sm text-indigo-700 font-medium mb-2">Admin Fund</p>
                   <p className="text-xl md:text-3xl font-bold text-indigo-900">
                     K{status.admin_fund_balance.toLocaleString()}
@@ -204,7 +253,10 @@ export default function MemberDashboard() {
                     </p>
                   )}
                 </div>
-                <div className="bg-gradient-to-br from-yellow-100 to-yellow-200 p-4 md:p-6 rounded-xl border-2 border-yellow-300">
+                <div
+                  onClick={() => handleCardClick('penalties')}
+                  className="bg-gradient-to-br from-yellow-100 to-yellow-200 p-4 md:p-6 rounded-xl border-2 border-yellow-300 cursor-pointer hover:ring-2 hover:ring-yellow-400 hover:shadow-lg transition-all duration-200"
+                >
                   <p className="text-xs md:text-sm text-yellow-700 font-medium mb-2">Penalties</p>
                   <p className="text-xl md:text-3xl font-bold text-yellow-900">
                     K{status.penalties_balance.toLocaleString()}
@@ -217,26 +269,14 @@ export default function MemberDashboard() {
             <div className="card">
               <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Quick Actions</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                      {hasCurrentMonthDeclaration ? (
-                        <div className="block p-5 md:p-6 bg-gradient-to-br from-gray-400 to-gray-500 text-white rounded-xl shadow-lg border-2 border-gray-600 opacity-60 cursor-not-allowed">
-                          <h3 className="font-bold text-lg md:text-xl mb-2">Make Declaration</h3>
-                          <p className="text-sm md:text-base text-gray-100">Declaration already submitted for this month</p>
-                        </div>
-                      ) : (
-                        <Link
-                          href="/dashboard/member/declarations"
-                          className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
-                        >
-                          <h3 className="font-bold text-lg md:text-xl mb-2">Make Declaration</h3>
-                          <p className="text-sm md:text-base text-blue-100">Declare savings and contributions for the current month</p>
-                        </Link>
-                      )}
                       <Link
-                        href="/dashboard/member/declarations/list"
-                        className="block p-5 md:p-6 bg-gradient-to-br from-blue-300 to-blue-400 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-500"
+                        href="/dashboard/member/declarations"
+                        className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
                       >
-                        <h3 className="font-bold text-lg md:text-xl mb-2">View All Declarations</h3>
-                        <p className="text-sm md:text-base text-blue-100">View and manage your declarations</p>
+                        <h3 className="font-bold text-lg md:text-xl mb-2">Monthly Declarations</h3>
+                        <p className="text-sm md:text-base text-blue-100">
+                          Declare savings and contributions, View and Manage declarations for the current month
+                        </p>
                       </Link>
                 <Link
                   href="/dashboard/member/loans"
@@ -266,13 +306,6 @@ export default function MemberDashboard() {
                   <h3 className="font-bold text-lg md:text-xl mb-2">View Statement</h3>
                   <p className="text-sm md:text-base text-blue-100">View account statement</p>
                 </Link>
-                <Link
-                  href="/dashboard/member/chat"
-                  className="block p-5 md:p-6 bg-gradient-to-br from-blue-300 to-blue-400 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-500"
-                >
-                  <h3 className="font-bold text-lg md:text-xl mb-2">AI Chat</h3>
-                  <p className="text-sm md:text-base text-blue-100">Ask about rules and your account</p>
-                </Link>
               </div>
             </div>
           </div>
@@ -282,6 +315,16 @@ export default function MemberDashboard() {
           </div>
         )}
       </main>
+
+      {/* Transaction History Modal */}
+      {modalType && (
+        <TransactionHistoryModal
+          open={modalOpen}
+          onClose={handleCloseModal}
+          type={modalType}
+          title={getModalTitle(modalType)}
+        />
+      )}
     </div>
   );
 }

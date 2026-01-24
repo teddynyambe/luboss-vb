@@ -54,10 +54,15 @@ export default function DeclarationsPage() {
   const [loadingDeclaration, setLoadingDeclaration] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [applicablePenalties, setApplicablePenalties] = useState<{ total_amount: number; penalties: Array<{ id: string | null; penalty_type_name: string; fee_amount: number; date_issued: string | null; notes: string | null; source: string }> } | null>(null);
+  const [activeTab, setActiveTab] = useState<'create' | 'list'>('create');
+  const [allDeclarations, setAllDeclarations] = useState<Declaration[]>([]);
+  const [loadingDeclarations, setLoadingDeclarations] = useState(false);
+  const [selectedDeclaration, setSelectedDeclaration] = useState<Declaration | null>(null);
+  const [showDetailsModal, setShowDetailsModal] = useState(false);
 
   useEffect(() => {
     loadCycles();
-    loadCurrentMonthDeclaration();
     // Set current month as default (first day of current month)
     const now = new Date();
     const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
@@ -69,15 +74,65 @@ export default function DeclarationsPage() {
       if (typeof window !== 'undefined') {
         const params = new URLSearchParams(window.location.search);
         const editId = params.get('edit');
+        const tab = params.get('tab');
+        if (tab === 'list') {
+          setActiveTab('list');
+          loadAllDeclarations();
+        }
         if (editId) {
           loadDeclarationForEdit(editId);
+          setActiveTab('create');
         }
       }
     };
     
     // Delay to ensure cycles are loaded first
     setTimeout(checkEditParam, 500);
+    loadCurrentMonthDeclaration();
   }, []);
+
+  // Check for late declaration penalty when cycle or effective month changes (only for new declarations)
+  const loadApplicablePenalties = async () => {
+    if (!selectedCycle || !effectiveMonth) {
+      setApplicablePenalties(null);
+      return;
+    }
+    
+    try {
+      // Ensure effectiveMonth is in YYYY-MM-DD format
+      const effectiveDate = effectiveMonth.includes('T') ? effectiveMonth.split('T')[0] : effectiveMonth;
+      const response = await api.get<{ total_amount: number; penalties: Array<{ id: string | null; penalty_type_name: string; fee_amount: number; date_issued: string | null; notes: string | null; source: string }> }>(
+        `/api/member/declarations/applicable-penalties?cycle_id=${selectedCycle}&effective_month=${effectiveDate}`
+      );
+      if (response.data) {
+        setApplicablePenalties(response.data);
+      } else {
+        setApplicablePenalties(null);
+      }
+    } catch (err) {
+      console.error('Error loading applicable penalties:', err);
+      setApplicablePenalties(null);
+    }
+  };
+
+  // Load applicable penalties when cycle or effective month changes (only for new declarations)
+  useEffect(() => {
+    if (selectedCycle && effectiveMonth && !isEditing && !currentMonthDeclaration) {
+      loadApplicablePenalties();
+    }
+  }, [selectedCycle, effectiveMonth, isEditing, currentMonthDeclaration]);
+
+  // Auto-populate penalties when they're loaded and no declaration exists
+  useEffect(() => {
+    if (applicablePenalties && !currentMonthDeclaration && !isEditing) {
+      if (applicablePenalties.total_amount > 0) {
+        setFormData(prev => ({
+          ...prev,
+          declared_penalties: applicablePenalties.total_amount
+        }));
+      }
+    }
+  }, [applicablePenalties, currentMonthDeclaration, isEditing]);
 
   const loadCurrentMonthDeclaration = async () => {
     setLoadingDeclaration(true);
@@ -111,6 +166,38 @@ export default function DeclarationsPage() {
     }
   };
 
+  const loadAllDeclarations = async () => {
+    setLoadingDeclarations(true);
+    try {
+      const response = await memberApi.getDeclarations();
+      if (response.data) {
+        setAllDeclarations(response.data);
+      }
+    } catch (err) {
+      console.error('Error loading declarations:', err);
+      setError('Failed to load declarations.');
+    } finally {
+      setLoadingDeclarations(false);
+    }
+  };
+
+  const handleEditFromList = (declaration: Declaration) => {
+    if (declaration.can_edit) {
+      setActiveTab('create');
+      loadDeclarationForEdit(declaration.id);
+    }
+  };
+
+  const handleViewFromList = (declaration: Declaration) => {
+    setSelectedDeclaration(declaration);
+    setShowDetailsModal(true);
+  };
+
+  const closeDetailsModal = () => {
+    setShowDetailsModal(false);
+    setSelectedDeclaration(null);
+  };
+
   const loadDeclarationForEdit = async (declarationId: string) => {
     try {
       const response = await memberApi.getDeclarations();
@@ -122,7 +209,8 @@ export default function DeclarationsPage() {
           const declarationDate = new Date(declaration.effective_month);
           const isCurrentMonth = declarationDate.getFullYear() === now.getFullYear() && 
                                  declarationDate.getMonth() === now.getMonth();
-          const canEdit = isCurrentMonth && now.getDate() <= 20;
+          // Removed 20th day restriction - can edit current month declarations anytime
+          const canEdit = isCurrentMonth;
           
           if (canEdit) {
             setCurrentMonthDeclaration({ ...declaration, can_edit: true });
@@ -140,7 +228,7 @@ export default function DeclarationsPage() {
             setSelectedCycle(declaration.cycle_id);
             setEffectiveMonth(declaration.effective_month);
           } else {
-            setError('This declaration cannot be edited. Only current month declarations can be edited before the 20th.');
+            setError('This declaration cannot be edited. Only current month declarations can be edited.');
           }
         } else {
           setError('Declaration not found.');
@@ -158,8 +246,13 @@ export default function DeclarationsPage() {
       const response = await api.get<Cycle[]>('/api/member/cycles');
       if (response.data && response.data.length > 0) {
         setCycles(response.data);
-        setSelectedCycle(response.data[0].id);
-        setFormData({ ...formData, cycle_id: response.data[0].id });
+        const firstCycleId = response.data[0].id;
+        setSelectedCycle(firstCycleId);
+        setFormData({ ...formData, cycle_id: firstCycleId });
+        // Load applicable penalties after cycle is loaded
+        if (effectiveMonth) {
+          setTimeout(() => loadApplicablePenalties(), 200);
+        }
       } else {
         setError('No active cycles available. Please contact the administrator.');
       }
@@ -177,6 +270,10 @@ export default function DeclarationsPage() {
     } else if (name === 'effective_month') {
       setEffectiveMonth(value);
       setFormData({ ...formData, effective_month: value });
+      // Reload applicable penalties when effective month changes
+      if (selectedCycle && value) {
+        setTimeout(() => loadApplicablePenalties(), 100);
+      }
     } else {
       const numValue = value === '' ? undefined : parseFloat(value);
       setFormData({ ...formData, [name]: numValue });
@@ -273,25 +370,76 @@ export default function DeclarationsPage() {
     });
   };
 
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  };
+
+  const formatMonth = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+  };
+
+  const isCurrentMonth = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200">
           <nav className="fixed top-0 left-0 right-0 z-50 bg-white shadow-lg border-b-2 border-blue-200">
             <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
               <div className="flex justify-between items-center h-16 md:h-20">
                 <div className="flex items-center space-x-3 md:space-x-4">
-                  <Link href="/dashboard/member/declarations/list" className="text-blue-600 hover:text-blue-800 text-base md:text-lg font-medium">
-                    ← Back to List
+                  <Link href="/dashboard/member" className="text-blue-600 hover:text-blue-800 text-base md:text-lg font-medium">
+                    ← Back
                   </Link>
-                  <h1 className="text-lg md:text-2xl font-bold text-blue-900">
-                    {isEditing ? 'Edit Declaration' : 'Make Declaration'}
-                  </h1>
+                  <h1 className="text-lg md:text-2xl font-bold text-blue-900">Monthly Declarations</h1>
                 </div>
                 <UserMenu />
               </div>
             </div>
           </nav>
 
-          <main className="max-w-4xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
+          <main className="max-w-7xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
+            {/* Tab Navigation */}
+            <div className="card mb-4">
+              <div className="flex space-x-2 border-b-2 border-blue-200">
+                <button
+                  onClick={() => {
+                    setActiveTab('create');
+                    setError('');
+                    setSuccess(false);
+                  }}
+                  className={`px-6 py-3 font-semibold text-base md:text-lg transition-colors ${
+                    activeTab === 'create'
+                      ? 'text-blue-600 border-b-4 border-blue-600'
+                      : 'text-blue-400 hover:text-blue-600'
+                  }`}
+                >
+                  {isEditing ? 'Edit Declaration' : 'Create/Edit Declaration'}
+                </button>
+                <button
+                  onClick={() => {
+                    setActiveTab('list');
+                    loadAllDeclarations();
+                    setError('');
+                    setSuccess(false);
+                  }}
+                  className={`px-6 py-3 font-semibold text-base md:text-lg transition-colors ${
+                    activeTab === 'list'
+                      ? 'text-blue-600 border-b-4 border-blue-600'
+                      : 'text-blue-400 hover:text-blue-600'
+                  }`}
+                >
+                  View All Declarations
+                </button>
+              </div>
+            </div>
+
+            {/* Tab Content */}
+            {activeTab === 'create' ? (
             <div className="card">
                 {success && (
                   <div className="mb-4 md:mb-6 bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
@@ -335,7 +483,7 @@ export default function DeclarationsPage() {
                       )}
                       {!currentMonthDeclaration.can_edit && (
                         <span className="px-4 py-2 bg-gray-300 text-gray-600 rounded-lg text-sm font-semibold">
-                          Cannot edit after 20th of month
+                          Cannot edit previous month declarations
                         </span>
                       )}
                     </div>
@@ -490,7 +638,9 @@ export default function DeclarationsPage() {
 
                   <div>
                     <label htmlFor="declared_penalties" className="block text-base font-semibold text-blue-900 mb-2">
-                      Penalties (K)
+                      Penalties (K) {applicablePenalties && applicablePenalties.total_amount > 0 ? (
+                        <span className="text-sm font-normal text-blue-600">(Auto-filled - read-only)</span>
+                      ) : null}
                     </label>
                     <input
                       type="number"
@@ -500,9 +650,33 @@ export default function DeclarationsPage() {
                       min="0"
                       value={formData.declared_penalties || ''}
                       onChange={handleChange}
-                      className="w-full"
+                      readOnly
+                      className="w-full bg-gray-100 cursor-not-allowed"
                       placeholder="0.00"
                     />
+                    {applicablePenalties && applicablePenalties.penalties.length > 0 ? (
+                      <div className="mt-2 p-3 bg-blue-50 border-2 border-blue-200 rounded-lg space-y-2">
+                        <div>
+                          <p className="text-xs font-semibold text-blue-900 mb-2">Applicable Penalties:</p>
+                          <ul className="space-y-1 text-xs text-blue-700">
+                            {applicablePenalties.penalties.map((penalty, index) => (
+                              <li key={penalty.id || `penalty-${index}`}>
+                                • {penalty.penalty_type_name}: K{penalty.fee_amount.toLocaleString()}
+                                {penalty.notes && <span className="text-blue-600"> ({penalty.notes})</span>}
+                                {penalty.source === 'late_declaration' && (
+                                  <span className="text-blue-600 italic"> - Late Declaration</span>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        <p className="mt-2 pt-2 border-t border-blue-300 text-xs font-semibold text-blue-900">
+                          Total Penalties: K{applicablePenalties.total_amount.toLocaleString()}
+                        </p>
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-sm text-blue-600">No penalties applicable</p>
+                    )}
                   </div>
 
                   <div>
@@ -579,8 +753,312 @@ export default function DeclarationsPage() {
                   </div>
                 </form>
                 )}
+              </div>
+            ) : (
+              <div className="card">
+                {loadingDeclarations ? (
+                  <div className="text-center py-12">
+                    <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
+                    <p className="mt-4 text-blue-700 text-lg">Loading declarations...</p>
+                  </div>
+                ) : allDeclarations.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="mb-6">
+                      <svg className="mx-auto h-24 w-24 text-blue-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </div>
+                    <h2 className="text-2xl md:text-3xl font-bold text-blue-900 mb-4">No Declarations Found</h2>
+                    <p className="text-lg md:text-xl text-blue-700 mb-6">
+                      You haven't made any declarations yet.
+                    </p>
+                    <button
+                      onClick={() => setActiveTab('create')}
+                      className="btn-primary inline-block"
+                    >
+                      Create Your First Declaration
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+                      <h2 className="text-xl md:text-2xl font-bold text-blue-900">
+                        All Declarations ({allDeclarations.length})
+                      </h2>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full border-collapse">
+                        <thead>
+                          <tr className="bg-blue-100 border-b-2 border-blue-300">
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Effective Month
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Savings
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Social Fund
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Admin Fund
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Status
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Created
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Actions
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {allDeclarations.map((declaration) => {
+                            const isCurrent = isCurrentMonth(declaration.effective_month);
+                            return (
+                              <tr
+                                key={declaration.id}
+                                className={`border-b border-blue-200 hover:bg-blue-50 transition-colors ${
+                                  isCurrent ? 'bg-blue-50' : ''
+                                }`}
+                              >
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  <div className="font-semibold">{formatMonth(declaration.effective_month)}</div>
+                                  {isCurrent && (
+                                    <span className="inline-block mt-1 px-2 py-1 bg-blue-200 text-blue-800 text-xs rounded-full font-semibold">
+                                      Current Month
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {declaration.declared_savings_amount !== null && declaration.declared_savings_amount !== undefined
+                                    ? `K${declaration.declared_savings_amount.toLocaleString()}`
+                                    : '-'}
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {declaration.declared_social_fund !== null && declaration.declared_social_fund !== undefined
+                                    ? `K${declaration.declared_social_fund.toLocaleString()}`
+                                    : '-'}
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {declaration.declared_admin_fund !== null && declaration.declared_admin_fund !== undefined
+                                    ? `K${declaration.declared_admin_fund.toLocaleString()}`
+                                    : '-'}
+                                </td>
+                                <td className="p-3 md:p-4">
+                                  <span
+                                    className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
+                                      declaration.status === 'pending'
+                                        ? 'bg-yellow-200 text-yellow-800'
+                                        : declaration.status === 'approved'
+                                        ? 'bg-green-200 text-green-800'
+                                        : 'bg-gray-200 text-gray-800'
+                                    }`}
+                                  >
+                                    {declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
+                                  </span>
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {formatDate(declaration.created_at)}
+                                </td>
+                                <td className="p-3 md:p-4">
+                                  <div className="flex flex-col sm:flex-row gap-2">
+                                    {isCurrent && declaration.can_edit && (
+                                      <button
+                                        onClick={() => handleEditFromList(declaration)}
+                                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
+                                      >
+                                        Edit
+                                      </button>
+                                    )}
+                                    {(isCurrent && !declaration.can_edit) || !isCurrent ? (
+                                      <button
+                                        onClick={() => handleViewFromList(declaration)}
+                                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm font-semibold transition-colors"
+                                      >
+                                        View Details
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Summary Card */}
+                    <div className="mt-6 bg-blue-50 border-2 border-blue-300 rounded-xl p-4 md:p-5">
+                      <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-3">Summary</h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <p className="text-xs md:text-sm text-blue-600 font-medium">Total Declarations</p>
+                          <p className="text-xl md:text-2xl font-bold text-blue-900">{allDeclarations.length}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs md:text-sm text-blue-600 font-medium">Pending</p>
+                          <p className="text-xl md:text-2xl font-bold text-yellow-700">
+                            {allDeclarations.filter(d => d.status === 'pending').length}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs md:text-sm text-blue-600 font-medium">Approved</p>
+                          <p className="text-xl md:text-2xl font-bold text-green-700">
+                            {allDeclarations.filter(d => d.status === 'approved').length}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-xs md:text-sm text-blue-600 font-medium">Current Month</p>
+                          <p className="text-xl md:text-2xl font-bold text-blue-700">
+                            {allDeclarations.filter(d => isCurrentMonth(d.effective_month)).length}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </main>
+
+      {/* Declaration Details Modal */}
+      {showDetailsModal && selectedDeclaration && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-blue-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
+              <h2 className="text-xl md:text-2xl font-bold">Declaration Details</h2>
+              <button
+                onClick={closeDetailsModal}
+                className="text-white hover:text-blue-200 text-2xl font-bold"
+              >
+                ×
+              </button>
+            </div>
+            
+            <div className="p-6 md:p-8 space-y-6">
+              {/* Header Info */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b-2 border-blue-200">
+                <div>
+                  <p className="text-sm text-blue-600 font-medium mb-1">Effective Month</p>
+                  <p className="text-lg font-bold text-blue-900">{formatMonth(selectedDeclaration.effective_month)}</p>
+                </div>
+                <div>
+                  <p className="text-sm text-blue-600 font-medium mb-1">Status</p>
+                  <span
+                    className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${
+                      selectedDeclaration.status === 'pending'
+                        ? 'bg-yellow-200 text-yellow-800'
+                        : selectedDeclaration.status === 'approved'
+                        ? 'bg-green-200 text-green-800'
+                        : 'bg-gray-200 text-gray-800'
+                    }`}
+                  >
+                    {selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1)}
+                  </span>
+                </div>
+                <div>
+                  <p className="text-sm text-blue-600 font-medium mb-1">Created</p>
+                  <p className="text-base text-blue-900">{formatDate(selectedDeclaration.created_at)}</p>
+                </div>
+                {selectedDeclaration.updated_at && (
+                  <div>
+                    <p className="text-sm text-blue-600 font-medium mb-1">Last Updated</p>
+                    <p className="text-base text-blue-900">{formatDate(selectedDeclaration.updated_at)}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Declaration Amounts */}
+              <div>
+                <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-4">Declaration Amounts</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                    <p className="text-sm text-blue-600 font-medium mb-2">Savings Amount</p>
+                    <p className="text-2xl font-bold text-blue-900">
+                      {selectedDeclaration.declared_savings_amount !== null && selectedDeclaration.declared_savings_amount !== undefined
+                        ? `K${selectedDeclaration.declared_savings_amount.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-purple-50 border-2 border-purple-200 rounded-xl p-4">
+                    <p className="text-sm text-purple-600 font-medium mb-2">Social Fund</p>
+                    <p className="text-2xl font-bold text-purple-900">
+                      {selectedDeclaration.declared_social_fund !== null && selectedDeclaration.declared_social_fund !== undefined
+                        ? `K${selectedDeclaration.declared_social_fund.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-indigo-50 border-2 border-indigo-200 rounded-xl p-4">
+                    <p className="text-sm text-indigo-600 font-medium mb-2">Admin Fund</p>
+                    <p className="text-2xl font-bold text-indigo-900">
+                      {selectedDeclaration.declared_admin_fund !== null && selectedDeclaration.declared_admin_fund !== undefined
+                        ? `K${selectedDeclaration.declared_admin_fund.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4">
+                    <p className="text-sm text-yellow-600 font-medium mb-2">Penalties</p>
+                    <p className="text-2xl font-bold text-yellow-900">
+                      {selectedDeclaration.declared_penalties !== null && selectedDeclaration.declared_penalties !== undefined
+                        ? `K${selectedDeclaration.declared_penalties.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-green-50 border-2 border-green-200 rounded-xl p-4">
+                    <p className="text-sm text-green-600 font-medium mb-2">Interest on Loan</p>
+                    <p className="text-2xl font-bold text-green-900">
+                      {selectedDeclaration.declared_interest_on_loan !== null && selectedDeclaration.declared_interest_on_loan !== undefined
+                        ? `K${selectedDeclaration.declared_interest_on_loan.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                  
+                  <div className="bg-red-50 border-2 border-red-200 rounded-xl p-4">
+                    <p className="text-sm text-red-600 font-medium mb-2">Loan Repayment</p>
+                    <p className="text-2xl font-bold text-red-900">
+                      {selectedDeclaration.declared_loan_repayment !== null && selectedDeclaration.declared_loan_repayment !== undefined
+                        ? `K${selectedDeclaration.declared_loan_repayment.toLocaleString()}`
+                        : 'Not declared'}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Total Summary */}
+              <div className="bg-gradient-to-br from-blue-100 to-blue-200 border-2 border-blue-300 rounded-xl p-4 md:p-6">
+                <h3 className="text-lg font-bold text-blue-900 mb-3">Total Declared Amount</h3>
+                <p className="text-3xl font-bold text-blue-900">
+                  K{(
+                    (selectedDeclaration.declared_savings_amount || 0) +
+                    (selectedDeclaration.declared_social_fund || 0) +
+                    (selectedDeclaration.declared_admin_fund || 0) +
+                    (selectedDeclaration.declared_penalties || 0) +
+                    (selectedDeclaration.declared_interest_on_loan || 0) +
+                    (selectedDeclaration.declared_loan_repayment || 0)
+                  ).toLocaleString()}
+                </p>
+              </div>
+
+              {/* Footer */}
+              <div className="flex justify-end pt-4 border-t-2 border-blue-200">
+                <button
+                  onClick={closeDetailsModal}
+                  className="btn-primary"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
-      </main>
+      )}
     </div>
   );
 }

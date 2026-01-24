@@ -105,6 +105,7 @@ luboss-vb/
 ├── docs/                   # Documentation
 │   ├── ai/                 # AI/RAG documentation
 │   ├── migration/          # Migration guides
+│   ├── accounting_and_rules.md  # Chart of accounts and system rules
 │   └── source/             # Source documents (constitution, policies)
 │
 ├── scripts/                # Utility scripts
@@ -214,6 +215,11 @@ npm run dev
 The UI will be available at `http://localhost:3000`
 
 ## Key Features Documentation
+
+### Chart of Accounts and System Rules
+- **Chart of Accounts**: Complete documentation of account structure, account types, and dynamic account creation
+- **System Rules**: Comprehensive list of all business rules and validations enforced by the system
+- See `docs/accounting_and_rules.md` for detailed information
 
 ### Loan Management
 - Members can apply for loans with notes

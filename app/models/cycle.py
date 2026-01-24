@@ -5,6 +5,10 @@ import uuid
 from app.db.base import Base
 import enum
 from decimal import Decimal
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.transaction import PenaltyType
 
 
 class CycleStatus(str, enum.Enum):
@@ -58,10 +62,15 @@ class CyclePhase(Base):
     end_date = Column(DateTime, nullable=True)
     is_open = Column(Boolean, default=False, nullable=False)
     monthly_start_day = Column(Integer, nullable=True)  # Day of month (1-31) for monthly recurring phases
+    monthly_end_day = Column(Integer, nullable=True)  # Day of month (1-31) for monthly recurring phases end
+    penalty_amount = Column(Numeric(10, 2), nullable=True)  # Optional penalty for transactions outside date range (deprecated, use penalty_type_id)
+    penalty_type_id = Column(UUID(as_uuid=True), ForeignKey("penalty_type.id"), nullable=True)  # Optional penalty type for declaration phase
+    auto_apply_penalty = Column(Boolean, default=False, nullable=False)  # Whether to automatically apply penalty when declaration is made outside date range
     created_at = Column(DateTime, nullable=False, server_default="now()")
     
     # Relationships
     cycle = relationship("Cycle", back_populates="phases")
+    penalty_type = relationship("PenaltyType", foreign_keys=[penalty_type_id])
     
     # Unique constraint: one phase type per cycle
     __table_args__ = (

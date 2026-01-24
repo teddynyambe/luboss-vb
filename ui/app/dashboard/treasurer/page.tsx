@@ -33,7 +33,10 @@ interface PendingDeposit {
 interface PendingPenalty {
   id: string;
   member_id: string;
+  member_name?: string;
+  member_email?: string;
   date_issued: string;
+  notes?: string;
   penalty_type?: { name: string; fee_amount: string };
 }
 
@@ -113,10 +116,18 @@ export default function TreasurerDashboard() {
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState<string | null>(null);
+  const [penaltyNotification, setPenaltyNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [approvingPenalty, setApprovingPenalty] = useState<string | null>(null);
 
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (!penaltyNotification) return;
+    const timer = setTimeout(() => setPenaltyNotification(null), 4000);
+    return () => clearTimeout(timer);
+  }, [penaltyNotification]);
 
   const loadData = async () => {
     const [depositsRes, penaltiesRes, loansRes, activeLoansRes] = await Promise.all([
@@ -288,12 +299,20 @@ export default function TreasurerDashboard() {
   };
 
   const handleApprovePenalty = async (penaltyId: string) => {
-    const response = await api.post(`/api/treasurer/penalties/${penaltyId}/approve`);
-    if (!response.error) {
-      alert('Penalty approved and posted successfully');
-      loadData();
-    } else {
-      alert('Error: ' + response.error);
+    setApprovingPenalty(penaltyId);
+    setPenaltyNotification(null);
+    try {
+      const response = await api.post(`/api/treasurer/penalties/${penaltyId}/approve`);
+      if (!response.error) {
+        setPenaltyNotification({ type: 'success', text: 'Penalty approved and posted successfully' });
+        loadData();
+      } else {
+        setPenaltyNotification({ type: 'error', text: 'Error: ' + response.error });
+      }
+    } catch (err: any) {
+      setPenaltyNotification({ type: 'error', text: err?.message || 'Failed to approve penalty' });
+    } finally {
+      setApprovingPenalty(null);
     }
   };
 
@@ -526,6 +545,19 @@ export default function TreasurerDashboard() {
           {/* Pending Penalties */}
           <div className="card">
             <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Pending Penalties</h2>
+            {penaltyNotification && (
+              <div
+                className={`mb-4 md:mb-6 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium ${
+                  penaltyNotification.type === 'success'
+                    ? 'bg-green-100 border-2 border-green-400 text-green-800'
+                    : 'bg-red-100 border-2 border-red-400 text-red-800'
+                }`}
+                role="alert"
+              >
+                {penaltyNotification.type === 'success' ? '✓ ' : ''}
+                {penaltyNotification.text}
+              </div>
+            )}
             {loading ? (
               <div className="text-center py-12">
                 <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
@@ -540,19 +572,33 @@ export default function TreasurerDashboard() {
                     key={penalty.id}
                     className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 md:p-5 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-xl gap-3 md:gap-4"
                   >
-                    <div>
+                    <div className="flex-1">
                       <p className="font-bold text-base md:text-lg text-blue-900">
                         {penalty.penalty_type?.name || 'Penalty'}
                       </p>
                       <p className="text-sm md:text-base text-blue-700">
-                        Fee: K{penalty.penalty_type?.fee_amount || '0.00'}
+                        Member: {penalty.member_name || 'Unknown'} {penalty.member_email && `(${penalty.member_email})`}
                       </p>
+                      <p className="text-sm md:text-base text-blue-700">
+                        Fee: <span className="font-semibold">K{parseFloat(penalty.penalty_type?.fee_amount || '0').toLocaleString()}</span>
+                      </p>
+                      {penalty.notes && (
+                        <p className="text-xs text-blue-600 mt-1">
+                          Notes: {penalty.notes}
+                        </p>
+                      )}
+                      {penalty.date_issued && (
+                        <p className="text-xs text-blue-600 mt-1">
+                          Issued: {new Date(penalty.date_issued).toLocaleDateString()}
+                        </p>
+                      )}
                     </div>
                     <button
                       onClick={() => handleApprovePenalty(penalty.id)}
-                      className="btn-primary bg-gradient-to-br from-green-500 to-green-600 border-green-600 w-full sm:w-auto"
+                      disabled={approvingPenalty === penalty.id}
+                      className="btn-primary bg-gradient-to-br from-green-500 to-green-600 border-green-600 w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Approve
+                      {approvingPenalty === penalty.id ? 'Approving…' : 'Approve'}
                     </button>
                   </div>
                 ))}

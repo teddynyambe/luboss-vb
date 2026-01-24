@@ -68,6 +68,147 @@ def create_declaration(
         status=DeclarationStatus.PENDING
     )
     db.add(declaration)
+    db.flush()  # Flush to get declaration ID, but don't commit yet
+    
+    # Check if this is the member's first declaration for this cycle
+    # If so, post initial required amounts for Social Fund and Admin Fund
+    other_declarations = db.query(Declaration).filter(
+        Declaration.member_id == member_id,
+        Declaration.cycle_id == cycle_id,
+        Declaration.id != declaration.id
+    ).first()
+    
+    is_first_declaration = other_declarations is None
+    
+    if is_first_declaration:
+        # Get the cycle to check for required amounts
+        from app.models.cycle import Cycle
+        cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
+        
+        if cycle and (cycle.social_fund_required or cycle.admin_fund_required):
+            # Get or create member's Social Fund and Admin Fund accounts
+            from app.models.ledger import LedgerAccount, AccountType
+            from app.services.accounting import create_journal_entry
+            
+            # Get or create organization-level receivable accounts (for contra entries)
+            social_fund_receivable = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code == "SOC_FUND_REC"
+            ).first()
+            
+            if not social_fund_receivable:
+                social_fund_receivable = LedgerAccount(
+                    account_code="SOC_FUND_REC",
+                    account_name="Social Fund Receivable",
+                    account_type=AccountType.ASSET,
+                    description="Social fund receivables from members (contra account for member social fund accounts)"
+                )
+                db.add(social_fund_receivable)
+                db.flush()
+            
+            admin_fund_receivable = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code == "ADM_FUND_REC"
+            ).first()
+            
+            if not admin_fund_receivable:
+                admin_fund_receivable = LedgerAccount(
+                    account_code="ADM_FUND_REC",
+                    account_name="Admin Fund Receivable",
+                    account_type=AccountType.ASSET,
+                    description="Admin fund receivables from members (contra account for member admin fund accounts)"
+                )
+                db.add(admin_fund_receivable)
+                db.flush()
+            
+            # Get or create member's Social Fund account
+            member_social_fund = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == member_id,
+                LedgerAccount.account_name.ilike("%social fund%")
+            ).first()
+            
+            if not member_social_fund:
+                short_id = str(member_id).replace('-', '')[:8]
+                member_social_fund = LedgerAccount(
+                    account_code=f"MEM_SOC_{short_id}",
+                    account_name=f"Social Fund - {member_id}",
+                    account_type=AccountType.ASSET,
+                    member_id=member_id,
+                    description=f"Social fund receivable account for member {member_id}"
+                )
+                db.add(member_social_fund)
+                db.flush()
+            
+            # Get or create member's Admin Fund account
+            member_admin_fund = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == member_id,
+                LedgerAccount.account_name.ilike("%admin fund%")
+            ).first()
+            
+            if not member_admin_fund:
+                short_id = str(member_id).replace('-', '')[:8]
+                member_admin_fund = LedgerAccount(
+                    account_code=f"MEM_ADM_{short_id}",
+                    account_name=f"Admin Fund - {member_id}",
+                    account_type=AccountType.ASSET,
+                    member_id=member_id,
+                    description=f"Admin fund receivable account for member {member_id}"
+                )
+                db.add(member_admin_fund)
+                db.flush()
+            
+            # Check if initial debits already exist for this cycle (prevent duplicates)
+            from app.models.ledger import JournalEntry, JournalLine
+            existing_initial = db.query(JournalEntry).join(JournalLine).filter(
+                JournalEntry.cycle_id == cycle_id,
+                JournalEntry.source_type == "cycle_initial_requirement",
+                JournalLine.ledger_account_id.in_([member_social_fund.id, member_admin_fund.id])
+            ).first()
+            
+            if not existing_initial:
+                # Create journal entry for initial required amounts
+                journal_lines = []
+                
+                if cycle.social_fund_required and cycle.social_fund_required > 0:
+                    # Post initial required amount as debit to member account
+                    journal_lines.append({
+                        "account_id": member_social_fund.id,
+                        "debit_amount": cycle.social_fund_required,
+                        "credit_amount": Decimal("0.00"),
+                        "description": f"Initial required amount for {cycle.year} - Social Fund"
+                    })
+                    # Credit organization receivable to balance
+                    journal_lines.append({
+                        "account_id": social_fund_receivable.id,
+                        "debit_amount": Decimal("0.00"),
+                        "credit_amount": cycle.social_fund_required,
+                        "description": f"Initial required amount for {cycle.year} - Social Fund (contra)"
+                    })
+                
+                if cycle.admin_fund_required and cycle.admin_fund_required > 0:
+                    # Post initial required amount as debit to member account
+                    journal_lines.append({
+                        "account_id": member_admin_fund.id,
+                        "debit_amount": cycle.admin_fund_required,
+                        "credit_amount": Decimal("0.00"),
+                        "description": f"Initial required amount for {cycle.year} - Admin Fund"
+                    })
+                    # Credit organization receivable to balance
+                    journal_lines.append({
+                        "account_id": admin_fund_receivable.id,
+                        "debit_amount": Decimal("0.00"),
+                        "credit_amount": cycle.admin_fund_required,
+                        "description": f"Initial required amount for {cycle.year} - Admin Fund (contra)"
+                    })
+                
+                if journal_lines:
+                    create_journal_entry(
+                        db=db,
+                        description=f"Initial required amounts for member {member_id} - Cycle {cycle.year}",
+                        lines=journal_lines,
+                        cycle_id=cycle_id,
+                        source_type="cycle_initial_requirement",
+                        created_by=None  # System-generated
+                    )
+    
     db.commit()
     db.refresh(declaration)
     return declaration
@@ -104,17 +245,15 @@ def update_declaration(
         raise ValueError("Declaration not found")
     
     if not allow_rejected_edit:
-        # Check if we can still edit (before 20th of the month)
+        # Check if we can still edit (current month only, but no 20th day restriction)
         today = date.today()
         effective_date = declaration.effective_month
         
-        # Check if today is after the 20th of the effective month
+        # Check if today is after the effective month (cannot edit previous months)
         if today.year > effective_date.year or (today.year == effective_date.year and today.month > effective_date.month):
             raise ValueError("Cannot edit declarations from previous months")
         
-        if today.year == effective_date.year and today.month == effective_date.month and today.day > 20:
-            raise ValueError("Cannot edit declaration after the 20th of the month")
-        
+        # Allow editing current month declarations anytime (removed 20th day restriction)
         # Only allow editing PENDING declarations
         if declaration.status != DeclarationStatus.PENDING:
             raise ValueError(f"Cannot edit declaration with status: {declaration.status.value}")
@@ -155,8 +294,8 @@ def approve_deposit(
     approved_by: UUID,
     bank_cash_account_id: UUID,
     member_savings_account_id: UUID,
-    social_fund_account_id: UUID,
-    admin_fund_account_id: UUID,
+    member_social_fund_account_id: UUID = None,
+    member_admin_fund_account_id: UUID = None,
     penalties_payable_account_id: UUID = None,
     interest_income_account_id: UUID = None,
     loans_receivable_account_id: UUID = None
@@ -219,32 +358,158 @@ def approve_deposit(
             "description": "Member savings deposit"
         })
     
-    # Credit social fund
+    # Credit member social fund account (reduces outstanding balance)
+    # Also debit organization receivable to balance
     if social_fund > 0:
-        lines.append({
-            "account_id": social_fund_account_id,
-            "debit_amount": Decimal("0.00"),
-            "credit_amount": social_fund,
-            "description": "Social fund contribution"
-        })
+        # Get or create member's social fund account if it doesn't exist
+        if not member_social_fund_account_id:
+            from app.models.ledger import LedgerAccount, AccountType
+            member_social_fund = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == deposit.member_id,
+                LedgerAccount.account_name.ilike("%social fund%")
+            ).first()
+            
+            if not member_social_fund:
+                short_id = str(deposit.member_id).replace('-', '')[:8]
+                member_social_fund = LedgerAccount(
+                    account_code=f"MEM_SOC_{short_id}",
+                    account_name=f"Social Fund - {deposit.member_id}",
+                    account_type=AccountType.ASSET,
+                    member_id=deposit.member_id,
+                    description=f"Social fund receivable account for member {deposit.member_id}"
+                )
+                db.add(member_social_fund)
+                db.flush()
+                member_social_fund_account_id = member_social_fund.id
+            else:
+                member_social_fund_account_id = member_social_fund.id
+        
+        if member_social_fund_account_id:
+            # Debit member account (payment - shown as debit per user requirement)
+            lines.append({
+                "account_id": member_social_fund_account_id,
+                "debit_amount": social_fund,
+                "credit_amount": Decimal("0.00"),
+                "description": "Social fund payment"
+            })
+            
+            # Credit organization receivable to balance
+            from app.models.ledger import LedgerAccount, AccountType
+            social_fund_receivable = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code == "SOC_FUND_REC"
+            ).first()
+            
+            # Create receivable account if it doesn't exist
+            if not social_fund_receivable:
+                social_fund_receivable = LedgerAccount(
+                    account_code="SOC_FUND_REC",
+                    account_name="Social Fund Receivable",
+                    account_type=AccountType.ASSET,
+                    description="Social fund receivables from members (contra account for member social fund accounts)"
+                )
+                db.add(social_fund_receivable)
+                db.flush()
+            
+            # Credit organization receivable to balance the payment debit
+            lines.append({
+                "account_id": social_fund_receivable.id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": social_fund,
+                "description": "Social fund payment received (reduces receivable)"
+            })
     
-    # Credit admin fund
+    # Credit member admin fund account (reduces outstanding balance)
+    # Also debit organization receivable to balance
     if admin_fund > 0:
-        lines.append({
-            "account_id": admin_fund_account_id,
-            "debit_amount": Decimal("0.00"),
-            "credit_amount": admin_fund,
-            "description": "Admin fund contribution"
-        })
+        # Get or create member's admin fund account if it doesn't exist
+        if not member_admin_fund_account_id:
+            from app.models.ledger import LedgerAccount, AccountType
+            member_admin_fund = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == deposit.member_id,
+                LedgerAccount.account_name.ilike("%admin fund%")
+            ).first()
+            
+            if not member_admin_fund:
+                short_id = str(deposit.member_id).replace('-', '')[:8]
+                member_admin_fund = LedgerAccount(
+                    account_code=f"MEM_ADM_{short_id}",
+                    account_name=f"Admin Fund - {deposit.member_id}",
+                    account_type=AccountType.ASSET,
+                    member_id=deposit.member_id,
+                    description=f"Admin fund receivable account for member {deposit.member_id}"
+                )
+                db.add(member_admin_fund)
+                db.flush()
+                member_admin_fund_account_id = member_admin_fund.id
+            else:
+                member_admin_fund_account_id = member_admin_fund.id
+        
+        if member_admin_fund_account_id:
+            # Debit member account (payment - shown as debit per user requirement)
+            lines.append({
+                "account_id": member_admin_fund_account_id,
+                "debit_amount": admin_fund,
+                "credit_amount": Decimal("0.00"),
+                "description": "Admin fund payment"
+            })
+            
+            # Credit organization receivable to balance
+            from app.models.ledger import LedgerAccount, AccountType
+            admin_fund_receivable = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code == "ADM_FUND_REC"
+            ).first()
+            
+            # Create receivable account if it doesn't exist
+            if not admin_fund_receivable:
+                admin_fund_receivable = LedgerAccount(
+                    account_code="ADM_FUND_REC",
+                    account_name="Admin Fund Receivable",
+                    account_type=AccountType.ASSET,
+                    description="Admin fund receivables from members (contra account for member admin fund accounts)"
+                )
+                db.add(admin_fund_receivable)
+                db.flush()
+            
+            # Credit organization receivable to balance the payment debit
+            lines.append({
+                "account_id": admin_fund_receivable.id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": admin_fund,
+                "description": "Admin fund payment received (reduces receivable)"
+            })
     
-    # Credit penalties payable (if account provided)
-    if penalties > 0 and penalties_payable_account_id:
-        lines.append({
-            "account_id": penalties_payable_account_id,
-            "debit_amount": Decimal("0.00"),
-            "credit_amount": penalties,
-            "description": "Penalties payment"
-        })
+    # Credit penalties payable
+    if penalties > 0:
+        # Get or create penalties payable account if it doesn't exist
+        if not penalties_payable_account_id:
+            from app.models.ledger import LedgerAccount, AccountType
+            penalties_account = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == deposit.member_id,
+                LedgerAccount.account_name.ilike("%penalties payable%")
+            ).first()
+            
+            if not penalties_account:
+                short_id = str(deposit.member_id).replace('-', '')[:8]
+                penalties_account = LedgerAccount(
+                    account_code=f"PEN_PAY_{short_id}",
+                    account_name=f"Penalties Payable - {deposit.member_id}",
+                    account_type=AccountType.LIABILITY,
+                    member_id=deposit.member_id,
+                    description=f"Penalties payable account for member {deposit.member_id}"
+                )
+                db.add(penalties_account)
+                db.flush()
+                penalties_payable_account_id = penalties_account.id
+            else:
+                penalties_payable_account_id = penalties_account.id
+        
+        if penalties_payable_account_id:
+            lines.append({
+                "account_id": penalties_payable_account_id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": penalties,
+                "description": "Penalties payment"
+            })
     
     # Credit interest income and reduce loan receivable (if accounts provided)
     if interest_on_loan > 0 and interest_income_account_id:
@@ -256,10 +521,11 @@ def approve_deposit(
         })
     
     if loan_repayment > 0 and loans_receivable_account_id:
+        # Credit loan receivable (reduces the receivable balance)
         lines.append({
             "account_id": loans_receivable_account_id,
-            "debit_amount": loan_repayment,
-            "credit_amount": Decimal("0.00"),
+            "debit_amount": Decimal("0.00"),
+            "credit_amount": loan_repayment,
             "description": "Loan principal repayment"
         })
     
@@ -418,9 +684,21 @@ def approve_penalty(
     if not penalty:
         raise ValueError("Penalty record not found")
     
+    # Check if penalty is already posted
+    if penalty.status == PenaltyRecordStatus.POSTED:
+        raise ValueError("Penalty has already been posted")
+    
+    # Check if penalty has a penalty_type_id
+    if not penalty.penalty_type_id:
+        raise ValueError("Penalty record is missing penalty type")
+    
     penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty.penalty_type_id).first()
     if not penalty_type:
-        raise ValueError("Penalty type not found")
+        raise ValueError(f"Penalty type with ID {penalty.penalty_type_id} not found")
+    
+    # Check if penalty type has a valid fee amount
+    if penalty_type.fee_amount is None or penalty_type.fee_amount <= Decimal("0.00"):
+        raise ValueError(f"Penalty type '{penalty_type.name}' has invalid fee amount")
     
     # Create journal entry
     journal_entry = create_journal_entry(

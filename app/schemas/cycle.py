@@ -14,9 +14,13 @@ class CycleCreate(BaseModel):
 
 
 class CyclePhaseConfig(BaseModel):
-    """Schema for configuring cycle phase start days."""
+    """Schema for configuring cycle phase start and end days."""
     phase_type: str = Field(..., description="Phase type: declaration, loan_application, deposits")
     monthly_start_day: int = Field(..., ge=1, le=31, description="Day of month (1-31) when phase starts each month")
+    monthly_end_day: Optional[int] = Field(None, ge=1, le=31, description="Day of month (1-31) when phase ends each month")
+    penalty_amount: Optional[Decimal] = Field(None, ge=0, description="Optional penalty amount for transactions outside date range (deprecated, use penalty_type_id)")
+    penalty_type_id: Optional[str] = Field(None, description="Optional penalty type ID for declaration phase")
+    auto_apply_penalty: Optional[bool] = Field(False, description="Whether to automatically apply penalty when declaration is made outside date range")
 
 
 class InterestRateRangeCreate(BaseModel):
@@ -82,6 +86,10 @@ class CyclePhaseResponse(BaseModel):
     id: str
     phase_type: str
     monthly_start_day: Optional[int]
+    monthly_end_day: Optional[int]
+    penalty_amount: Optional[Decimal]
+    penalty_type_id: Optional[str]
+    auto_apply_penalty: Optional[bool]
     
     class Config:
         from_attributes = True

@@ -33,8 +33,16 @@ def create_journal_entry(
     total_credits = sum(Decimal(str(line.get("credit_amount", 0))) for line in lines)
     
     if total_debits != total_credits:
+        # Debug: Print all lines for troubleshooting
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Journal entry imbalance detected:")
+        logger.error(f"  Description: {description}")
+        logger.error(f"  Total Debits: {total_debits}, Total Credits: {total_credits}")
+        for i, line in enumerate(lines):
+            logger.error(f"  Line {i+1}: Account={line.get('account_id')}, Debit={line.get('debit_amount', 0)}, Credit={line.get('credit_amount', 0)}, Desc={line.get('description', 'N/A')}")
         raise JournalEntryError(
-            f"Journal entry is not balanced: debits={total_debits}, credits={total_credits}"
+            f"Journal entry is not balanced: debits={total_debits}, credits={total_credits}. Difference: {total_debits - total_credits}"
         )
     
     # Create journal entry
@@ -100,17 +108,44 @@ def get_member_savings_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's savings balance from ledger."""
+    """Get member's savings balance from ledger.
+    
+    Returns only credits from deposit approvals (actual deposits received),
+    excluding penalty debits. This shows the accumulation of actual proof of
+    payment received for declarations, not reduced by penalties.
+    """
+    from sqlalchemy import func
+    from app.models.transaction import DepositProof, DepositApproval
+    
     # Find member's savings account
-    account = db.query(LedgerAccount).filter(
+    savings_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
     
-    if not account:
+    if not savings_account:
         return Decimal("0.00")
     
-    return get_account_balance(db, account.id, as_of_date)
+    # Sum only credits from deposit approvals (actual deposits)
+    # This excludes penalty debits and other transactions
+    query = db.query(func.sum(JournalLine.credit_amount)).join(
+        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+    ).join(
+        DepositApproval, JournalEntry.id == DepositApproval.journal_entry_id
+    ).join(
+        DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
+    ).filter(
+        JournalLine.ledger_account_id == savings_account.id,
+        DepositProof.member_id == member_id,
+        JournalEntry.reversed_by.is_(None),  # Exclude reversed entries
+        JournalEntry.source_type == "deposit_approval"  # Only deposit approvals
+    )
+    
+    if as_of_date:
+        query = query.filter(JournalEntry.entry_date <= as_of_date)
+    
+    result = query.scalar()
+    return Decimal(str(result)) if result else Decimal("0.00")
 
 
 def get_member_loan_balance(
@@ -165,38 +200,46 @@ def get_member_social_fund_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's total social fund contributions from ledger."""
-    from sqlalchemy import and_, func
+    """Get member's social fund accumulated payments from ledger.
     
-    # Find organization's social fund account (not member-specific)
-    social_fund_account = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "SOCIAL_FUND"
+    Returns accumulated payments made (sum of all payment debits/credits).
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    
+    # Find member's social fund account (member-specific)
+    member_social_fund_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%social fund%")
     ).first()
     
-    if not social_fund_account:
+    if not member_social_fund_account:
         return Decimal("0.00")
     
-    # Sum all credits to social fund account from this member's deposits
-    # We find journal entries linked to this member through deposit proofs
-    from app.models.transaction import DepositProof, DepositApproval
-    
-    query = db.query(func.sum(JournalLine.credit_amount)).join(
-        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-    ).join(
-        DepositApproval, JournalEntry.id == DepositApproval.journal_entry_id
-    ).join(
-        DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
-    ).filter(
-        JournalLine.ledger_account_id == social_fund_account.id,
-        DepositProof.member_id == member_id,
-        JournalEntry.reversed_by.is_(None)  # Exclude reversed entries
+    # Get accumulated payment amounts (from deposit_approval) - check both debits and credits (handle legacy data)
+    query_payment_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_social_fund_account.id,
+        JournalEntry.source_type == "deposit_approval",
+        JournalEntry.reversed_by.is_(None),
+        JournalLine.debit_amount > 0
+    )
+    query_payment_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_social_fund_account.id,
+        JournalEntry.source_type == "deposit_approval",
+        JournalEntry.reversed_by.is_(None),
+        JournalLine.credit_amount > 0
     )
     
     if as_of_date:
-        query = query.filter(JournalEntry.entry_date <= as_of_date)
+        query_payment_debits = query_payment_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_payment_credits = query_payment_credits.filter(JournalEntry.entry_date <= as_of_date)
     
-    result = query.scalar()
-    return Decimal(str(result)) if result else Decimal("0.00")
+    payment_debits = query_payment_debits.scalar() or Decimal("0.00")
+    payment_credits = query_payment_credits.scalar() or Decimal("0.00")
+    # Sum both debits and credits to get total accumulated payments
+    # (handles both new debit-based payments and legacy credit-based payments)
+    accumulated_payments = payment_debits + payment_credits
+    
+    return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
 
 
 def get_member_admin_fund_balance(
@@ -204,38 +247,46 @@ def get_member_admin_fund_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's total admin fund contributions from ledger."""
-    from sqlalchemy import and_, func
+    """Get member's admin fund accumulated payments from ledger.
     
-    # Find organization's admin fund account (not member-specific)
-    admin_fund_account = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "ADMIN_FUND"
+    Returns accumulated payments made (sum of all payment debits/credits).
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    
+    # Find member's admin fund account (member-specific)
+    member_admin_fund_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%admin fund%")
     ).first()
     
-    if not admin_fund_account:
+    if not member_admin_fund_account:
         return Decimal("0.00")
     
-    # Sum all credits to admin fund account from this member's deposits
-    # We find journal entries linked to this member through deposit proofs
-    from app.models.transaction import DepositProof, DepositApproval
-    
-    query = db.query(func.sum(JournalLine.credit_amount)).join(
-        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-    ).join(
-        DepositApproval, JournalEntry.id == DepositApproval.journal_entry_id
-    ).join(
-        DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
-    ).filter(
-        JournalLine.ledger_account_id == admin_fund_account.id,
-        DepositProof.member_id == member_id,
-        JournalEntry.reversed_by.is_(None)  # Exclude reversed entries
+    # Get accumulated payment amounts (from deposit_approval) - check both debits and credits (handle legacy data)
+    query_payment_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_admin_fund_account.id,
+        JournalEntry.source_type == "deposit_approval",
+        JournalEntry.reversed_by.is_(None),
+        JournalLine.debit_amount > 0
+    )
+    query_payment_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_admin_fund_account.id,
+        JournalEntry.source_type == "deposit_approval",
+        JournalEntry.reversed_by.is_(None),
+        JournalLine.credit_amount > 0
     )
     
     if as_of_date:
-        query = query.filter(JournalEntry.entry_date <= as_of_date)
+        query_payment_debits = query_payment_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_payment_credits = query_payment_credits.filter(JournalEntry.entry_date <= as_of_date)
     
-    result = query.scalar()
-    return Decimal(str(result)) if result else Decimal("0.00")
+    payment_debits = query_payment_debits.scalar() or Decimal("0.00")
+    payment_credits = query_payment_credits.scalar() or Decimal("0.00")
+    # Sum both debits and credits to get total accumulated payments
+    # (handles both new debit-based payments and legacy credit-based payments)
+    accumulated_payments = payment_debits + payment_credits
+    
+    return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
 
 
 def get_member_penalties_balance(

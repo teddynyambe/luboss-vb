@@ -89,7 +89,8 @@ def initialize_tools():
         get_my_declarations,
         get_my_credit_rating,
         get_policy_answer,
-        get_member_info
+        get_member_info,
+        get_penalty_information
     )
     
     register_tool(
@@ -182,6 +183,17 @@ def initialize_tools():
             "required": []
         },
         function=get_member_info
+    )
+    
+    register_tool(
+        name="get_penalty_information",
+        description="Get information about penalty types and penalty rules for the current cycle. Returns all available penalty types (name, description, fee amount) and penalty configurations for Declaration Period, Loan Application Period, and Deposits Period (including date ranges, penalty types, and whether penalties are automatically applied). Use this when users ask about: penalties, penalty types, when penalties are applied, automatic penalties, penalty amounts, what happens if they miss deadlines, penalty rules for declarations/loan applications/deposits, what penalties exist, or how to avoid penalties.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": []
+        },
+        function=get_penalty_information
     )
 
 
