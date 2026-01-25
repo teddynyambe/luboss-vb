@@ -211,10 +211,11 @@ export default function UserManagementPage() {
       for (const member of members) {
         try {
           const ratingResponse = await api.get(`/api/chairman/members/${member.id}/credit-rating/${cycleId}`);
-          if (ratingResponse.data && ratingResponse.data.tier_name) {
+          const ratingData = ratingResponse.data as { tier_name?: string; tier_order?: number } | undefined;
+          if (ratingData && ratingData.tier_name) {
             ratings[member.user_id] = {
-              tier_name: ratingResponse.data.tier_name,
-              tier_order: ratingResponse.data.tier_order || 0
+              tier_name: ratingData.tier_name,
+              tier_order: ratingData.tier_order || 0
             };
           }
         } catch (err) {
