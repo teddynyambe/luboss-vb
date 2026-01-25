@@ -656,6 +656,44 @@ NEXT_PUBLIC_API_URL=https://${DOMAIN}${DEPLOY_PATH}/api
 EOF"
     print_success "Frontend environment updated"
     
+    # 4.5. Setup Python virtual environment if it doesn't exist
+    print_info "Checking Python virtual environment..."
+    if ! remote_exec "test -d ${DEPLOY_DIR}/app/venv" 2>/dev/null; then
+        print_info "Virtual environment not found. Creating it..."
+        
+        # Find Python 3.11+ on the server
+        local python_cmd=$(remote_exec "command -v python3.11 || command -v python3.12 || command -v python3.13 || command -v python3 || command -v python" 2>/dev/null | head -1)
+        
+        if [ -z "$python_cmd" ]; then
+            print_error "Python 3 not found on the server."
+            print_info "Please install Python 3.11+ on the server."
+            exit 1
+        fi
+        
+        print_info "Using Python: $python_cmd"
+        remote_exec "cd ${DEPLOY_DIR}/app && $python_cmd -m venv venv"
+        
+        if [ $? -eq 0 ]; then
+            print_success "Virtual environment created"
+        else
+            print_error "Failed to create virtual environment."
+            print_info "Please ensure python3-venv is installed: sudo apt-get install python3-venv"
+            exit 1
+        fi
+        
+        # Upgrade pip and install dependencies
+        print_info "Upgrading pip and installing dependencies..."
+        remote_exec "cd ${DEPLOY_DIR}/app && source venv/bin/activate && pip install --upgrade pip && pip install -q -r requirements.txt"
+        print_success "Dependencies installed"
+    else
+        print_success "Virtual environment exists"
+    fi
+    
+    # 5.5. Update Python dependencies (always, to ensure latest)
+    print_info "Updating Python dependencies..."
+    remote_exec "cd ${DEPLOY_DIR}/app && source venv/bin/activate && pip install -q --upgrade -r requirements.txt"
+    print_success "Python dependencies updated"
+    
     # 5. Run database migrations
     print_info "Running database migrations..."
     remote_exec "cd ${DEPLOY_DIR} && source app/venv/bin/activate && alembic upgrade head"
@@ -665,11 +703,6 @@ EOF"
         print_error "Database migration failed!"
         exit 1
     fi
-    
-    # 6. Update Python dependencies
-    print_info "Updating Python dependencies..."
-    remote_exec "cd ${DEPLOY_DIR} && source app/venv/bin/activate && pip install -q --upgrade -r app/requirements.txt"
-    print_success "Python dependencies updated"
     
     # 7. Build frontend
     print_info "Building frontend (this may take a few minutes)..."
