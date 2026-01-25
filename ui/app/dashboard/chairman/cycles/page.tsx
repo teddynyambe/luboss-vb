@@ -426,7 +426,8 @@ export default function ManageCyclesPage() {
     try {
       const response = await api.put(`/api/chairman/cycles/${cycleId}/activate`);
       if (!response.error) {
-        setSuccess(response.data?.message || 'Cycle activated successfully! All other cycles have been deactivated.');
+        const message = (response.data as { message?: string })?.message;
+        setSuccess(message || 'Cycle activated successfully! All other cycles have been deactivated.');
         await loadCycles();
       } else {
         setError(response.error || 'Failed to activate cycle');
@@ -449,7 +450,8 @@ export default function ManageCyclesPage() {
     try {
       const response = await api.put(`/api/chairman/cycles/${cycleId}/close`);
       if (!response.error) {
-        setSuccess(response.data?.message || 'Cycle closed successfully! All phases have been closed.');
+        const message = (response.data as { message?: string })?.message;
+        setSuccess(message || 'Cycle closed successfully! All phases have been closed.');
         await loadCycles();
       } else {
         setError(response.error || 'Failed to close cycle');
@@ -468,7 +470,8 @@ export default function ManageCyclesPage() {
     try {
       const response = await api.put(`/api/chairman/cycles/${cycleId}/reopen`);
       if (!response.error) {
-        setSuccess(response.data?.message || 'Cycle reopened successfully! You can now activate it if needed.');
+        const message = (response.data as { message?: string })?.message;
+        setSuccess(message || 'Cycle reopened successfully! You can now activate it if needed.');
         await loadCycles();
       } else {
         setError(response.error || 'Failed to reopen cycle');
