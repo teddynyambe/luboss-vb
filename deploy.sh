@@ -243,7 +243,7 @@ get_package_lock_hash() {
 
 # Helper function to get pip freeze hash
 get_pip_freeze_hash() {
-    remote_exec "cd ${DEPLOY_DIR} && source app/venv/bin/activate && pip freeze 2>/dev/null | sha256sum | cut -d' ' -f1 || echo 'unknown'"
+    remote_exec "cd ${DEPLOY_DIR}/app && venv/bin/pip freeze 2>/dev/null | sha256sum | cut -d' ' -f1 || echo 'unknown'"
 }
 
 # Function to extract JSON value (portable method)
@@ -708,7 +708,7 @@ EOF"
         
         # Upgrade pip and install dependencies
         print_info "Upgrading pip and installing dependencies..."
-        remote_exec "cd ${DEPLOY_DIR}/app && source venv/bin/activate && pip install --upgrade pip && pip install -q -r requirements.txt"
+        remote_exec "cd ${DEPLOY_DIR}/app && venv/bin/pip install --upgrade pip && venv/bin/pip install -q -r requirements.txt"
         print_success "Dependencies installed"
     else
         print_success "Virtual environment exists"
@@ -716,12 +716,12 @@ EOF"
     
     # 5.5. Update Python dependencies (always, to ensure latest)
     print_info "Updating Python dependencies..."
-    remote_exec "cd ${DEPLOY_DIR}/app && source venv/bin/activate && pip install -q --upgrade -r requirements.txt"
+    remote_exec "cd ${DEPLOY_DIR}/app && venv/bin/pip install -q --upgrade -r requirements.txt"
     print_success "Python dependencies updated"
     
     # 5. Run database migrations
     print_info "Running database migrations..."
-    remote_exec "cd ${DEPLOY_DIR} && source app/venv/bin/activate && alembic upgrade head"
+    remote_exec "cd ${DEPLOY_DIR} && app/venv/bin/python -m alembic upgrade head"
     if [ $? -eq 0 ]; then
         print_success "Database migrations completed"
     else
