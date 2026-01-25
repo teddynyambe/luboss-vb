@@ -113,8 +113,25 @@ else
     print_success "SSH connection successful"
 fi
 
-# Verify ports are available before proceeding
-verify_ports
+# Function to execute remote command
+remote_exec() {
+    if [ "$USE_SSHPASS" = true ]; then
+        sshpass -p "${SSH_PASSWORD}" ssh $SSH_OPTS $SSH_TARGET "$1"
+    else
+        ssh $SSH_OPTS $SSH_TARGET "$1"
+    fi
+}
+
+# Function to copy file to server
+remote_copy() {
+    local src=$1
+    local dest=$2
+    if [ "$USE_SSHPASS" = true ]; then
+        sshpass -p "${SSH_PASSWORD}" scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
+    else
+        scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
+    fi
+}
 
 # Function to check if a port is available on remote server
 check_port_available() {
@@ -153,26 +170,6 @@ verify_ports() {
         fi
     else
         print_success "Port ${FRONTEND_PORT} is available"
-    fi
-}
-
-# Function to execute remote command
-remote_exec() {
-    if [ "$USE_SSHPASS" = true ]; then
-        sshpass -p "${SSH_PASSWORD}" ssh $SSH_OPTS $SSH_TARGET "$1"
-    else
-        ssh $SSH_OPTS $SSH_TARGET "$1"
-    fi
-}
-
-# Function to copy file to server
-remote_copy() {
-    local src=$1
-    local dest=$2
-    if [ "$USE_SSHPASS" = true ]; then
-        sshpass -p "${SSH_PASSWORD}" scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
-    else
-        scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
     fi
 }
 
