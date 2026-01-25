@@ -670,14 +670,39 @@ EOF"
             exit 1
         fi
         
-        print_info "Using Python: $python_cmd"
-        remote_exec "cd ${DEPLOY_DIR}/app && $python_cmd -m venv venv"
+        # Check if python3-venv is available
+        local python_version=$(remote_exec "$python_cmd --version 2>&1 | grep -oP '\d+\.\d+' | head -1")
+        local venv_package="python${python_version}-venv"
         
-        if [ $? -eq 0 ]; then
+        print_info "Using Python: $python_cmd (version: $python_version)"
+        
+        # Check if venv module is available
+        if ! remote_exec "$python_cmd -m venv --help" >/dev/null 2>&1; then
+            print_warning "python3-venv package not installed. Attempting to install..."
+            
+            # Try to install with sudo (non-interactive)
+            if remote_exec "sudo -n apt-get update && sudo -n apt-get install -y ${venv_package}" >/dev/null 2>&1; then
+                print_success "python3-venv package installed"
+            else
+                print_error "Cannot install python3-venv without sudo password."
+                print_info "Please run this command manually on the server:"
+                echo "  sudo apt-get update && sudo apt-get install -y ${venv_package}"
+                print_info "Then run ./deploy.sh again to continue."
+                exit 1
+            fi
+        fi
+        
+        # Create virtual environment
+        print_info "Creating virtual environment..."
+        local venv_output=$(remote_exec "cd ${DEPLOY_DIR}/app && $python_cmd -m venv venv 2>&1")
+        local venv_exit=$?
+        
+        if [ $venv_exit -eq 0 ]; then
             print_success "Virtual environment created"
         else
             print_error "Failed to create virtual environment."
-            print_info "Please ensure python3-venv is installed: sudo apt-get install python3-venv"
+            echo "Error: $venv_output"
+            print_info "Please ensure python3-venv is installed: sudo apt-get install -y ${venv_package}"
             exit 1
         fi
         
