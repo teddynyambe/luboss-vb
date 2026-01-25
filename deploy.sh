@@ -537,18 +537,45 @@ deploy() {
         
         # Create parent directory (try without sudo first)
         print_info "Creating deployment directory..."
-        if ! remote_exec "mkdir -p $(dirname ${DEPLOY_DIR})" 2>/dev/null; then
+        local parent_dir=$(dirname ${DEPLOY_DIR})
+        if ! remote_exec "mkdir -p ${parent_dir}" 2>/dev/null; then
             print_info "Directory creation requires sudo privileges..."
-            remote_exec_sudo "mkdir -p $(dirname ${DEPLOY_DIR})"
+            # Try to create with sudo, but if it fails, provide instructions
+            if ! remote_exec "sudo -n mkdir -p ${parent_dir}" 2>/dev/null; then
+                print_error "Cannot create directory ${parent_dir} without sudo password."
+                print_info "Please run this command manually on the server:"
+                echo "  sudo mkdir -p ${parent_dir}"
+                echo "  sudo chown ${SERVER_USER}:${SERVER_USER} ${parent_dir}"
+                exit 1
+            fi
         fi
         
-        # Clone repository (try without sudo first)
+        # Clone repository to a temporary location first (user-writable)
         print_info "Cloning repository from ${repo_url}..."
-        if ! remote_exec "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}" 2>/dev/null; then
-            print_info "Repository clone requires sudo privileges..."
-            remote_exec_sudo "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}"
-            # Set ownership if we used sudo
-            remote_exec_sudo "chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+        local temp_dir="${HOME}/luboss-vb-temp-$$"
+        
+        # Clone to user's home directory first
+        if ! remote_exec "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${temp_dir}" 2>/dev/null; then
+            print_error "Failed to clone repository. Please check:"
+            print_info "  1. Git is installed on the server"
+            print_info "  2. You have access to the repository"
+            print_info "  3. Network connectivity is available"
+            exit 1
+        fi
+        
+        # Move to final location (may require sudo)
+        print_info "Moving repository to ${DEPLOY_DIR}..."
+        if ! remote_exec "mv ${temp_dir} ${DEPLOY_DIR}" 2>/dev/null; then
+            # Try with sudo
+            if remote_exec "sudo -n mv ${temp_dir} ${DEPLOY_DIR}" 2>/dev/null; then
+                remote_exec "sudo -n chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+            else
+                print_error "Cannot move repository to ${DEPLOY_DIR} without sudo password."
+                print_info "Please run these commands manually on the server:"
+                echo "  sudo mv ${temp_dir} ${DEPLOY_DIR}"
+                echo "  sudo chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+                exit 1
+            fi
         fi
         print_success "Repository cloned"
     elif ! remote_exec "test -d ${DEPLOY_DIR}/.git" 2>/dev/null; then
