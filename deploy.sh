@@ -559,7 +559,9 @@ deploy() {
         
         # Clone repository to a temporary location first (user-writable)
         print_info "Cloning repository from ${repo_url}..."
-        local temp_dir="${HOME}/luboss-vb-temp-$$"
+        # Get remote user's home directory
+        local remote_home=$(remote_exec "echo \$HOME")
+        local temp_dir="${remote_home}/luboss-vb-temp-$$"
         
         # Check if git is installed
         if ! remote_exec "command -v git" >/dev/null 2>&1; then
@@ -599,13 +601,18 @@ deploy() {
             # Try with sudo
             if remote_exec "sudo -n mv ${temp_dir} ${DEPLOY_DIR}" 2>/dev/null; then
                 remote_exec "sudo -n chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+                print_success "Repository moved to ${DEPLOY_DIR}"
             else
                 print_error "Cannot move repository to ${DEPLOY_DIR} without sudo password."
+                print_info "The repository has been cloned to: ${temp_dir}"
                 print_info "Please run these commands manually on the server:"
                 echo "  sudo mv ${temp_dir} ${DEPLOY_DIR}"
                 echo "  sudo chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+                print_info "Then run ./deploy.sh again to continue deployment."
                 exit 1
             fi
+        else
+            print_success "Repository moved to ${DEPLOY_DIR}"
         fi
         print_success "Repository cloned"
     elif ! remote_exec "test -d ${DEPLOY_DIR}/.git" 2>/dev/null; then
