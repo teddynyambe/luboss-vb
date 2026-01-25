@@ -1,17 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, Form
+from fastapi import APIRouter, Depends, HTTPException, Response, Form, status
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.core.dependencies import require_treasurer, require_any_role, get_current_user
 from app.models.user import User
 from app.models.transaction import DepositProof, DepositProofStatus, DepositApproval, PenaltyRecord, PenaltyType, Declaration, DeclarationStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus
-from app.models.member import MemberProfile
+from app.models.member import MemberProfile, MemberStatus
 from app.models.user import User as UserModel
 from app.services.transaction import approve_deposit, approve_penalty
 from pydantic import BaseModel
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
+from decimal import Decimal
 
 router = APIRouter(prefix="/api/treasurer", tags=["treasurer"])
 
@@ -135,20 +136,31 @@ def approve_deposit_proof(
     """Approve deposit proof and post to ledger."""
     from app.models.ledger import LedgerAccount
     from uuid import UUID
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"=== DEPOSIT APPROVAL REQUEST START ===")
+    logger.info(f"Deposit ID: {deposit_id}")
+    logger.info(f"Approved by: {current_user.id} ({current_user.email})")
     
     try:
         deposit_uuid = UUID(deposit_id)
-    except ValueError:
+    except ValueError as e:
+        logger.error(f"Invalid deposit ID format: {deposit_id}")
         raise HTTPException(status_code=400, detail="Invalid deposit ID format")
     
     # Get deposit proof
     deposit = db.query(DepositProof).filter(DepositProof.id == deposit_uuid).first()
     if not deposit:
+        logger.error(f"Deposit proof not found: {deposit_id}")
         raise HTTPException(status_code=404, detail="Deposit proof not found")
+    
+    logger.info(f"Deposit found: ID={deposit.id}, Status={deposit.status}, Amount={deposit.amount}, Member={deposit.member_id}")
     
     # Allow approval of both SUBMITTED and REJECTED proofs
     # REJECTED proofs can be approved if treasurer is satisfied with member's response
     if deposit.status not in [DepositProofStatus.SUBMITTED.value, DepositProofStatus.REJECTED.value]:
+        logger.error(f"Deposit cannot be approved. Current status: {deposit.status}")
         raise HTTPException(
             status_code=400,
             detail=f"Deposit proof cannot be approved. Current status: {deposit.status}"
@@ -157,18 +169,31 @@ def approve_deposit_proof(
     # Get member to find their accounts
     member = db.query(MemberProfile).filter(MemberProfile.id == deposit.member_id).first()
     if not member:
+        logger.error(f"Member not found for deposit: {deposit.member_id}")
         raise HTTPException(status_code=404, detail="Member not found")
+    
+    logger.info(f"Member found: ID={member.id}, Status={member.status}")
     
     # Get account IDs
     bank_cash = db.query(LedgerAccount).filter(
         LedgerAccount.account_code == "BANK_CASH"
     ).first()
     
+    if not bank_cash:
+        logger.error("BANK_CASH account not found")
+        raise HTTPException(status_code=500, detail="BANK_CASH ledger account not found")
+    
     # Get member-specific savings account
     member_savings = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == deposit.member_id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
+    
+    if not member_savings:
+        logger.error(f"Member savings account not found for member: {deposit.member_id}")
+        raise HTTPException(status_code=500, detail="Member savings account not found")
+    
+    logger.info(f"Found accounts: BANK_CASH={bank_cash.id}, Member Savings={member_savings.id}")
     
     # Get member-specific Social Fund and Admin Fund accounts
     member_social_fund = db.query(LedgerAccount).filter(
@@ -195,25 +220,49 @@ def approve_deposit_proof(
         LedgerAccount.account_name.ilike("%loan%receivable%")
     ).first()
     
-    if not all([bank_cash, member_savings]):
-        raise HTTPException(status_code=500, detail="Required ledger accounts not found")
+    logger.info(f"Optional accounts: Social Fund={member_social_fund.id if member_social_fund else None}, "
+                f"Admin Fund={member_admin_fund.id if member_admin_fund else None}, "
+                f"Penalties={penalties_payable.id if penalties_payable else None}, "
+                f"Interest Income={interest_income.id if interest_income else None}, "
+                f"Loans Receivable={loans_receivable.id if loans_receivable else None}")
     
     # Member-specific social/admin fund accounts may not exist if member hasn't made first declaration yet
     # In that case, they'll be None and approve_deposit will handle it
     
-    approval = approve_deposit(
-        db=db,
-        deposit_proof_id=deposit_uuid,
-        approved_by=current_user.id,
-        bank_cash_account_id=bank_cash.id,
-        member_savings_account_id=member_savings.id,
-        member_social_fund_account_id=member_social_fund.id if member_social_fund else None,
-        member_admin_fund_account_id=member_admin_fund.id if member_admin_fund else None,
-        penalties_payable_account_id=penalties_payable.id if penalties_payable else None,
-        interest_income_account_id=interest_income.id if interest_income else None,
-        loans_receivable_account_id=loans_receivable.id if loans_receivable else None
-    )
-    return {"message": "Deposit approved and posted to ledger successfully", "approval_id": str(approval.id)}
+    try:
+        logger.info("Calling approve_deposit service function")
+        approval = approve_deposit(
+            db=db,
+            deposit_proof_id=deposit_uuid,
+            approved_by=current_user.id,
+            bank_cash_account_id=bank_cash.id,
+            member_savings_account_id=member_savings.id,
+            member_social_fund_account_id=member_social_fund.id if member_social_fund else None,
+            member_admin_fund_account_id=member_admin_fund.id if member_admin_fund else None,
+            penalties_payable_account_id=penalties_payable.id if penalties_payable else None,
+            interest_income_account_id=interest_income.id if interest_income else None,
+            loans_receivable_account_id=loans_receivable.id if loans_receivable else None
+        )
+        logger.info(f"Deposit approved successfully. Approval ID: {approval.id}")
+        logger.info(f"=== DEPOSIT APPROVAL REQUEST SUCCESS ===")
+        return {"message": "Deposit approved and posted to ledger successfully", "approval_id": str(approval.id)}
+    except Exception as e:
+        import traceback
+        error_type = type(e).__name__
+        error_msg = str(e)
+        tb_str = traceback.format_exc()
+        
+        logger.error(f"=== DEPOSIT APPROVAL FAILED ===")
+        logger.error(f"Deposit ID: {deposit_id}")
+        logger.error(f"Error Type: {error_type}")
+        logger.error(f"Error Message: {error_msg}")
+        logger.error(f"Full Traceback:\n{tb_str}")
+        logger.error(f"=== END DEPOSIT APPROVAL ERROR ===")
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to approve deposit: {error_msg} (Type: {error_type})"
+        )
 
 
 @router.post("/deposits/{deposit_id}/reject")
@@ -845,3 +894,228 @@ def disburse_loan(
     )
     
     return {"message": "Loan disbursed successfully and is now active", "loan_id": str(loan.id)}
+
+
+@router.get("/reports/declarations")
+def get_declarations_report(
+    month: Optional[str] = None,  # Format: YYYY-MM-DD (first day of month)
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db)
+):
+    """Get all members with their declarations for a specific month. Returns all members, showing declaration amount if exists, and payment status."""
+    from sqlalchemy import extract, and_, or_
+    from datetime import date, datetime
+    
+    # Parse month parameter or use current month
+    if month:
+        try:
+            target_date = datetime.strptime(month, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+    else:
+        today = date.today()
+        target_date = date(today.year, today.month, 1)
+    
+    # Get all active members
+    members = db.query(MemberProfile).filter(
+        MemberProfile.status == MemberStatus.ACTIVE
+    ).all()
+    
+    result = []
+    for member in members:
+        user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+        if not user:
+            continue
+        
+        member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        if not member_name:
+            continue
+        
+        # Find declaration for this month (include all statuses: PENDING, PROOF, APPROVED, etc.)
+        declaration = db.query(Declaration).filter(
+            and_(
+                Declaration.member_id == member.id,
+                extract('year', Declaration.effective_month) == target_date.year,
+                extract('month', Declaration.effective_month) == target_date.month
+            )
+        ).first()
+        
+        # Calculate total declaration amount
+        declaration_amount = None
+        if declaration:
+            total = Decimal("0.00")
+            if declaration.declared_savings_amount:
+                total += declaration.declared_savings_amount
+            if declaration.declared_social_fund:
+                total += declaration.declared_social_fund
+            if declaration.declared_admin_fund:
+                total += declaration.declared_admin_fund
+            if declaration.declared_penalties:
+                total += declaration.declared_penalties
+            if declaration.declared_interest_on_loan:
+                total += declaration.declared_interest_on_loan
+            if declaration.declared_loan_repayment:
+                total += declaration.declared_loan_repayment
+            declaration_amount = float(total) if total > 0 else None
+        
+        # Check if deposit proof is approved (paid)
+        is_paid = False
+        if declaration:
+            deposit_proof = db.query(DepositProof).filter(
+                DepositProof.declaration_id == declaration.id,
+                DepositProof.status == DepositProofStatus.APPROVED.value
+            ).first()
+            is_paid = deposit_proof is not None
+        
+        # Only include members who have declarations (filter out members without declarations)
+        if declaration:
+            result.append({
+                "member_id": str(member.id),
+                "member_name": member_name,
+                "declaration_amount": declaration_amount,
+                "is_paid": is_paid
+            })
+    
+    # Sort by member name
+    result.sort(key=lambda x: x["member_name"])
+    
+    return {
+        "month": target_date.isoformat(),
+        "members": result
+    }
+
+
+@router.get("/reports/declarations/details")
+def get_declaration_details_report(
+    member_id: Optional[str] = None,
+    month: Optional[str] = None,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db)
+):
+    """Get declaration details for a member and month (view-only, for Reports modal)."""
+    from sqlalchemy import extract, and_
+    from datetime import date, datetime
+
+    if not member_id or not month:
+        raise HTTPException(status_code=400, detail="member_id and month are required")
+
+    try:
+        member_uuid = UUID(member_id)
+        target_date = datetime.strptime(month, "%Y-%m-%d").date()
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail="Invalid member_id or month format. Use YYYY-MM-DD for month.")
+
+    member = db.query(MemberProfile).filter(
+        MemberProfile.id == member_uuid,
+        MemberProfile.status == MemberStatus.ACTIVE
+    ).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    member_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
+
+    declaration = db.query(Declaration).filter(
+        and_(
+            Declaration.member_id == member_uuid,
+            extract("year", Declaration.effective_month) == target_date.year,
+            extract("month", Declaration.effective_month) == target_date.month
+        )
+    ).first()
+
+    if not declaration:
+        return {
+            "member_id": str(member.id),
+            "member_name": member_name,
+            "effective_month": target_date.isoformat(),
+            "has_declaration": False,
+            "declaration": None,
+            "deposit_proof": None,
+        }
+
+    total = Decimal("0.00")
+    for attr in ("declared_savings_amount", "declared_social_fund", "declared_admin_fund",
+                 "declared_penalties", "declared_interest_on_loan", "declared_loan_repayment"):
+        v = getattr(declaration, attr, None)
+        if v is not None:
+            total += v
+
+    deposit_proof = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration.id
+    ).order_by(DepositProof.uploaded_at.desc()).first()
+
+    return {
+        "member_id": str(member.id),
+        "member_name": member_name,
+        "effective_month": declaration.effective_month.isoformat(),
+        "has_declaration": True,
+        "declaration": {
+            "id": str(declaration.id),
+            "declared_savings_amount": float(declaration.declared_savings_amount) if declaration.declared_savings_amount is not None else None,
+            "declared_social_fund": float(declaration.declared_social_fund) if declaration.declared_social_fund is not None else None,
+            "declared_admin_fund": float(declaration.declared_admin_fund) if declaration.declared_admin_fund is not None else None,
+            "declared_penalties": float(declaration.declared_penalties) if declaration.declared_penalties is not None else None,
+            "declared_interest_on_loan": float(declaration.declared_interest_on_loan) if declaration.declared_interest_on_loan is not None else None,
+            "declared_loan_repayment": float(declaration.declared_loan_repayment) if declaration.declared_loan_repayment is not None else None,
+            "total": float(total),
+            "status": declaration.status.value,
+        },
+        "deposit_proof": {
+            "id": str(deposit_proof.id),
+            "status": deposit_proof.status,
+            "amount": float(deposit_proof.amount),
+            "uploaded_at": deposit_proof.uploaded_at.isoformat() if deposit_proof.uploaded_at else None,
+        } if deposit_proof else None,
+    }
+
+
+@router.get("/reports/loans")
+def get_loans_report(
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db)
+):
+    """Get all active loans with their status (disbursed/paid)."""
+    # Get all active loans (OPEN status)
+    loans = db.query(Loan).filter(
+        Loan.loan_status == LoanStatus.OPEN
+    ).order_by(Loan.created_at.desc()).all()
+    
+    result = []
+    for loan in loans:
+        member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
+        user = None
+        if member:
+            user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+        
+        if not user:
+            continue
+        
+        member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        if not member_name:
+            continue
+        
+        # Check if loan is disbursed (has disbursement_date)
+        is_disbursed = loan.disbursement_date is not None
+        
+        # Check if loan is fully paid (outstanding balance is 0 or very small)
+        total_principal_paid = sum(repayment.principal_amount for repayment in loan.repayments)
+        outstanding_balance = loan.loan_amount - total_principal_paid
+        is_paid = outstanding_balance <= Decimal("0.01")  # Consider paid if balance is <= 1 cent
+        
+        result.append({
+            "loan_id": str(loan.id),
+            "member_id": str(loan.member_id),
+            "member_name": member_name,
+            "loan_amount": float(loan.loan_amount),
+            "is_disbursed": is_disbursed,
+            "is_paid": is_paid
+        })
+    
+    # Sort by member name
+    result.sort(key=lambda x: x["member_name"])
+    
+    return {
+        "loans": result
+    }

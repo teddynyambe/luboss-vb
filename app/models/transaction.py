@@ -36,10 +36,9 @@ class LoanStatus(str, enum.Enum):
 
 class PenaltyRecordStatus(str, enum.Enum):
     """Penalty record status."""
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    POSTED = "posted"
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    PAID = "PAID"
 
 
 class DepositProofStatus(str, enum.Enum):

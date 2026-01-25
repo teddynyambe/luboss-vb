@@ -75,6 +75,14 @@ class ApiClient {
       const data = await response.json();
 
       if (!response.ok) {
+        // Log the full error response for debugging
+        console.error('API Error Response:', {
+          status: response.status,
+          statusText: response.statusText,
+          url: url,
+          data: data
+        });
+        
         // Handle FastAPI validation errors (array of error objects)
         let errorMessage = 'An error occurred';
         if (Array.isArray(data.detail)) {

@@ -23,6 +23,39 @@ from datetime import date, datetime
 from typing import Optional
 
 
+def is_cycle_defined_penalty_type(penalty_type_name: str) -> bool:
+    """Check if a penalty type name matches cycle-defined penalty types.
+    
+    Cycle-defined penalties are automatically created by the system:
+    - Late Declaration
+    - Late Deposits
+    - Late Loan Application
+    
+    These should not be created manually by compliance officers.
+    """
+    cycle_defined_names = [
+        "Late Declaration",
+        "Late Deposits",
+        "Late Loan Application",
+        "late declaration",  # Case variations
+        "late deposits",
+        "late loan application"
+    ]
+    return penalty_type_name.strip() in cycle_defined_names or \
+           any(name.lower() in penalty_type_name.lower() for name in cycle_defined_names)
+
+
+def get_system_user_id(db: Session) -> Optional[UUID]:
+    """Get a system user ID (admin) for system-generated records.
+    
+    Returns the first admin user ID, or None if no admin exists.
+    This is used for system-generated penalty records where created_by is required.
+    """
+    from app.models.user import User, UserRoleEnum
+    admin_user = db.query(User).filter(User.role == UserRoleEnum.ADMIN).first()
+    return admin_user.id if admin_user else None
+
+
 def create_declaration(
     db: Session,
     member_id: UUID,
@@ -209,6 +242,73 @@ def create_declaration(
                         created_by=None  # System-generated
                     )
     
+    # Check if declaration is late and create automatic penalty record
+    from app.models.cycle import CyclePhase, PhaseType
+    from datetime import date as date_type
+    
+    declaration_phase = db.query(CyclePhase).filter(
+        CyclePhase.cycle_id == cycle_id,
+        CyclePhase.phase_type == PhaseType.DECLARATION
+    ).first()
+    
+    if declaration_phase:
+        auto_apply = getattr(declaration_phase, 'auto_apply_penalty', False)
+        monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
+        penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
+        
+        if auto_apply and monthly_end_day and penalty_type_id:
+            today = date_type.today()
+            is_late = False
+            
+            # Check if declaration is late (after monthly_end_day)
+            if today.year == effective_month.year and today.month == effective_month.month:
+                if today.day > monthly_end_day:
+                    is_late = True
+            elif today.year > effective_month.year or (today.year == effective_month.year and today.month > effective_month.month):
+                is_late = True
+            
+            if is_late:
+                # Get penalty type
+                penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+                if penalty_type:
+                    # Check if penalty record already exists for this declaration
+                    # More comprehensive duplicate check: check by member, penalty_type, and effective month
+                    # This prevents duplicates even if called multiple times
+                    from sqlalchemy import extract, or_, and_
+                    existing_penalty = db.query(PenaltyRecord).filter(
+                        PenaltyRecord.member_id == member_id,
+                        PenaltyRecord.penalty_type_id == penalty_type_id,
+                        or_(
+                            # Check by date_issued year/month (if created in same month)
+                            and_(
+                                extract('year', PenaltyRecord.date_issued) == effective_month.year,
+                                extract('month', PenaltyRecord.date_issued) == effective_month.month
+                            ),
+                            # Check by notes containing the effective month (case-insensitive)
+                            PenaltyRecord.notes.ilike(f"%{effective_month.strftime('%B %Y')}%"),
+                            PenaltyRecord.notes.ilike(f"%{effective_month.strftime('%b %Y')}%")  # Also check abbreviated month
+                        )
+                    ).first()
+                    
+                    if not existing_penalty:
+                        # Get system user for system-generated penalties
+                        system_user_id = get_system_user_id(db)
+                        if not system_user_id:
+                            # If no admin exists, skip penalty creation (shouldn't happen in production)
+                            import logging
+                            logging.warning(f"No admin user found to create system penalty for member {member_id}")
+                        else:
+                            # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
+                            late_penalty = PenaltyRecord(
+                                member_id=member_id,
+                                penalty_type_id=penalty_type_id,
+                                status=PenaltyRecordStatus.APPROVED,  # Auto-approved for cycle-defined penalties
+                                created_by=system_user_id,  # Use admin user for system-generated penalties
+                                notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_month.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
+                            )
+                            db.add(late_penalty)
+                            db.flush()
+    
     db.commit()
     db.refresh(declaration)
     return declaration
@@ -340,6 +440,10 @@ def approve_deposit(
         )
     
     # Build journal entry lines
+    # The deposit amount should equal the sum of all components
+    # Bank cash is debited for the full amount (cash received)
+    # We then credit various accounts to balance
+    
     lines = [
         {
             "account_id": bank_cash_account_id,
@@ -358,8 +462,11 @@ def approve_deposit(
             "description": "Member savings deposit"
         })
     
-    # Credit member social fund account (reduces outstanding balance)
-    # Also debit organization receivable to balance
+    # Handle Social Fund payment
+    # When member pays social fund:
+    # 1. Debit member's social fund account (accumulates payments for display)
+    # 2. Credit organization receivable (reduces receivable - balances the member debit)
+    # Note: Bank cash is already debited above for the full deposit amount
     if social_fund > 0:
         # Get or create member's social fund account if it doesn't exist
         if not member_social_fund_account_id:
@@ -385,41 +492,19 @@ def approve_deposit(
                 member_social_fund_account_id = member_social_fund.id
         
         if member_social_fund_account_id:
-            # Debit member account (payment - shown as debit per user requirement)
+            # Credit member account (payment reduces balance due)
+            # Required amount → Debit, Payment → Credit, Balance = Debits - Credits
             lines.append({
                 "account_id": member_social_fund_account_id,
-                "debit_amount": social_fund,
-                "credit_amount": Decimal("0.00"),
-                "description": "Social fund payment"
-            })
-            
-            # Credit organization receivable to balance
-            from app.models.ledger import LedgerAccount, AccountType
-            social_fund_receivable = db.query(LedgerAccount).filter(
-                LedgerAccount.account_code == "SOC_FUND_REC"
-            ).first()
-            
-            # Create receivable account if it doesn't exist
-            if not social_fund_receivable:
-                social_fund_receivable = LedgerAccount(
-                    account_code="SOC_FUND_REC",
-                    account_name="Social Fund Receivable",
-                    account_type=AccountType.ASSET,
-                    description="Social fund receivables from members (contra account for member social fund accounts)"
-                )
-                db.add(social_fund_receivable)
-                db.flush()
-            
-            # Credit organization receivable to balance the payment debit
-            lines.append({
-                "account_id": social_fund_receivable.id,
                 "debit_amount": Decimal("0.00"),
                 "credit_amount": social_fund,
-                "description": "Social fund payment received (reduces receivable)"
+                "description": "Social fund payment"
             })
+            # Note: Organization receivable is a contra account and doesn't need to be adjusted here
+            # The member account credit balances with the bank cash debit
     
-    # Credit member admin fund account (reduces outstanding balance)
-    # Also debit organization receivable to balance
+    # Handle Admin Fund payment
+    # Same logic as social fund
     if admin_fund > 0:
         # Get or create member's admin fund account if it doesn't exist
         if not member_admin_fund_account_id:
@@ -445,38 +530,16 @@ def approve_deposit(
                 member_admin_fund_account_id = member_admin_fund.id
         
         if member_admin_fund_account_id:
-            # Debit member account (payment - shown as debit per user requirement)
+            # Credit member account (payment reduces balance due)
+            # Required amount → Debit, Payment → Credit, Balance = Debits - Credits
             lines.append({
                 "account_id": member_admin_fund_account_id,
-                "debit_amount": admin_fund,
-                "credit_amount": Decimal("0.00"),
-                "description": "Admin fund payment"
-            })
-            
-            # Credit organization receivable to balance
-            from app.models.ledger import LedgerAccount, AccountType
-            admin_fund_receivable = db.query(LedgerAccount).filter(
-                LedgerAccount.account_code == "ADM_FUND_REC"
-            ).first()
-            
-            # Create receivable account if it doesn't exist
-            if not admin_fund_receivable:
-                admin_fund_receivable = LedgerAccount(
-                    account_code="ADM_FUND_REC",
-                    account_name="Admin Fund Receivable",
-                    account_type=AccountType.ASSET,
-                    description="Admin fund receivables from members (contra account for member admin fund accounts)"
-                )
-                db.add(admin_fund_receivable)
-                db.flush()
-            
-            # Credit organization receivable to balance the payment debit
-            lines.append({
-                "account_id": admin_fund_receivable.id,
                 "debit_amount": Decimal("0.00"),
                 "credit_amount": admin_fund,
-                "description": "Admin fund payment received (reduces receivable)"
+                "description": "Admin fund payment"
             })
+            # Note: Organization receivable is a contra account and doesn't need to be adjusted here
+            # The member account credit balances with the bank cash debit
     
     # Credit penalties payable
     if penalties > 0:
@@ -529,6 +592,26 @@ def approve_deposit(
             "description": "Loan principal repayment"
         })
     
+    # Log all journal lines before creating entry
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"=== JOURNAL ENTRY LINES FOR DEPOSIT APPROVAL ===")
+    logger.info(f"Deposit ID: {deposit.id}, Amount: {deposit.amount}")
+    logger.info(f"Declaration: {declaration.effective_month}")
+    logger.info(f"Savings: {savings_amount}, Social: {social_fund}, Admin: {admin_fund}")
+    logger.info(f"Penalties: {penalties}, Interest: {interest_on_loan}, Repayment: {loan_repayment}")
+    
+    total_debits = sum(Decimal(str(line.get("debit_amount", 0))) for line in lines)
+    total_credits = sum(Decimal(str(line.get("credit_amount", 0))) for line in lines)
+    logger.info(f"Total Debits: {total_debits}, Total Credits: {total_credits}, Difference: {total_debits - total_credits}")
+    
+    for i, line in enumerate(lines):
+        logger.info(f"Line {i+1}: Account={line.get('account_id')}, "
+                   f"Debit={line.get('debit_amount', 0)}, "
+                   f"Credit={line.get('credit_amount', 0)}, "
+                   f"Desc={line.get('description', 'N/A')}")
+    logger.info(f"=== END JOURNAL ENTRY LINES ===")
+    
     # Create journal entry
     journal_entry = create_journal_entry(
         db=db,
@@ -553,6 +636,33 @@ def approve_deposit(
     
     # Update declaration status to APPROVED
     declaration.status = DeclarationStatus.APPROVED
+    
+    # Mark penalties as PAID when deposit is approved
+    # Find all APPROVED penalty records for this member that match the declared penalty amount
+    if penalties > 0:
+        # Get all APPROVED penalties for this member
+        approved_penalties = db.query(PenaltyRecord).filter(
+            PenaltyRecord.member_id == deposit.member_id,
+            PenaltyRecord.status == PenaltyRecordStatus.APPROVED
+        ).order_by(PenaltyRecord.date_issued.asc()).all()
+        
+        # Match penalties to the declared amount
+        remaining_penalty_amount = penalties
+        for penalty in approved_penalties:
+            if remaining_penalty_amount <= Decimal("0.00"):
+                break
+            
+            penalty_type = penalty.penalty_type
+            if not penalty_type:
+                continue
+            
+            penalty_amount = penalty_type.fee_amount or Decimal("0.00")
+            
+            # If this penalty amount fits in the remaining amount, mark it as paid
+            if penalty_amount <= remaining_penalty_amount:
+                penalty.status = PenaltyRecordStatus.PAID
+                remaining_penalty_amount -= penalty_amount
+            # If partial payment, we could handle it here, but for now we'll only mark complete payments
     
     db.commit()
     db.refresh(approval)
@@ -679,14 +789,23 @@ def approve_penalty(
     member_savings_account_id: UUID,
     penalty_income_account_id: UUID
 ) -> PenaltyRecord:
-    """Approve penalty and post to ledger."""
+    """Approve penalty and post to ledger.
+    
+    When a penalty is approved by the treasurer, it is posted to the ledger
+    and the status is changed to APPROVED. The penalty can then be included
+    in member declarations and will be marked as PAID when the deposit is approved.
+    """
     penalty = db.query(PenaltyRecord).filter(PenaltyRecord.id == penalty_record_id).first()
     if not penalty:
         raise ValueError("Penalty record not found")
     
-    # Check if penalty is already posted
-    if penalty.status == PenaltyRecordStatus.POSTED:
-        raise ValueError("Penalty has already been posted")
+    # Check if penalty is already approved
+    if penalty.status == PenaltyRecordStatus.APPROVED:
+        raise ValueError("Penalty has already been approved")
+    
+    # Check if penalty is already paid
+    if penalty.status == PenaltyRecordStatus.PAID:
+        raise ValueError("Penalty has already been paid")
     
     # Check if penalty has a penalty_type_id
     if not penalty.penalty_type_id:
@@ -723,7 +842,8 @@ def approve_penalty(
         created_by=approved_by
     )
     
-    penalty.status = PenaltyRecordStatus.POSTED
+    # Set status to APPROVED (not PAID - that happens when deposit is approved)
+    penalty.status = PenaltyRecordStatus.APPROVED
     penalty.approved_by = approved_by
     penalty.approved_at = datetime.utcnow()
     penalty.journal_entry_id = journal_entry.id

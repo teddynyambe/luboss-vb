@@ -15,7 +15,7 @@ interface User {
   role: string;
   approved?: boolean;
   member_id?: string;
-  member_status?: string; // pending, active, suspended
+  member_status?: string; // active, inactive
   member_activated_at?: string;
 }
 
@@ -39,7 +39,7 @@ interface UserCreditRating {
 }
 
 const ROLES = ['admin', 'treasurer', 'member', 'compliance', 'chairman'] as const;
-type FilterStatus = 'pending' | 'approved' | 'all';
+type FilterStatus = 'inactive' | 'active' | 'all';
 
 export default function UserManagementPage() {
   const { user } = useAuth();
@@ -48,8 +48,7 @@ export default function UserManagementPage() {
   const [members, setMembers] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
-  const [approving, setApproving] = useState<string | null>(null);
-  const [suspending, setSuspending] = useState<string | null>(null);
+  const [toggling, setToggling] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
@@ -84,24 +83,32 @@ export default function UserManagementPage() {
   const loadUsers = async () => {
     setLoading(true);
     setError(null);
-    const response = await api.get<User[]>('/api/chairman/users');
-    if (response.data) {
-      setUsers(response.data);
-    } else {
-      setError(response.error || 'Failed to load users');
+    try {
+      const response = await api.get<User[]>('/api/chairman/users');
+      if (response.data && Array.isArray(response.data)) {
+        setUsers(response.data);
+      } else {
+        setError(response.error || 'Failed to load users');
+        setUsers([]);
+      }
+    } catch (err: any) {
+      console.error('Error loading users:', err);
+      setError(err?.response?.data?.detail || err?.message || 'Failed to load users');
+      setUsers([]);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   const loadMembers = async () => {
     try {
       const endpoint = filterStatus === 'all' 
         ? '/api/chairman/members'
-        : filterStatus === 'pending'
-        ? '/api/chairman/members?status=pending'
+        : filterStatus === 'inactive'
+        ? '/api/chairman/members?status=inactive'
         : '/api/chairman/members?status=active';
       const response = await api.get<any[]>(endpoint);
-      if (response.data) {
+      if (response.data && Array.isArray(response.data)) {
         setMembers(response.data);
         // Merge member data with users
         const memberMap = new Map(response.data.map((m: any) => [m.user_id, m]));
@@ -116,9 +123,13 @@ export default function UserManagementPage() {
             };
           })
         );
+      } else {
+        console.error('Error loading members: response.data is not an array', response);
+        setMembers([]);
       }
     } catch (err) {
       console.error('Error loading members:', err);
+      setMembers([]);
     }
   };
 
@@ -142,70 +153,27 @@ export default function UserManagementPage() {
     setUpdating(null);
   };
 
-  const handleApprove = async (userId: string) => {
-    setApproving(userId);
-    setError(null);
-    const response = await api.put(`/api/chairman/users/${userId}/approve`);
-    if (!response.error) {
-      showMessage('success', 'User approved successfully');
-      await loadUsers();
-      await loadMembers();
-    } else {
-      setError(response.error || 'Failed to approve user');
-      showMessage('error', response.error || 'Failed to approve user');
-    }
-    setApproving(null);
-  };
 
-  const handleApproveMember = async (memberId: string) => {
-    setApproving(memberId);
+  const handleToggleMemberStatus = async (memberId: string) => {
+    setToggling(memberId);
     setError(null);
-    const response = await api.post(`/api/chairman/members/${memberId}/approve`);
+    const response = await api.post(`/api/chairman/members/${memberId}/toggle-status`);
     if (!response.error) {
-      showMessage('success', 'Member approved successfully');
+      const statusText = response.data?.status === 'active' ? 'activated' : 'deactivated';
+      showMessage('success', `Member ${statusText} successfully`);
       await loadUsers();
       await loadMembers();
     } else {
-      setError(response.error || 'Failed to approve member');
-      showMessage('error', response.error || 'Failed to approve member');
+      setError(response.error || 'Failed to toggle member status');
+      showMessage('error', response.error || 'Failed to toggle member status');
     }
-    setApproving(null);
-  };
-
-  const handleSuspendMember = async (memberId: string) => {
-    setSuspending(memberId);
-    setError(null);
-    const response = await api.post(`/api/chairman/members/${memberId}/suspend`);
-    if (!response.error) {
-      showMessage('success', 'Member suspended successfully');
-      await loadUsers();
-      await loadMembers();
-    } else {
-      setError(response.error || 'Failed to suspend member');
-      showMessage('error', response.error || 'Failed to suspend member');
-    }
-    setSuspending(null);
-  };
-
-  const handleReactivateMember = async (memberId: string) => {
-    setApproving(memberId);
-    setError(null);
-    const response = await api.post(`/api/chairman/members/${memberId}/activate`);
-    if (!response.error) {
-      showMessage('success', 'Member reactivated successfully');
-      await loadUsers();
-      await loadMembers();
-    } else {
-      setError(response.error || 'Failed to reactivate member');
-      showMessage('error', response.error || 'Failed to reactivate member');
-    }
-    setApproving(null);
+    setToggling(null);
   };
 
   const loadCycles = async () => {
     try {
       const response = await api.get<Cycle[]>('/api/chairman/cycles');
-      if (response.data) {
+      if (response.data && Array.isArray(response.data)) {
         const activeCycles = response.data.filter(c => c.status === 'active');
         setCycles(activeCycles);
         if (activeCycles.length > 0) {
@@ -213,9 +181,17 @@ export default function UserManagementPage() {
           // Load credit ratings for all members when cycles are loaded
           loadCreditRatingsForUsers(activeCycles[0].id);
         }
+      } else {
+        setCycles([]);
       }
-    } catch (err) {
-      console.error('Error loading cycles:', err);
+    } catch (err: any) {
+      // 403 is expected if user doesn't have permission (e.g., Admin accessing cycles)
+      if (err?.response?.status === 403) {
+        console.log('User does not have permission to access cycles');
+      } else {
+        console.error('Error loading cycles:', err);
+      }
+      setCycles([]);
     }
   };
 
@@ -342,13 +318,13 @@ export default function UserManagementPage() {
   // Filter users based on filterStatus
   const filteredUsers = users.filter(user => {
     if (filterStatus === 'all') return true;
-    if (filterStatus === 'pending') {
-      // Show if user is not approved OR member status is pending
-      return user.approved !== true || user.member_status === 'pending';
+    if (filterStatus === 'inactive') {
+      // Show users with inactive member status or no member profile (defaults to inactive)
+      return !user.member_status || user.member_status === 'inactive';
     }
-    if (filterStatus === 'approved') {
-      // Show if user is approved AND (no member profile OR member is active)
-      return user.approved === true && (!user.member_status || user.member_status === 'active');
+    if (filterStatus === 'active') {
+      // Show users with active member status
+      return user.member_status === 'active';
     }
     return true;
   });
@@ -396,24 +372,24 @@ export default function UserManagementPage() {
             {/* Filter Toggle */}
             <div className="flex gap-2 bg-blue-100 p-1 rounded-lg border-2 border-blue-300">
               <button
-                onClick={() => setFilterStatus('pending')}
+                onClick={() => setFilterStatus('inactive')}
                 className={`px-3 md:px-4 py-2 rounded-md font-semibold text-xs md:text-sm transition-all ${
-                  filterStatus === 'pending'
+                  filterStatus === 'inactive'
                     ? 'bg-blue-600 text-white shadow-md'
                     : 'text-blue-700 hover:bg-blue-200'
                 }`}
               >
-                Pending
+                Inactive
               </button>
               <button
-                onClick={() => setFilterStatus('approved')}
+                onClick={() => setFilterStatus('active')}
                 className={`px-3 md:px-4 py-2 rounded-md font-semibold text-xs md:text-sm transition-all ${
-                  filterStatus === 'approved'
+                  filterStatus === 'active'
                     ? 'bg-blue-600 text-white shadow-md'
                     : 'text-blue-700 hover:bg-blue-200'
                 }`}
               >
-                Approved
+                Active
               </button>
               <button
                 onClick={() => setFilterStatus('all')}
@@ -454,9 +430,6 @@ export default function UserManagementPage() {
                         Role
                       </th>
                       <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
-                        Status
-                      </th>
-                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
                         Member Status
                       </th>
                       <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
@@ -487,34 +460,23 @@ export default function UserManagementPage() {
                           </span>
                         </td>
                         <td className="p-3 md:p-4">
-                          <span
-                            className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
-                              user.approved === true
-                                ? 'bg-green-200 text-green-800'
-                                : 'bg-yellow-200 text-yellow-800'
-                            }`}
-                          >
-                            {user.approved === true ? 'Approved' : 'Pending'}
-                          </span>
-                        </td>
-                        <td className="p-3 md:p-4">
                           {user.member_status ? (
-                            <span
-                              className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold capitalize ${
-                                user.member_status === 'active'
-                                  ? 'bg-green-200 text-green-800'
-                                  : user.member_status === 'pending'
-                                  ? 'bg-yellow-200 text-yellow-800'
-                                  : 'bg-red-200 text-red-800'
-                              }`}
-                            >
-                              {user.member_status}
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold capitalize ${
+                                  user.member_status === 'active'
+                                    ? 'bg-green-200 text-green-800'
+                                    : 'bg-gray-200 text-gray-800'
+                                }`}
+                              >
+                                {user.member_status === 'active' ? 'Active' : 'In-Active'}
+                              </span>
                               {user.member_activated_at && user.member_status === 'active' && (
-                                <span className="ml-1 text-xs">
+                                <span className="text-xs text-blue-600">
                                   ({new Date(user.member_activated_at).toLocaleDateString()})
                                 </span>
                               )}
-                            </span>
+                            </div>
                           ) : (
                             <span className="text-xs text-blue-600">No member profile</span>
                           )}
@@ -524,7 +486,7 @@ export default function UserManagementPage() {
                             <select
                               value={user.role}
                               onChange={(e) => handleRoleUpdate(user.id, e.target.value)}
-                              disabled={updating === user.id || approving === user.id}
+                              disabled={updating === user.id}
                               className="px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               {ROLES.map((role) => (
@@ -534,40 +496,20 @@ export default function UserManagementPage() {
                               ))}
                             </select>
                             <div className="flex gap-2">
-                              {user.approved !== true && (
+                              {user.member_id && (
                                 <button
-                                  onClick={() => handleApprove(user.id)}
-                                  disabled={approving === user.id || updating === user.id}
-                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
+                                  onClick={() => handleToggleMemberStatus(user.member_id!)}
+                                  disabled={toggling === user.member_id || updating === user.id}
+                                  className={`flex-1 px-3 py-2 border-2 rounded-xl text-white disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200 ${
+                                    user.member_status === 'active'
+                                      ? 'bg-gradient-to-br from-red-500 to-red-600 border-red-600 hover:from-red-600 hover:to-red-700'
+                                      : 'bg-gradient-to-br from-green-500 to-green-600 border-green-600 hover:from-green-600 hover:to-green-700'
+                                  }`}
                                 >
-                                  {approving === user.id ? 'Approving...' : 'Approve User'}
-                                </button>
-                              )}
-                              {user.member_id && user.member_status === 'pending' && (
-                                <button
-                                  onClick={() => handleApproveMember(user.member_id!)}
-                                  disabled={approving === user.member_id || updating === user.id}
-                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
-                                >
-                                  {approving === user.member_id ? 'Approving...' : 'Approve Member'}
-                                </button>
-                              )}
-                              {user.member_id && user.member_status === 'active' && (
-                                <button
-                                  onClick={() => handleSuspendMember(user.member_id!)}
-                                  disabled={suspending === user.member_id || updating === user.id}
-                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-red-500 to-red-600 border-2 border-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
-                                >
-                                  {suspending === user.member_id ? 'Suspending...' : 'Suspend'}
-                                </button>
-                              )}
-                              {user.member_id && user.member_status === 'suspended' && (
-                                <button
-                                  onClick={() => handleReactivateMember(user.member_id!)}
-                                  disabled={approving === user.member_id || updating === user.id}
-                                  className="flex-1 px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs md:text-sm font-semibold transition-all duration-200"
-                                >
-                                  {approving === user.member_id ? 'Reactivating...' : 'Reactivate'}
+                                  {toggling === user.member_id 
+                                    ? (user.member_status === 'active' ? 'Deactivating...' : 'Activating...')
+                                    : (user.member_status === 'active' ? 'Deactivate' : 'Activate')
+                                  }
                                 </button>
                               )}
                             </div>
@@ -620,26 +562,15 @@ export default function UserManagementPage() {
                       <span className="inline-block px-3 py-1 rounded-full text-xs font-semibold bg-blue-200 text-blue-800 capitalize">
                         {user.role}
                       </span>
-                      <span
-                        className={`inline-block px-3 py-1 rounded-full text-xs font-semibold ${
-                          user.approved === true
-                            ? 'bg-green-200 text-green-800'
-                            : 'bg-yellow-200 text-yellow-800'
-                        }`}
-                      >
-                        {user.approved === true ? 'Approved' : 'Pending'}
-                      </span>
                       {user.member_status && (
                         <span
                           className={`inline-block px-3 py-1 rounded-full text-xs font-semibold capitalize ${
                             user.member_status === 'active'
                               ? 'bg-green-200 text-green-800'
-                              : user.member_status === 'pending'
-                              ? 'bg-yellow-200 text-yellow-800'
-                              : 'bg-red-200 text-red-800'
+                              : 'bg-gray-200 text-gray-800'
                           }`}
                         >
-                          {user.member_status}
+                          {user.member_status === 'active' ? 'Active' : 'In-Active'}
                         </span>
                       )}
                     </div>
@@ -648,7 +579,7 @@ export default function UserManagementPage() {
                       <select
                         value={user.role}
                         onChange={(e) => handleRoleUpdate(user.id, e.target.value)}
-                        disabled={updating === user.id || approving === user.id}
+                        disabled={updating === user.id}
                         className="w-full px-3 py-2 border-2 border-blue-300 rounded-xl bg-white text-blue-900 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         {ROLES.map((role) => (
@@ -659,40 +590,20 @@ export default function UserManagementPage() {
                       </select>
                       
                       <div className="flex flex-col gap-2">
-                        {user.approved !== true && (
+                        {user.member_id && (
                           <button
-                            onClick={() => handleApprove(user.id)}
-                            disabled={approving === user.id || updating === user.id}
-                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
+                            onClick={() => handleToggleMemberStatus(user.member_id!)}
+                            disabled={toggling === user.member_id || updating === user.id}
+                            className={`w-full px-3 py-2 border-2 rounded-xl text-white disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200 ${
+                              user.member_status === 'active'
+                                ? 'bg-gradient-to-br from-red-500 to-red-600 border-red-600 hover:from-red-600 hover:to-red-700'
+                                : 'bg-gradient-to-br from-green-500 to-green-600 border-green-600 hover:from-green-600 hover:to-green-700'
+                            }`}
                           >
-                            {approving === user.id ? 'Approving...' : 'Approve User'}
-                          </button>
-                        )}
-                        {user.member_id && user.member_status === 'pending' && (
-                          <button
-                            onClick={() => handleApproveMember(user.member_id!)}
-                            disabled={approving === user.member_id || updating === user.id}
-                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
-                          >
-                            {approving === user.member_id ? 'Approving...' : 'Approve Member'}
-                          </button>
-                        )}
-                        {user.member_id && user.member_status === 'active' && (
-                          <button
-                            onClick={() => handleSuspendMember(user.member_id!)}
-                            disabled={suspending === user.member_id || updating === user.id}
-                            className="w-full px-3 py-2 bg-gradient-to-br from-red-500 to-red-600 border-2 border-red-600 text-white rounded-xl hover:from-red-600 hover:to-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
-                          >
-                            {suspending === user.member_id ? 'Suspending...' : 'Suspend Member'}
-                          </button>
-                        )}
-                        {user.member_id && user.member_status === 'suspended' && (
-                          <button
-                            onClick={() => handleReactivateMember(user.member_id!)}
-                            disabled={approving === user.member_id || updating === user.id}
-                            className="w-full px-3 py-2 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-all duration-200"
-                          >
-                            {approving === user.member_id ? 'Reactivating...' : 'Reactivate Member'}
+                            {toggling === user.member_id 
+                              ? (user.member_status === 'active' ? 'Deactivating...' : 'Activating...')
+                              : (user.member_status === 'active' ? 'Deactivate' : 'Activate')
+                            }
                           </button>
                         )}
                         {user.role !== 'admin' && (

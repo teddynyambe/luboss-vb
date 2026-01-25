@@ -23,17 +23,42 @@ def create_penalty(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Create a penalty record (Compliance only)."""
+    """Create a penalty record (Compliance only).
+    
+    Only non-cycle-defined penalties can be created manually.
+    Cycle-defined penalties (Late Declaration, Late Deposits, Late Loan Application)
+    are automatically created by the system with APPROVED status.
+    """
+    from app.services.transaction import is_cycle_defined_penalty_type
+    from uuid import UUID
+    
     try:
         # Verify penalty type exists
         penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_data.penalty_type_id).first()
         if not penalty_type:
-            return {"message": "To be done - penalty type not found"}
+            raise HTTPException(status_code=404, detail="Penalty type not found")
+        
+        # Prevent manual creation of cycle-defined penalties
+        if is_cycle_defined_penalty_type(penalty_type.name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot manually create cycle-defined penalty '{penalty_type.name}'. These penalties are automatically created by the system."
+            )
+        
+        # Validate member_id
+        try:
+            member_uuid = UUID(penalty_data.member_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid member ID format")
+        
+        member = db.query(MemberProfile).filter(MemberProfile.id == member_uuid).first()
+        if not member:
+            raise HTTPException(status_code=404, detail="Member not found")
         
         penalty = PenaltyRecord(
-            member_id=penalty_data.member_id,
+            member_id=member_uuid,
             penalty_type_id=penalty_data.penalty_type_id,
-            status=PenaltyRecordStatus.PENDING,
+            status=PenaltyRecordStatus.PENDING,  # Compliance-created penalties start as PENDING
             created_by=current_user.id,
             notes=penalty_data.notes
         )
@@ -41,8 +66,10 @@ def create_penalty(
         db.commit()
         db.refresh(penalty)
         return {"message": "Penalty record created successfully", "penalty_id": str(penalty.id)}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"message": f"To be done - {str(e)}"}
+        raise HTTPException(status_code=500, detail=f"Error creating penalty: {str(e)}")
 
 
 @router.get("/penalties")

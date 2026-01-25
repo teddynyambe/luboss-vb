@@ -6,12 +6,58 @@ from uuid import UUID
 from typing import Optional
 
 
+def toggle_member_status(
+    db: Session,
+    member_profile_id: UUID,
+    changed_by: UUID,
+    reason: str = None
+) -> MemberProfile:
+    """Toggle member status between ACTIVE and INACTIVE."""
+    member = db.query(MemberProfile).filter(MemberProfile.id == member_profile_id).first()
+    if not member:
+        raise ValueError("Member profile not found")
+    
+    old_status = member.status
+    
+    # Toggle status
+    if member.status == MemberStatus.ACTIVE:
+        new_status = MemberStatus.INACTIVE
+        # Unapprove the associated user
+        user = db.query(User).filter(User.id == member.user_id).first()
+        if user:
+            user.approved = False
+    else:
+        new_status = MemberStatus.ACTIVE
+        member.activated_at = datetime.utcnow()
+        member.activated_by = changed_by
+        # Approve the associated user
+        user = db.query(User).filter(User.id == member.user_id).first()
+        if user:
+            user.approved = True
+    
+    member.status = new_status
+    
+    # Create status history record
+    status_history = MemberStatusHistory(
+        member_profile_id=member.id,
+        old_status=old_status,
+        new_status=new_status,
+        changed_by=changed_by,
+        reason=reason
+    )
+    db.add(status_history)
+    
+    db.commit()
+    db.refresh(member)
+    return member
+
+
 def activate_member(
     db: Session,
     member_profile_id: UUID,
     activated_by: UUID
 ) -> MemberProfile:
-    """Activate a member (change status from PENDING to ACTIVE) and approve the associated user."""
+    """Activate a member (set status to ACTIVE) and approve the associated user."""
     member = db.query(MemberProfile).filter(MemberProfile.id == member_profile_id).first()
     if not member:
         raise ValueError("Member profile not found")
@@ -54,13 +100,13 @@ def suspend_member(
     suspended_by: UUID,
     reason: str = None
 ) -> MemberProfile:
-    """Suspend a member and unapprove the associated user."""
+    """Deactivate a member (set status to INACTIVE) and unapprove the associated user."""
     member = db.query(MemberProfile).filter(MemberProfile.id == member_profile_id).first()
     if not member:
         raise ValueError("Member profile not found")
     
     old_status = member.status
-    member.status = MemberStatus.SUSPENDED
+    member.status = MemberStatus.INACTIVE
     
     # Also unapprove the associated user
     user = db.query(User).filter(User.id == member.user_id).first()
@@ -71,7 +117,7 @@ def suspend_member(
     status_history = MemberStatusHistory(
         member_profile_id=member.id,
         old_status=old_status,
-        new_status=MemberStatus.SUSPENDED,
+        new_status=MemberStatus.INACTIVE,
         changed_by=suspended_by,
         reason=reason
     )
@@ -105,29 +151,22 @@ def sync_user_and_member_status(
         return False
     
     # Check for discrepancies and sync
-    if user.approved and member_profile.status == MemberStatus.PENDING:
-        # User is approved but member is pending - activate member
+    if user.approved and member_profile.status == MemberStatus.INACTIVE:
+        # User is approved but member is inactive - activate member
         try:
             activate_member(db, member_profile.id, user_id)  # Use user_id as activated_by
             return True
         except Exception:
             return False
     elif not user.approved and member_profile.status == MemberStatus.ACTIVE:
-        # User is not approved but member is active - suspend member
+        # User is not approved but member is active - deactivate member
         try:
             suspend_member(db, member_profile.id, user_id)  # Use user_id as suspended_by
             return True
         except Exception:
             return False
-    elif user.approved and member_profile.status == MemberStatus.SUSPENDED:
-        # User is approved but member is suspended - reactivate member
-        try:
-            activate_member(db, member_profile.id, user_id)
-            return True
-        except Exception:
-            return False
-    elif not user.approved and member_profile.status == MemberStatus.SUSPENDED:
-        # Both are unapproved/suspended - ensure user.approved is False
+    elif not user.approved and member_profile.status == MemberStatus.INACTIVE:
+        # Both are unapproved/inactive - ensure user.approved is False
         if user.approved:
             user.approved = False
             db.commit()

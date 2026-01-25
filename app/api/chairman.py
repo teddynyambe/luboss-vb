@@ -50,7 +50,7 @@ def get_all_members(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Get list of all members, optionally filtered by status (pending, active, suspended).
+    """Get list of all members, optionally filtered by status (active, inactive).
     Automatically syncs User.approved with MemberProfile.status to fix discrepancies."""
     try:
         query = db.query(MemberProfile)
@@ -103,8 +103,8 @@ def get_pending_members(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Get list of pending members awaiting approval (deprecated - use /members?status=pending)."""
-    return get_all_members(status="pending", current_user=current_user, db=db)
+    """Get list of inactive members (deprecated - use /members?status=inactive)."""
+    return get_all_members(status="inactive", current_user=current_user, db=db)
 
 
 @router.post("/members/{member_id}/approve")
@@ -130,15 +130,15 @@ def suspend_member(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Suspend a member (disable login)."""
+    """Deactivate a member (set status to INACTIVE)."""
     from app.services.member import suspend_member as suspend_member_service
     try:
         member = suspend_member_service(db, UUID(member_id), current_user.id)
-        return {"message": "Member suspended successfully", "member_id": str(member.id)}
+        return {"message": "Member deactivated successfully", "member_id": str(member.id)}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to suspend member: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to deactivate member: {str(e)}")
 
 
 @router.post("/members/{member_id}/activate")
@@ -147,7 +147,7 @@ def reactivate_member(
     current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Reactivate a suspended member."""
+    """Reactivate an inactive member."""
     try:
         member = activate_member(db, UUID(member_id), current_user.id)
         # activate_member already commits, so no need to commit again
@@ -156,6 +156,28 @@ def reactivate_member(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to reactivate member: {str(e)}")
+
+
+@router.post("/members/{member_id}/toggle-status")
+def toggle_member_status_endpoint(
+    member_id: str,
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Toggle member status between Active and In-Active."""
+    from app.services.member import toggle_member_status
+    try:
+        member = toggle_member_status(db, UUID(member_id), current_user.id)
+        status_text = "activated" if member.status == MemberStatus.ACTIVE else "deactivated"
+        return {
+            "message": f"Member {status_text} successfully",
+            "member_id": str(member.id),
+            "status": member.status.value
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to toggle member status: {str(e)}")
 
 
 @router.post("/committee/assign")
@@ -1135,36 +1157,53 @@ def list_users(
     Automatically syncs User.approved with MemberProfile.status to fix discrepancies.
     Returns users with member profile information included."""
     from app.services.member import sync_user_and_member_status
-    users = db.query(User).all()
-    
-    # Auto-sync discrepancies for users with member profiles
-    for user in users:
-        member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
-        if member_profile:
-            sync_user_and_member_status(db, user.id)
-            # Refresh user to get updated approved status
-            db.refresh(user)
-    
-    # Build response with member information
-    result = []
-    for user in users:
-        member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
-        user_dict = {
-            "id": str(user.id),
-            "email": user.email,
-            "first_name": user.first_name,
-            "last_name": user.last_name,
-            "role": user.role.value if user.role else "member",
-            "approved": user.approved
-        }
-        # Add member information if available
-        if member_profile:
-            user_dict["member_id"] = str(member_profile.id)
-            user_dict["member_status"] = member_profile.status.value
-            user_dict["member_activated_at"] = member_profile.activated_at.isoformat() if member_profile.activated_at else None
-        result.append(user_dict)
-    
-    return result
+    try:
+        users = db.query(User).all()
+        
+        # Auto-sync discrepancies for users with member profiles
+        for user in users:
+            try:
+                member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+                if member_profile:
+                    sync_user_and_member_status(db, user.id)
+                    # Refresh user to get updated approved status
+                    db.refresh(user)
+            except Exception as e:
+                # Log but don't fail the entire request if sync fails for one user
+                import logging
+                logging.error(f"Failed to sync user {user.id}: {str(e)}")
+                continue
+        
+        # Build response with member information
+        result = []
+        for user in users:
+            try:
+                member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
+                user_dict = {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "role": user.role.value if user.role else "member",
+                    "approved": user.approved
+                }
+                # Add member information if available
+                if member_profile:
+                    user_dict["member_id"] = str(member_profile.id)
+                    user_dict["member_status"] = member_profile.status.value
+                    user_dict["member_activated_at"] = member_profile.activated_at.isoformat() if member_profile.activated_at else None
+                result.append(user_dict)
+            except Exception as e:
+                # Log but continue processing other users
+                import logging
+                logging.error(f"Failed to process user {user.id}: {str(e)}")
+                continue
+        
+        return result
+    except Exception as e:
+        import logging
+        logging.error(f"Error in list_users: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list users: {str(e)}")
 
 
 @router.put("/users/{user_id}/approve")
@@ -1235,7 +1274,7 @@ def suspend_user(
     
     # Also suspend member profile if one exists (this will also set user.approved = False)
     member_profile = db.query(MemberProfile).filter(MemberProfile.user_id == user.id).first()
-    if member_profile and member_profile.status != MemberStatus.SUSPENDED:
+    if member_profile and member_profile.status != MemberStatus.INACTIVE:
         from app.services.member import suspend_member
         try:
             suspend_member(db, member_profile.id, current_user.id)

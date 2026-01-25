@@ -172,6 +172,8 @@ The system enforces numerous business rules to ensure data integrity and complia
 - ✅ **Current Month Only**: Declarations can only be edited for the current month (cannot edit previous months)
 - ✅ **Status Restriction**: Only `PENDING` declarations can be edited (unless explicitly allowed after rejection)
 - ✅ **No 20th Day Restriction**: Current month declarations can be edited anytime (previous restriction removed)
+- ✅ **Penalty Inclusion**: Only `APPROVED` penalties are included in declaration penalty lists (not `PENDING` or `PAID`)
+- ✅ **Cycle-Defined Penalty Filter**: Cycle-defined penalties are only included if their phase's `auto_apply_penalty` flag is enabled
 
 #### First Declaration Special Handling
 - ✅ **Initial Posting**: On the first declaration for a cycle, the system automatically posts:
@@ -183,27 +185,40 @@ The system enforces numerous business rules to ensure data integrity and complia
 ### 2. Deposit Approval Rules
 
 #### Deposit Proof Validation
-- ✅ **Status Check**: Only `SUBMITTED` deposit proofs can be approved
+- ✅ **Status Check**: Both `SUBMITTED` and `REJECTED` deposit proofs can be approved (rejected proofs can be approved after member response)
 - ✅ **Declaration Required**: Deposit proof must be linked to a valid declaration
-- ✅ **Amount Validation**: All declared amounts must be non-negative
+- ✅ **Amount Validation**: Deposit amount must match declaration total (with small tolerance for rounding: ±0.01)
+- ✅ **Status Update**: On approval, deposit proof status changes to `APPROVED` and declaration status changes to `APPROVED`
+
+#### Late Deposit Period
+- ✅ **Deposit Window**: Deposits for a declaration's effective month are accepted from:
+  - **Start**: `monthly_start_day` (typically 26th) of the effective month
+  - **End**: `monthly_end_day` (typically 5th) of the **next** month
+  - Example: For January 2026 declaration, deposit period is January 26, 2026 to February 5, 2026
+- ✅ **Late Penalty**: Deposits submitted after the end date trigger automatic late deposit penalties (if `auto_apply_penalty` is enabled for the deposits phase)
 
 #### Journal Entry Posting
 When a deposit is approved, the system creates a balanced journal entry:
 
+**Base Entry:**
+- Debit: `BANK_CASH` (full deposit amount - cash received)
+
 **For Savings:**
-- Debit: `BANK_CASH` (full deposit amount)
 - Credit: Member Savings Account (declared savings amount)
 
 **For Social Fund Payment:**
-- Debit: Member Social Fund Account (payment amount - shown as debit per user requirement)
-- Credit: `SOC_FUND_REC` (organization receivable - reduces receivable)
+- Credit: Member Social Fund Account (payment amount - reduces balance due)
+- Note: Required amount was posted as debit on first declaration; payment credit reduces balance
+- Balance calculation: Debits (required) - Credits (payments) = Balance Due
 
 **For Admin Fund Payment:**
-- Debit: Member Admin Fund Account (payment amount - shown as debit per user requirement)
-- Credit: `ADM_FUND_REC` (organization receivable - reduces receivable)
+- Credit: Member Admin Fund Account (payment amount - reduces balance due)
+- Note: Required amount was posted as debit on first declaration; payment credit reduces balance
+- Balance calculation: Debits (required) - Credits (payments) = Balance Due
 
 **For Penalties:**
 - Credit: Member Penalties Payable Account (reduces liability)
+- **Penalty Status Update**: When penalties are paid via deposit approval, matching `APPROVED` penalty records are marked as `PAID`
 
 **For Interest on Loan:**
 - Credit: `INTEREST_INCOME` (income earned)
@@ -241,18 +256,39 @@ When a deposit is approved, the system creates a balanced journal entry:
 
 ### 4. Penalty Rules
 
+#### Penalty Status Workflow
+Penalties follow a three-stage status workflow:
+1. **`PENDING`**: Penalty created by compliance officer, awaiting treasurer approval
+2. **`APPROVED`**: Penalty approved by treasurer, posted to ledger, included in declarations
+3. **`PAID`**: Penalty paid via deposit approval, excluded from future declarations
+
 #### Penalty Creation
 - ✅ **Penalty Type Required**: Penalty record must have a valid penalty type
 - ✅ **Fee Amount Validation**: Penalty type must have a valid fee amount (> 0)
+- ✅ **Cycle-Defined Penalties**: System automatically creates penalties for:
+  - **Late Declaration**: Created when declaration is made after `monthly_end_day` of effective month (if `auto_apply_penalty` enabled)
+  - **Late Deposits**: Created when deposit is submitted after `monthly_end_day` of next month (if `auto_apply_penalty` enabled)
+  - **Late Loan Application**: Created when loan application is submitted after `monthly_end_day` (if `auto_apply_penalty` enabled)
+- ✅ **Auto-Approval**: Cycle-defined penalties are created with `APPROVED` status (no treasurer approval needed)
+- ✅ **Duplicate Prevention**: System checks for existing penalties by member, penalty type, and effective month/date before creating
 
-#### Penalty Approval
+#### Penalty Approval (Manual)
 - ✅ **Status Check**: Only `PENDING` penalties can be approved
-- ✅ **No Duplicate Posting**: Penalties that are already `POSTED` cannot be approved again
 - ✅ **Account Creation**: Member Savings and Penalties Payable accounts are created if missing
 - ✅ **Journal Entry**: On approval:
-  - Debit: Member Savings Account (penalty deducted from savings)
-  - Credit: Member Penalties Payable Account (reduces liability)
+  - Debit: Member Savings Account (penalty charged to member)
+  - Credit: Member Penalties Payable Account (increases liability)
   - Credit: `PENALTY_INCOME` (income earned)
+- ✅ **Status Update**: Penalty status changes from `PENDING` to `APPROVED`
+
+#### Penalty Payment
+- ✅ **Payment via Deposit**: Penalties are paid when member includes penalty amount in declaration and deposit is approved
+- ✅ **Status Update**: When deposit is approved, matching `APPROVED` penalties are marked as `PAID` (oldest first)
+- ✅ **Journal Entry**: Payment is recorded as:
+  - Credit: Member Penalties Payable Account (reduces liability)
+- ✅ **Exclusion**: `PAID` penalties are excluded from:
+  - Future declaration penalty lists
+  - Transaction history PenaltyRecord section (shown only as journal entry lines)
 
 ### 5. Accounting Rules
 
@@ -288,6 +324,12 @@ When a deposit is approved, the system creates a balanced journal entry:
 **Penalties Balance:**
 - Sum of all credits to penalties payable account (penalties assessed)
 - Minus all debits (penalties paid)
+- Shows outstanding penalties owed by member
+
+**Penalty Status Tracking:**
+- **PENDING**: Awaiting treasurer approval, not included in declarations
+- **APPROVED**: Approved and posted, included in declarations, shown in transaction history
+- **PAID**: Paid via deposit, excluded from declarations, shown only as payment journal entries in transaction history
 
 ### 6. Member Status Rules
 
@@ -354,9 +396,14 @@ When a deposit is approved, the system creates a balanced journal entry:
 
 #### Deposit Proof Upload
 - ✅ **File Size Limit**: Deposit proof files must be within size limits
-- ✅ **File Type Validation**: Only allowed file types can be uploaded
+- ✅ **File Type Validation**: Only allowed file types can be uploaded (PDF, JPG, JPEG, PNG, GIF)
 - ✅ **One Proof Per Declaration**: Each declaration can have one deposit proof
 - ✅ **Storage**: Files are stored in `uploads/deposit_proofs/` directory
+- ✅ **Status Workflow**: 
+  - Upload → `SUBMITTED` (declaration status remains `PENDING`)
+  - Treasurer approval → `APPROVED` (declaration status changes to `APPROVED`)
+  - Treasurer rejection → `REJECTED` (member can respond and resubmit)
+- ✅ **Rejection Handling**: Rejected proofs can be approved after member provides response
 
 ### 11. Data Integrity Rules
 
@@ -380,12 +427,42 @@ When a deposit is approved, the system creates a balanced journal entry:
 - ✅ **Social/Admin Fund**: Cards show accumulated payments (not outstanding balance)
 - ✅ **Non-Negative Balances**: All balances are displayed as non-negative values
 - ✅ **Currency Formatting**: All amounts are displayed in Kwacha (K) with proper formatting
+- ✅ **Date Formatting**: Dates are parsed manually to avoid timezone issues (YYYY-MM-DD format)
 
 #### Transaction History
 - ✅ **Initial Requirements**: Marked with "Required Amount" badge (orange background)
 - ✅ **Payments**: Marked with "Payment" badge (purple background)
 - ✅ **Chronological Order**: Transactions displayed in reverse chronological order (newest first)
 - ✅ **Source Tracking**: Each transaction shows its source type (declaration, deposit approval, etc.)
+- ✅ **Penalty Display Rules**:
+  - **Journal Lines**: All penalty-related journal entries are shown (charges and payments)
+  - **PenaltyRecords**: Only `PENDING` and `APPROVED` penalties are shown as PenaltyRecord entries
+  - **PAID Penalties**: Excluded from PenaltyRecord section (already represented by payment journal entries)
+  - **Status Indicators**: Non-PAID penalties show status in description (e.g., "(APPROVED)", "(PENDING)")
+- ✅ **Deduplication**: System prevents duplicate penalty entries in transaction history
+- ✅ **Effective Month Display**: Effective months are displayed correctly (e.g., "January 2026") without timezone conversion issues
+
+### 13. Late Submission Rules
+
+#### Late Declaration Period
+- ✅ **Declaration Deadline**: Declarations must be made by `monthly_end_day` (typically 20th) of the effective month
+- ✅ **Late Penalty**: Declarations made after the deadline trigger automatic late declaration penalties (if `auto_apply_penalty` enabled)
+- ✅ **Penalty Creation**: Late declaration penalties are created automatically when:
+  - Declaration is submitted after `monthly_end_day`
+  - `auto_apply_penalty` flag is enabled for the declaration phase
+  - No duplicate penalty exists for the same member, penalty type, and effective month
+
+#### Late Deposit Period
+- ✅ **Deposit Window**: Deposits for a declaration's effective month are accepted from:
+  - **Start**: `monthly_start_day` (typically 26th) of the effective month
+  - **End**: `monthly_end_day` (typically 5th) of the **next** month
+  - Example: For January 2026 declaration, deposit period is January 26, 2026 to February 5, 2026
+- ✅ **Late Penalty**: Deposits submitted after the end date trigger automatic late deposit penalties (if `auto_apply_penalty` enabled)
+- ✅ **Penalty Notes**: Late deposit penalties include period description: "Deposit period: {start_day}th of {effective_month} to {end_day}th of {next_month}"
+
+#### Late Loan Application Period
+- ✅ **Application Deadline**: Loan applications must be submitted by `monthly_end_day` (typically 20th) of the current month
+- ✅ **Late Penalty**: Applications submitted after the deadline trigger automatic late loan application penalties (if `auto_apply_penalty` enabled)
 
 ---
 
@@ -400,3 +477,49 @@ The LUBOSS 95 system implements a comprehensive set of business rules to ensure:
 5. **Compliance**: Enforcement of village banking policies and procedures
 
 All rules are enforced at the service layer, ensuring consistent behavior across all API endpoints and preventing invalid data from entering the system.
+
+## Recent Updates
+
+### Penalty System Enhancements (2026)
+- **Status Workflow**: Implemented three-stage penalty status (PENDING → APPROVED → PAID)
+- **Auto-Approval**: Cycle-defined penalties (Late Declaration, Late Deposits, Late Loan Application) are automatically created with APPROVED status
+- **Transaction History**: PAID penalties are excluded from PenaltyRecord section to prevent duplicates (shown only as payment journal entries)
+- **Duplicate Prevention**: Enhanced duplicate checking using member_id, penalty_type_id, date_issued, and notes
+
+### Late Deposit Period (2026)
+- **Period Definition**: Deposits accepted from 26th of effective month to 5th of next month
+- **Late Penalty Logic**: Penalties triggered only when deposit submitted after 5th of next month
+- **Penalty Notes**: Include full period description for clarity
+
+### Deposit Approval Enhancements (2026)
+- **Status Handling**: Both SUBMITTED and REJECTED proofs can be approved
+- **Penalty Payment**: Automatic marking of APPROVED penalties as PAID when included in deposit
+- **Journal Entries**: Corrected social/admin fund payment entries (credits reduce balance due)
+
+### Declaration Rules (2026)
+- **Penalty Filtering**: Only APPROVED penalties included in declaration lists
+- **Cycle-Defined Filter**: Respects `auto_apply_penalty` flag for cycle-defined penalties
+- **Date Handling**: Fixed timezone issues in effective month display
+
+## Recent Updates
+
+### Penalty System Enhancements (2026)
+- **Status Workflow**: Implemented three-stage penalty status (PENDING → APPROVED → PAID)
+- **Auto-Approval**: Cycle-defined penalties (Late Declaration, Late Deposits, Late Loan Application) are automatically created with APPROVED status
+- **Transaction History**: PAID penalties are excluded from PenaltyRecord section to prevent duplicates (shown only as payment journal entries)
+- **Duplicate Prevention**: Enhanced duplicate checking using member_id, penalty_type_id, date_issued, and notes
+
+### Late Deposit Period (2026)
+- **Period Definition**: Deposits accepted from 26th of effective month to 5th of next month
+- **Late Penalty Logic**: Penalties triggered only when deposit submitted after 5th of next month
+- **Penalty Notes**: Include full period description for clarity
+
+### Deposit Approval Enhancements (2026)
+- **Status Handling**: Both SUBMITTED and REJECTED proofs can be approved
+- **Penalty Payment**: Automatic marking of APPROVED penalties as PAID when included in deposit
+- **Journal Entries**: Corrected social/admin fund payment entries (credits reduce balance due)
+
+### Declaration Rules (2026)
+- **Penalty Filtering**: Only APPROVED penalties included in declaration lists
+- **Cycle-Defined Filter**: Respects `auto_apply_penalty` flag for cycle-defined penalties
+- **Date Handling**: Fixed timezone issues in effective month display

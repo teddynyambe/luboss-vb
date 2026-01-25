@@ -198,6 +198,49 @@ export default function DeclarationsPage() {
     setSelectedDeclaration(null);
   };
 
+  const copyDeclarationDetails = () => {
+    if (!selectedDeclaration) return;
+    
+    const total = (
+      (selectedDeclaration.declared_savings_amount || 0) +
+      (selectedDeclaration.declared_social_fund || 0) +
+      (selectedDeclaration.declared_admin_fund || 0) +
+      (selectedDeclaration.declared_penalties || 0) +
+      (selectedDeclaration.declared_interest_on_loan || 0) +
+      (selectedDeclaration.declared_loan_repayment || 0)
+    );
+
+    const statusText = selectedDeclaration.status === 'proof' 
+      ? 'Proof Submitted' 
+      : selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1);
+
+    const text = `DECLARATION DETAILS
+
+Effective Month: ${formatMonth(selectedDeclaration.effective_month)}
+Status: ${statusText}
+Created: ${formatDate(selectedDeclaration.created_at)}
+${selectedDeclaration.updated_at ? `Last Updated: ${formatDate(selectedDeclaration.updated_at)}` : ''}
+
+DECLARATION AMOUNTS:
+• Savings Amount: ${selectedDeclaration.declared_savings_amount !== null && selectedDeclaration.declared_savings_amount !== undefined ? `K${selectedDeclaration.declared_savings_amount.toLocaleString()}` : 'Not declared'}
+• Social Fund: ${selectedDeclaration.declared_social_fund !== null && selectedDeclaration.declared_social_fund !== undefined ? `K${selectedDeclaration.declared_social_fund.toLocaleString()}` : 'Not declared'}
+• Admin Fund: ${selectedDeclaration.declared_admin_fund !== null && selectedDeclaration.declared_admin_fund !== undefined ? `K${selectedDeclaration.declared_admin_fund.toLocaleString()}` : 'Not declared'}
+• Penalties: ${selectedDeclaration.declared_penalties !== null && selectedDeclaration.declared_penalties !== undefined ? `K${selectedDeclaration.declared_penalties.toLocaleString()}` : 'Not declared'}
+• Interest on Loan: ${selectedDeclaration.declared_interest_on_loan !== null && selectedDeclaration.declared_interest_on_loan !== undefined ? `K${selectedDeclaration.declared_interest_on_loan.toLocaleString()}` : 'Not declared'}
+• Loan Repayment: ${selectedDeclaration.declared_loan_repayment !== null && selectedDeclaration.declared_loan_repayment !== undefined ? `K${selectedDeclaration.declared_loan_repayment.toLocaleString()}` : 'Not declared'}
+
+TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      setSuccess(true);
+      setError('');
+      setTimeout(() => setSuccess(false), 3000);
+    }).catch(() => {
+      setError('Failed to copy to clipboard');
+      setSuccess(false);
+    });
+  };
+
   const loadDeclarationForEdit = async (declarationId: string) => {
     try {
       const response = await memberApi.getDeclarations();
@@ -205,8 +248,10 @@ export default function DeclarationsPage() {
         const declaration = response.data.find(d => d.id === declarationId);
         if (declaration) {
           // Check if it's the current month and can be edited
+          // Parse date string (YYYY-MM-DD) without timezone conversion
+          const [year, month] = declaration.effective_month.split('-').map(Number);
+          const declarationDate = new Date(year, month - 1, 1); // month is 0-indexed
           const now = new Date();
-          const declarationDate = new Date(declaration.effective_month);
           const isCurrentMonth = declarationDate.getFullYear() === now.getFullYear() && 
                                  declarationDate.getMonth() === now.getMonth();
           // Removed 20th day restriction - can edit current month declarations anytime
@@ -371,17 +416,43 @@ export default function DeclarationsPage() {
   };
 
   const formatDate = (dateString: string) => {
-    const date = new Date(dateString);
+    if (!dateString) return 'Invalid Date';
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const parts = datePart.split('-');
+    if (parts.length !== 3) return 'Invalid Date';
+    const [year, month, day] = parts.map(Number);
+    if (isNaN(year) || isNaN(month) || isNaN(day)) return 'Invalid Date';
+    const date = new Date(year, month - 1, day); // month is 0-indexed
+    if (isNaN(date.getTime())) return 'Invalid Date';
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   };
 
   const formatMonth = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
+    
+    // Format month name directly without Date object to avoid timezone issues
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    
+    if (month >= 1 && month <= 12 && year) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+    
+    // Fallback to Date if parsing fails
+    const date = new Date(year, month - 1, 1);
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
   };
 
   const isCurrentMonth = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    const [year, month] = dateString.split('-').map(Number);
+    const date = new Date(year, month - 1, 1);
     const now = new Date();
     return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
   };
@@ -467,7 +538,7 @@ export default function DeclarationsPage() {
                           Current Month Declaration
                         </h3>
                         <p className="text-sm md:text-base text-blue-700">
-                          Effective Month: {new Date(currentMonthDeclaration.effective_month).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+                          Effective Month: {formatMonth(currentMonthDeclaration.effective_month)}
                         </p>
                         <p className="text-sm text-blue-600 mt-1">
                           Status: <span className="font-semibold capitalize">{currentMonthDeclaration.status}</span>
@@ -782,9 +853,25 @@ export default function DeclarationsPage() {
                 ) : (
                   <div className="space-y-4">
                     <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-                      <h2 className="text-xl md:text-2xl font-bold text-blue-900">
-                        All Declarations ({allDeclarations.length})
-                      </h2>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <h2 className="text-xl md:text-2xl font-bold text-blue-900">
+                          All Declarations ({allDeclarations.length})
+                        </h2>
+                        <div className="flex flex-wrap items-center gap-4 text-sm md:text-base">
+                          <span className="text-blue-600">
+                            <span className="font-medium">Total:</span> <span className="font-bold text-blue-900">{allDeclarations.length}</span>
+                          </span>
+                          <span className="text-yellow-600">
+                            <span className="font-medium">Pending:</span> <span className="font-bold text-yellow-700">{allDeclarations.filter(d => d.status === 'pending').length}</span>
+                          </span>
+                          <span className="text-green-600">
+                            <span className="font-medium">Approved:</span> <span className="font-bold text-green-700">{allDeclarations.filter(d => d.status === 'approved').length}</span>
+                          </span>
+                          <span className="text-blue-600">
+                            <span className="font-medium">Current Month:</span> <span className="font-bold text-blue-700">{allDeclarations.filter(d => isCurrentMonth(d.effective_month)).length}</span>
+                          </span>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="overflow-x-auto">
@@ -852,12 +939,16 @@ export default function DeclarationsPage() {
                                     className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
                                       declaration.status === 'pending'
                                         ? 'bg-yellow-200 text-yellow-800'
+                                        : declaration.status === 'proof'
+                                        ? 'bg-blue-200 text-blue-800'
                                         : declaration.status === 'approved'
                                         ? 'bg-green-200 text-green-800'
+                                        : declaration.status === 'rejected'
+                                        ? 'bg-red-200 text-red-800'
                                         : 'bg-gray-200 text-gray-800'
                                     }`}
                                   >
-                                    {declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
+                                    {declaration.status === 'proof' ? 'Proof Submitted' : declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
                                   </span>
                                 </td>
                                 <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
@@ -889,35 +980,6 @@ export default function DeclarationsPage() {
                         </tbody>
                       </table>
                     </div>
-
-                    {/* Summary Card */}
-                    <div className="mt-6 bg-blue-50 border-2 border-blue-300 rounded-xl p-4 md:p-5">
-                      <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-3">Summary</h3>
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <div>
-                          <p className="text-xs md:text-sm text-blue-600 font-medium">Total Declarations</p>
-                          <p className="text-xl md:text-2xl font-bold text-blue-900">{allDeclarations.length}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs md:text-sm text-blue-600 font-medium">Pending</p>
-                          <p className="text-xl md:text-2xl font-bold text-yellow-700">
-                            {allDeclarations.filter(d => d.status === 'pending').length}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs md:text-sm text-blue-600 font-medium">Approved</p>
-                          <p className="text-xl md:text-2xl font-bold text-green-700">
-                            {allDeclarations.filter(d => d.status === 'approved').length}
-                          </p>
-                        </div>
-                        <div>
-                          <p className="text-xs md:text-sm text-blue-600 font-medium">Current Month</p>
-                          <p className="text-xl md:text-2xl font-bold text-blue-700">
-                            {allDeclarations.filter(d => isCurrentMonth(d.effective_month)).length}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
                   </div>
                 )}
               </div>
@@ -930,15 +992,37 @@ export default function DeclarationsPage() {
           <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-blue-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
               <h2 className="text-xl md:text-2xl font-bold">Declaration Details</h2>
-              <button
-                onClick={closeDetailsModal}
-                className="text-white hover:text-blue-200 text-2xl font-bold"
-              >
-                ×
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={copyDeclarationDetails}
+                  className="text-white hover:text-blue-200 transition-colors p-2 rounded-lg hover:bg-blue-700"
+                  title="Copy declaration details"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={closeDetailsModal}
+                  className="text-white hover:text-blue-200 text-2xl font-bold"
+                >
+                  ×
+                </button>
+              </div>
             </div>
             
             <div className="p-6 md:p-8 space-y-6">
+              {/* Success/Error Messages */}
+              {success && (
+                <div className="bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 rounded-lg">
+                  ✓ Declaration details copied to clipboard!
+                </div>
+              )}
+              {error && (
+                <div className="bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 rounded-lg">
+                  {error}
+                </div>
+              )}
               {/* Header Info */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b-2 border-blue-200">
                 <div>
@@ -951,12 +1035,16 @@ export default function DeclarationsPage() {
                     className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${
                       selectedDeclaration.status === 'pending'
                         ? 'bg-yellow-200 text-yellow-800'
+                        : selectedDeclaration.status === 'proof'
+                        ? 'bg-blue-200 text-blue-800'
                         : selectedDeclaration.status === 'approved'
                         ? 'bg-green-200 text-green-800'
+                        : selectedDeclaration.status === 'rejected'
+                        ? 'bg-red-200 text-red-800'
                         : 'bg-gray-200 text-gray-800'
                     }`}
                   >
-                    {selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1)}
+                    {selectedDeclaration.status === 'proof' ? 'Proof Submitted' : selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1)}
                   </span>
                 </div>
                 <div>

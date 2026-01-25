@@ -84,9 +84,24 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return { success: true };
       }
       return { success: false, error: response.error || 'Registration failed' };
-    } catch (error) {
+    } catch (error: any) {
       console.error('Registration error:', error);
-      return { success: false, error: 'Registration failed. Please try again.' };
+      // Extract error message from response
+      let errorMessage = 'Registration failed. Please try again.';
+      if (error?.response?.data?.detail) {
+        errorMessage = error.response.data.detail;
+      } else if (error?.message) {
+        errorMessage = error.message;
+      } else if (typeof error === 'string') {
+        errorMessage = error;
+      }
+      console.error('Full error details:', {
+        error,
+        response: error?.response,
+        data: error?.response?.data,
+        detail: error?.response?.data?.detail
+      });
+      return { success: false, error: errorMessage };
     }
   };
 

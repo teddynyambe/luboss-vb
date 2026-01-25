@@ -47,8 +47,8 @@ def get_greeting(
     else:
         # Not an active member yet - simpler greeting
         greeting = f"Shani ama yama ba {first_name}! I'm your Luboss VB Finance Assistant.\n\n"
-        if member_profile and member_profile.status == MemberStatus.PENDING:
-            greeting += "Your member account is pending approval. Once approved, I'll be able to help you with:\n"
+        if member_profile and member_profile.status == MemberStatus.INACTIVE:
+            greeting += "Your member account is inactive. Once activated, I'll be able to help you with:\n"
         else:
             greeting += "I'm here to help you with:\n"
         greeting += "• Information about the app and how to use it\n"

@@ -142,7 +142,23 @@ export default function DepositProofsListPage() {
   };
 
   const formatMonth = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
+    
+    // Format month name directly without Date object to avoid timezone issues
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    
+    if (month >= 1 && month <= 12 && year) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+    
+    // Fallback to Date if parsing fails
+    const date = new Date(year, month - 1, 1);
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
   };
 

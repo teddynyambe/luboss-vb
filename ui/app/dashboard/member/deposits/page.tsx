@@ -142,6 +142,27 @@ export default function UploadDepositProofPage() {
     }
   };
 
+  const formatMonth = (dateString: string) => {
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
+    
+    // Format month name directly without Date object to avoid timezone issues
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    
+    if (month >= 1 && month <= 12 && year) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+    
+    // Fallback to Date if parsing fails
+    const date = new Date(year, month - 1, 1);
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+  };
+
   const selectedDecl = declarations.find(d => d.id === selectedDeclaration);
 
   return (
@@ -164,7 +185,7 @@ export default function UploadDepositProofPage() {
         <div className="card">
           {success && (
             <div className="mb-4 md:mb-6 bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
-              ✓ Deposit proof uploaded successfully! Declaration status updated to APPROVED. Redirecting...
+              ✓ Deposit proof uploaded successfully! Declaration status updated to PROOF. Awaiting treasurer approval. Redirecting...
             </div>
           )}
 
@@ -208,7 +229,7 @@ export default function UploadDepositProofPage() {
                   <option value="">-- Select a declaration --</option>
                   {declarations.map((decl) => (
                     <option key={decl.id} value={decl.id}>
-                      {new Date(decl.effective_month).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })} - 
+                      {formatMonth(decl.effective_month)} - 
                       Total: K{calculateTotal(decl).toFixed(2)}
                     </option>
                   ))}

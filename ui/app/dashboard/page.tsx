@@ -44,12 +44,16 @@ export default function DashboardPage() {
 
       <main className="max-w-7xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
         <div className="card">
-          <h2 className="text-2xl md:text-3xl font-bold text-blue-900 mb-4 md:mb-6">
-            Welcome to your Dashboard
+          <h2 className="text-2xl md:text-3xl font-bold text-blue-900 mb-6 md:mb-8">
+            Welcome {user?.roles && Array.isArray(user.roles) && user.roles.length > 0 && (
+              <span className="text-blue-700 font-normal">
+                {user.roles.map(r => {
+                  const roleStr = String(r);
+                  return roleStr.charAt(0).toUpperCase() + roleStr.slice(1).toLowerCase();
+                }).join(', ')}{' '}
+              </span>
+            )}{user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User' : 'User'} to your Dashboard
           </h2>
-          <p className="text-base md:text-lg text-blue-700 mb-6 md:mb-8 font-medium">
-            Your account has been approved. Select your role dashboard below:
-          </p>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
             <Link

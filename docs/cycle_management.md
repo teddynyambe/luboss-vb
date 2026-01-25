@@ -148,6 +148,20 @@ The following data is tied to specific cycles:
 - `GET /api/chairman/cycles` - List all cycles
 - `GET /api/member/cycles` - Get active cycles (for members)
 
+## Monthly Cycle Rules
+
+For detailed documentation on monthly cycle rules, phase configurations, deadlines, and automatic penalty application, see:
+
+**[Monthly Cycle Rules Documentation](./monthly_cycle_rules.md)**
+
+This document covers:
+- Monthly phase configuration (start/end days)
+- Declaration phase rules and deadlines
+- Deposit phase rules and deadlines
+- Loan application phase rules and deadlines
+- Automatic penalty application rules
+- Phase opening/closing controls
+
 ## Future Enhancements
 
 Potential improvements:
@@ -155,3 +169,4 @@ Potential improvements:
 2. **Cycle Transition Reports**: Generate reports when closing a cycle
 3. **Balance Verification**: Verify ledger balances match cycle totals
 4. **Cycle Opening Balances**: Optional opening balance entries for new cycles
+5. **Automatic Phase Control**: Automatic phase opening/closing based on monthly_start_day and monthly_end_day

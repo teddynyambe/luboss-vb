@@ -12,6 +12,13 @@ export default function UserMenu() {
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const displayName = user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'User' : 'User';
+  // Format roles: capitalize first letter, lowercase rest, join multiple roles
+  const roleDisplay = user?.roles && Array.isArray(user.roles) && user.roles.length > 0 
+    ? user.roles.map(r => {
+        const roleStr = String(r);
+        return roleStr.charAt(0).toUpperCase() + roleStr.slice(1).toLowerCase();
+      }).join(', ') + ' '
+    : '';
 
   const handleLogout = () => {
     logout();
@@ -41,7 +48,7 @@ export default function UserMenu() {
         onClick={() => setIsOpen(!isOpen)}
         className="flex items-center space-x-2 text-sm md:text-base text-blue-700 font-medium hover:text-blue-900 transition-colors duration-200 px-3 py-2 rounded-lg hover:bg-blue-50"
       >
-        <span>{displayName}</span>
+        <span>{roleDisplay}{displayName}</span>
         <svg
           className={`w-4 h-4 transition-transform duration-200 ${isOpen ? 'rotate-180' : ''}`}
           fill="none"

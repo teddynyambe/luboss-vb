@@ -82,12 +82,19 @@ export default function RegisterPage() {
     setLoading(true);
 
     const { confirmPassword, ...registerData } = formData;
+    console.log('Attempting registration with data:', { ...registerData, password: '***' });
     const result = await register(registerData);
+    console.log('Registration result:', result);
     
     if (result.success) {
       router.push('/pending');
     } else {
-      setError(result.error || 'Registration failed. Please try again.');
+      const errorMsg = result.error || 'Registration failed. Please try again.';
+      console.error('Registration error details:', {
+        error: result.error,
+        fullResult: result
+      });
+      setError(errorMsg);
     }
     setLoading(false);
   };

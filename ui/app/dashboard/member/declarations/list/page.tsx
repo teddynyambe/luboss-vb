@@ -13,6 +13,7 @@ export default function DeclarationsListPage() {
   const [declarations, setDeclarations] = useState<Declaration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState(false);
 
   useEffect(() => {
     loadDeclarations();
@@ -56,20 +57,81 @@ export default function DeclarationsListPage() {
     setSelectedDeclaration(null);
   };
 
+  const copyDeclarationDetails = () => {
+    if (!selectedDeclaration) return;
+    
+    const total = (
+      (selectedDeclaration.declared_savings_amount || 0) +
+      (selectedDeclaration.declared_social_fund || 0) +
+      (selectedDeclaration.declared_admin_fund || 0) +
+      (selectedDeclaration.declared_penalties || 0) +
+      (selectedDeclaration.declared_interest_on_loan || 0) +
+      (selectedDeclaration.declared_loan_repayment || 0)
+    );
+
+    const statusText = selectedDeclaration.status === 'proof' 
+      ? 'Proof Submitted' 
+      : selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1);
+
+    const text = `DECLARATION DETAILS
+
+Effective Month: ${formatMonth(selectedDeclaration.effective_month)}
+Status: ${statusText}
+Created: ${formatDate(selectedDeclaration.created_at)}
+${selectedDeclaration.updated_at ? `Last Updated: ${formatDate(selectedDeclaration.updated_at)}` : ''}
+
+DECLARATION AMOUNTS:
+• Savings Amount: ${selectedDeclaration.declared_savings_amount !== null && selectedDeclaration.declared_savings_amount !== undefined ? `K${selectedDeclaration.declared_savings_amount.toLocaleString()}` : 'Not declared'}
+• Social Fund: ${selectedDeclaration.declared_social_fund !== null && selectedDeclaration.declared_social_fund !== undefined ? `K${selectedDeclaration.declared_social_fund.toLocaleString()}` : 'Not declared'}
+• Admin Fund: ${selectedDeclaration.declared_admin_fund !== null && selectedDeclaration.declared_admin_fund !== undefined ? `K${selectedDeclaration.declared_admin_fund.toLocaleString()}` : 'Not declared'}
+• Penalties: ${selectedDeclaration.declared_penalties !== null && selectedDeclaration.declared_penalties !== undefined ? `K${selectedDeclaration.declared_penalties.toLocaleString()}` : 'Not declared'}
+• Interest on Loan: ${selectedDeclaration.declared_interest_on_loan !== null && selectedDeclaration.declared_interest_on_loan !== undefined ? `K${selectedDeclaration.declared_interest_on_loan.toLocaleString()}` : 'Not declared'}
+• Loan Repayment: ${selectedDeclaration.declared_loan_repayment !== null && selectedDeclaration.declared_loan_repayment !== undefined ? `K${selectedDeclaration.declared_loan_repayment.toLocaleString()}` : 'Not declared'}
+
+TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
+
+    navigator.clipboard.writeText(text).then(() => {
+      setSuccess(true);
+      setError('');
+      setTimeout(() => setSuccess(false), 3000);
+    }).catch(() => {
+      setError('Failed to copy to clipboard');
+      setSuccess(false);
+    });
+  };
+
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   };
 
   const formatMonth = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
+    
+    // Format month name directly without Date object to avoid timezone issues
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    
+    if (month >= 1 && month <= 12 && year) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+    
+    // Fallback to Date if parsing fails
+    const date = new Date(year, month - 1, 1);
     return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
   };
 
   const isCurrentMonth = (dateString: string) => {
-    const date = new Date(dateString);
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
     const now = new Date();
-    return date.getFullYear() === now.getFullYear() && date.getMonth() === now.getMonth();
+    return year === now.getFullYear() && month === now.getMonth() + 1; // month is 1-indexed in date string
   };
 
   return (
@@ -200,12 +262,16 @@ export default function DeclarationsListPage() {
                               className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
                                 declaration.status === 'pending'
                                   ? 'bg-yellow-200 text-yellow-800'
+                                  : declaration.status === 'proof'
+                                  ? 'bg-blue-200 text-blue-800'
                                   : declaration.status === 'approved'
                                   ? 'bg-green-200 text-green-800'
+                                  : declaration.status === 'rejected'
+                                  ? 'bg-red-200 text-red-800'
                                   : 'bg-gray-200 text-gray-800'
                               }`}
                             >
-                              {declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
+                              {declaration.status === 'proof' ? 'Proof Submitted' : declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
                             </span>
                           </td>
                           <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
@@ -277,15 +343,37 @@ export default function DeclarationsListPage() {
           <div className="bg-white rounded-xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
             <div className="sticky top-0 bg-blue-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
               <h2 className="text-xl md:text-2xl font-bold">Declaration Details</h2>
-              <button
-                onClick={closeModal}
-                className="text-white hover:text-blue-200 text-2xl font-bold"
-              >
-                ×
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={copyDeclarationDetails}
+                  className="text-white hover:text-blue-200 transition-colors p-2 rounded-lg hover:bg-blue-700"
+                  title="Copy declaration details"
+                >
+                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={closeModal}
+                  className="text-white hover:text-blue-200 text-2xl font-bold"
+                >
+                  ×
+                </button>
+              </div>
             </div>
             
             <div className="p-6 md:p-8 space-y-6">
+              {/* Success/Error Messages */}
+              {success && (
+                <div className="bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 rounded-lg">
+                  ✓ Declaration details copied to clipboard!
+                </div>
+              )}
+              {error && (
+                <div className="bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 rounded-lg">
+                  {error}
+                </div>
+              )}
               {/* Header Info */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pb-4 border-b-2 border-blue-200">
                 <div>
@@ -298,12 +386,16 @@ export default function DeclarationsListPage() {
                     className={`inline-block px-3 py-1 rounded-full text-sm font-semibold ${
                       selectedDeclaration.status === 'pending'
                         ? 'bg-yellow-200 text-yellow-800'
+                        : selectedDeclaration.status === 'proof'
+                        ? 'bg-blue-200 text-blue-800'
                         : selectedDeclaration.status === 'approved'
                         ? 'bg-green-200 text-green-800'
+                        : selectedDeclaration.status === 'rejected'
+                        ? 'bg-red-200 text-red-800'
                         : 'bg-gray-200 text-gray-800'
                     }`}
                   >
-                    {selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1)}
+                    {selectedDeclaration.status === 'proof' ? 'Proof Submitted' : selectedDeclaration.status.charAt(0).toUpperCase() + selectedDeclaration.status.slice(1)}
                   </span>
                 </div>
                 <div>

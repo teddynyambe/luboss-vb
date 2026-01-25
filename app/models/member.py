@@ -8,9 +8,8 @@ import enum
 
 class MemberStatus(str, enum.Enum):
     """Member status enum."""
-    PENDING = "pending"
     ACTIVE = "active"
-    SUSPENDED = "suspended"
+    INACTIVE = "inactive"
 
 
 class MemberProfile(Base):
@@ -19,7 +18,7 @@ class MemberProfile(Base):
     
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=False, unique=True, index=True)
-    status = Column(SQLEnum(MemberStatus), default=MemberStatus.PENDING, nullable=False)
+    status = Column(SQLEnum(MemberStatus), default=MemberStatus.INACTIVE, nullable=False)
     created_at = Column(DateTime, nullable=False, server_default="now()")
     activated_at = Column(DateTime, nullable=True)
     activated_by = Column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=True)

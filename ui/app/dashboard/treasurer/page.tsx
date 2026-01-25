@@ -108,16 +108,71 @@ export default function TreasurerDashboard() {
   const [showLoanModal, setShowLoanModal] = useState(false);
   const [loadingLoanDetails, setLoadingLoanDetails] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [selectedDepositForProof, setSelectedDepositForProof] = useState<PendingDeposit | null>(null);
   const [selectedDeposit, setSelectedDeposit] = useState<PendingDeposit | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [showProofModal, setShowProofModal] = useState(false);
   const [showRejectModal, setShowRejectModal] = useState(false);
+  const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
+  const [loanToApprove, setLoanToApprove] = useState<PendingLoanApplication | null>(null);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
   const [proofError, setProofError] = useState<string | null>(null);
   const [penaltyNotification, setPenaltyNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [approvingPenalty, setApprovingPenalty] = useState<string | null>(null);
+  
+  // Reports state
+  interface DeclarationReportMember {
+    member_id: string;
+    member_name: string;
+    declaration_amount: number | null;
+    is_paid: boolean;
+  }
+  
+  interface LoanReportItem {
+    loan_id: string;
+    member_id: string;
+    member_name: string;
+    loan_amount: number;
+    is_disbursed: boolean;
+    is_paid: boolean;
+  }
+
+  interface DeclarationDetailsReport {
+    member_id: string;
+    member_name: string;
+    effective_month: string;
+    has_declaration: boolean;
+    declaration: {
+      id: string;
+      declared_savings_amount: number | null;
+      declared_social_fund: number | null;
+      declared_admin_fund: number | null;
+      declared_penalties: number | null;
+      declared_interest_on_loan: number | null;
+      declared_loan_repayment: number | null;
+      total: number;
+      status: string;
+    } | null;
+    deposit_proof: {
+      id: string;
+      status: string;
+      amount: number;
+      uploaded_at: string | null;
+    } | null;
+  }
+  
+  const [selectedReportMonth, setSelectedReportMonth] = useState<string>(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+  });
+  const [declarationsReport, setDeclarationsReport] = useState<DeclarationReportMember[]>([]);
+  const [loansReport, setLoansReport] = useState<LoanReportItem[]>([]);
+  const [loadingReports, setLoadingReports] = useState(false);
+  const [showDeclarationDetailsModal, setShowDeclarationDetailsModal] = useState(false);
+  const [declarationDetails, setDeclarationDetails] = useState<DeclarationDetailsReport | null>(null);
+  const [loadingDeclarationDetails, setLoadingDeclarationDetails] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -128,6 +183,10 @@ export default function TreasurerDashboard() {
     const timer = setTimeout(() => setPenaltyNotification(null), 4000);
     return () => clearTimeout(timer);
   }, [penaltyNotification]);
+
+  useEffect(() => {
+    loadReports();
+  }, [selectedReportMonth]);
 
   const loadData = async () => {
     const [depositsRes, penaltiesRes, loansRes, activeLoansRes] = await Promise.all([
@@ -142,6 +201,108 @@ export default function TreasurerDashboard() {
     if (loansRes.data) setPendingLoans(loansRes.data);
     if (activeLoansRes.data) setActiveLoans(activeLoansRes.data);
     setLoading(false);
+  };
+
+  const loadReports = async () => {
+    setLoadingReports(true);
+    try {
+      const [declarationsRes, loansRes] = await Promise.all([
+        api.get<{ month: string; members: DeclarationReportMember[] }>(`/api/treasurer/reports/declarations?month=${selectedReportMonth}`),
+        api.get<{ loans: LoanReportItem[] }>('/api/treasurer/reports/loans'),
+      ]);
+      
+      if (declarationsRes.data) {
+        setDeclarationsReport(declarationsRes.data.members);
+      }
+      if (loansRes.data) {
+        setLoansReport(loansRes.data.loans);
+      }
+    } catch (err: any) {
+      console.error('Error loading reports:', err);
+    } finally {
+      setLoadingReports(false);
+    }
+  };
+
+  const formatMonth = (dateString: string) => {
+    // Parse date string (YYYY-MM-DD) without timezone conversion
+    // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
+    const datePart = dateString.split('T')[0].split(' ')[0]; // Get just the date part
+    const [year, month] = datePart.split('-').map(Number);
+    
+    // Format month name directly without Date object to avoid timezone issues
+    const monthNames = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
+    
+    if (month >= 1 && month <= 12 && year) {
+      return `${monthNames[month - 1]} ${year}`;
+    }
+    
+    // Fallback to Date if parsing fails
+    const date = new Date(year, month - 1, 1);
+    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'long' });
+  };
+
+  const copyDeclarationsReport = () => {
+    const monthFormatted = formatMonth(selectedReportMonth);
+    let text = `${monthFormatted} Declarations\n\n`;
+    
+    declarationsReport.forEach((member, index) => {
+      const amount = member.declaration_amount 
+        ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
+        : 'K';
+      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name} ${amount}\n`;
+    });
+    
+    navigator.clipboard.writeText(text).then(() => {
+      setMessage({ type: 'success', text: 'Declarations report copied to clipboard!' });
+      setTimeout(() => setMessage(null), 3000);
+    }).catch(() => {
+      setMessage({ type: 'error', text: 'Failed to copy to clipboard' });
+    });
+  };
+
+  const copyLoansReport = () => {
+    let text = `Loans\n`;
+    
+    loansReport.forEach((loan, index) => {
+      const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
+      text += `${String(index + 1).padStart(2, ' ')}. ${loan.member_name} K${loan.loan_amount.toLocaleString()}${status}\n`;
+    });
+    
+    navigator.clipboard.writeText(text).then(() => {
+      setMessage({ type: 'success', text: 'Loans report copied to clipboard!' });
+      setTimeout(() => setMessage(null), 3000);
+    }).catch(() => {
+      setMessage({ type: 'error', text: 'Failed to copy to clipboard' });
+    });
+  };
+
+  const copyFullReport = () => {
+    const monthFormatted = formatMonth(selectedReportMonth);
+    let text = `${monthFormatted} Declarations\n\n`;
+    
+    declarationsReport.forEach((member, index) => {
+      const amount = member.declaration_amount 
+        ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
+        : 'K';
+      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name} ${amount}\n`;
+    });
+    
+    text += `\nLoans\n`;
+    loansReport.forEach((loan, index) => {
+      const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
+      text += `${String(index + 1).padStart(2, ' ')}. ${loan.member_name} K${loan.loan_amount.toLocaleString()}${status}\n`;
+    });
+    
+    navigator.clipboard.writeText(text).then(() => {
+      setMessage({ type: 'success', text: 'Full report copied to clipboard!' });
+      setTimeout(() => setMessage(null), 3000);
+    }).catch(() => {
+      setMessage({ type: 'error', text: 'Failed to copy to clipboard' });
+    });
   };
 
   const handleViewLoanDetails = async (loanId: string) => {
@@ -166,6 +327,33 @@ export default function TreasurerDashboard() {
   const closeLoanModal = () => {
     setShowLoanModal(false);
     setSelectedLoan(null);
+  };
+
+  const handleViewDeclarationDetails = async (memberId: string) => {
+    setLoadingDeclarationDetails(true);
+    setShowDeclarationDetailsModal(true);
+    setDeclarationDetails(null);
+    try {
+      const response = await api.get<DeclarationDetailsReport>(
+        `/api/treasurer/reports/declarations/details?member_id=${encodeURIComponent(memberId)}&month=${encodeURIComponent(selectedReportMonth)}`
+      );
+      if (response.data) {
+        setDeclarationDetails(response.data);
+      } else {
+        setMessage({ type: 'error', text: response.error || 'Failed to load declaration details' });
+        setShowDeclarationDetailsModal(false);
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Error loading declaration details' });
+      setShowDeclarationDetailsModal(false);
+    } finally {
+      setLoadingDeclarationDetails(false);
+    }
+  };
+
+  const closeDeclarationDetailsModal = () => {
+    setShowDeclarationDetailsModal(false);
+    setDeclarationDetails(null);
   };
 
   const handleApproveDeposit = async (depositId: string) => {
@@ -222,17 +410,26 @@ export default function TreasurerDashboard() {
   };
 
   const handleApproveLoan = async (applicationId: string) => {
-    if (!confirm('Are you sure you want to approve and disburse this loan? This will post it to the member\'s account and make it active.')) {
-      return;
+    // Find the loan application to show details in modal
+    const loan = pendingLoans.find(l => l.id === applicationId);
+    if (loan) {
+      setLoanToApprove(loan);
+      setShowLoanApprovalModal(true);
     }
+  };
+
+  const confirmApproveLoan = async () => {
+    if (!loanToApprove) return;
     
-    setApprovingLoan(applicationId);
+    setApprovingLoan(loanToApprove.id);
     setMessage(null);
     try {
-      const response = await api.post(`/api/treasurer/loans/${applicationId}/approve`);
+      const response = await api.post(`/api/treasurer/loans/${loanToApprove.id}/approve`);
       if (!response.error) {
         setMessage({ type: 'success', text: 'Loan approved, disbursed, and posted to member\'s account successfully!' });
         await loadData();
+        setShowLoanApprovalModal(false);
+        setLoanToApprove(null);
       } else {
         setMessage({ type: 'error', text: response.error || 'Failed to approve and disburse loan' });
       }
@@ -242,6 +439,11 @@ export default function TreasurerDashboard() {
       setApprovingLoan(null);
       setTimeout(() => setMessage(null), 5000);
     }
+  };
+
+  const cancelApproveLoan = () => {
+    setShowLoanApprovalModal(false);
+    setLoanToApprove(null);
   };
 
   const openRejectModal = (deposit: PendingDeposit) => {
@@ -261,7 +463,10 @@ export default function TreasurerDashboard() {
     setSelectedDeposit(null);
   };
 
-  const handleViewProof = async (uploadPath: string) => {
+  const handleViewProof = async (uploadPath: string, deposit?: PendingDeposit) => {
+    if (deposit) {
+      setSelectedDepositForProof(deposit);
+    }
     setProofLoading(true);
     setProofError(null);
     setShowProofModal(true);
@@ -282,6 +487,7 @@ export default function TreasurerDashboard() {
 
   const closeProofModal = () => {
     setShowProofModal(false);
+    setSelectedDepositForProof(null);
     if (proofBlobUrl) {
       URL.revokeObjectURL(proofBlobUrl);
       setProofBlobUrl(null);
@@ -333,279 +539,375 @@ export default function TreasurerDashboard() {
       </nav>
 
       <main className="max-w-7xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
-        <div className="space-y-4 md:space-y-6">
-          {/* Pending Deposits */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Pending Deposit Proofs</h2>
-            
-            {message && (
-              <div
-                className={`mb-4 md:mb-6 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium ${
-                  message.type === 'success'
-                    ? 'bg-green-100 border-2 border-green-400 text-green-800'
-                    : 'bg-red-100 border-2 border-red-400 text-red-800'
-                }`}
-              >
-                {message.text}
-              </div>
-            )}
+        {message && (
+          <div
+            className={`mb-4 md:mb-6 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium ${
+              message.type === 'success'
+                ? 'bg-green-100 border-2 border-green-400 text-green-800'
+                : 'bg-red-100 border-2 border-red-400 text-red-800'
+            }`}
+          >
+            {message.text}
+          </div>
+        )}
 
-            {loading ? (
-              <div className="text-center py-12">
-                <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-                <p className="mt-4 text-blue-700 text-lg">Loading...</p>
+        {penaltyNotification && (
+          <div
+            className={`mb-4 md:mb-6 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium ${
+              penaltyNotification.type === 'success'
+                ? 'bg-green-100 border-2 border-green-400 text-green-800'
+                : 'bg-red-100 border-2 border-red-400 text-red-800'
+            }`}
+            role="alert"
+          >
+            {penaltyNotification.type === 'success' ? '✓ ' : ''}
+            {penaltyNotification.text}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="text-center py-12">
+            <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
+            <p className="mt-4 text-blue-700 text-lg">Loading...</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+            {/* Pending Deposit Proofs - Compact Card */}
+            <div className="card">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Pending Deposit Proofs</h2>
+                {pendingDeposits.length > 0 && (
+                  <span className="px-3 py-1 bg-blue-600 text-white rounded-full text-sm font-semibold">
+                    {pendingDeposits.length}
+                  </span>
+                )}
               </div>
-            ) : pendingDeposits.length === 0 ? (
-              <p className="text-blue-700 text-lg text-center py-8">No pending deposit proofs</p>
-            ) : (
-              <div className="space-y-3 md:space-y-4">
-                {pendingDeposits.map((deposit) => (
-                  <div
-                    key={deposit.id}
-                    className="p-4 md:p-5 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-xl"
-                  >
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 md:gap-4 mb-3">
-                      <div className="flex-1">
-                        <p className="font-bold text-base md:text-lg text-blue-900">
-                          {deposit.member_name} ({deposit.member_email})
-                        </p>
-                        <p className="text-sm md:text-base text-blue-700">
-                          Amount: <span className="font-semibold">K{deposit.amount.toLocaleString()}</span>
-                        </p>
-                        {deposit.effective_month && (
-                          <p className="text-sm text-blue-600">
-                            Declaration Month: {new Date(deposit.effective_month).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+              
+              {pendingDeposits.length === 0 ? (
+                <p className="text-blue-700 text-sm text-center py-6">No pending deposit proofs</p>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {pendingDeposits.slice(0, 3).map((deposit) => (
+                    <div
+                      key={deposit.id}
+                      className="p-3 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg hover:shadow-md transition-shadow"
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm text-blue-900 truncate">
+                            {deposit.member_name}
                           </p>
-                        )}
-                        <p className="text-xs text-blue-600 mt-1">
-                          Uploaded: {new Date(deposit.uploaded_at).toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
-                        <button
-                          onClick={() => handleViewDetails(deposit)}
-                          className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 text-sm font-semibold transition-colors"
-                        >
-                          View Details
-                        </button>
-                        {deposit.status === 'submitted' && (
-                          <>
-                            <button
-                              onClick={() => openRejectModal(deposit)}
-                              className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 text-sm font-semibold transition-colors"
-                            >
-                              Reject
-                            </button>
-                            <button
-                              onClick={() => handleApproveDeposit(deposit.id)}
-                              disabled={approving === deposit.id}
-                              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
-                            >
-                              {approving === deposit.id ? 'Approving...' : 'Approve & Post'}
-                            </button>
-                          </>
-                        )}
-                        {deposit.status === 'rejected' && (
-                          <>
-                            <button
-                              onClick={() => openRejectModal(deposit)}
-                              className="px-4 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 text-sm font-semibold transition-colors"
-                            >
-                              Update Rejection
-                            </button>
+                          <p className="text-xs text-blue-700">
+                            K{deposit.amount.toLocaleString()}
+                          </p>
+                          {deposit.effective_month && (
+                            <p className="text-xs text-blue-600 truncate">
+                              {(() => {
+                                const [year, month] = deposit.effective_month.split('-').map(Number);
+                                const date = new Date(year, month - 1, 1);
+                                return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short' });
+                              })()}
+                            </p>
+                          )}
+                        </div>
+                        <div className="flex flex-col gap-1 flex-shrink-0">
+                          <button
+                            onClick={() => handleViewDetails(deposit)}
+                            className="px-2 py-1 bg-blue-500 text-white rounded text-xs font-semibold hover:bg-blue-600 transition-colors"
+                          >
+                            View
+                          </button>
+                          {deposit.status === 'submitted' && (
                             <button
                               onClick={() => handleApproveDeposit(deposit.id)}
                               disabled={approving === deposit.id}
-                              className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                              className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors"
                             >
-                              {approving === deposit.id ? 'Approving...' : 'Approve & Post'}
+                              {approving === deposit.id ? '...' : 'Approve'}
                             </button>
-                          </>
-                        )}
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  ))}
+                  {pendingDeposits.length > 3 && (
+                    <p className="text-xs text-blue-600 text-center pt-2">
+                      +{pendingDeposits.length - 3} more
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
 
-          {/* Pending Loan Applications */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Pending Loan Applications</h2>
-            
-            {loading ? (
-              <div className="text-center py-12">
-                <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-                <p className="mt-4 text-blue-700 text-lg">Loading...</p>
+            {/* Pending Loan Applications - Compact Card */}
+            <div className="card">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Pending Loan Applications</h2>
+                {pendingLoans.length > 0 && (
+                  <span className="px-3 py-1 bg-blue-600 text-white rounded-full text-sm font-semibold">
+                    {pendingLoans.length}
+                  </span>
+                )}
               </div>
-            ) : pendingLoans.length === 0 ? (
-              <p className="text-blue-700 text-lg text-center py-8">No pending loan applications</p>
-            ) : (
-              <div className="space-y-3 md:space-y-4">
-                {pendingLoans.map((loan) => (
-                  <div
-                    key={loan.id}
-                    className="p-4 md:p-5 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-xl"
-                  >
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 md:gap-4">
-                      <div className="flex-1">
-                        <p className="font-bold text-base md:text-lg text-blue-900">
-                          {loan.member_name} {loan.member_email && `(${loan.member_email})`}
-                        </p>
-                        <p className="text-sm md:text-base text-blue-700">
-                          Loan Amount: <span className="font-semibold">K{loan.amount.toLocaleString()}</span>
-                        </p>
-                        <p className="text-sm md:text-base text-blue-700">
-                          Term: <span className="font-semibold">{loan.term_months} {loan.term_months === '1' ? 'Month' : 'Months'}</span>
-                        </p>
-                        {loan.notes && (
-                          <p className="text-sm text-blue-600 mt-2">
-                            Notes: {loan.notes}
+              
+              {pendingLoans.length === 0 ? (
+                <p className="text-blue-700 text-sm text-center py-6">No pending loan applications</p>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {pendingLoans.slice(0, 3).map((loan) => (
+                    <div
+                      key={loan.id}
+                      className="p-3 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg hover:shadow-md transition-shadow"
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm text-blue-900 truncate">
+                            {loan.member_name}
                           </p>
-                        )}
-                        <p className="text-xs text-blue-600 mt-1">
-                          Applied: {new Date(loan.application_date).toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto">
+                          <p className="text-xs text-blue-700">
+                            K{loan.amount.toLocaleString()} • {loan.term_months} {loan.term_months === '1' ? 'Month' : 'Months'}
+                          </p>
+                        </div>
                         <button
                           onClick={() => handleApproveLoan(loan.id)}
                           disabled={approvingLoan === loan.id}
-                          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-semibold transition-colors"
+                          className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors flex-shrink-0"
                         >
-                          {approvingLoan === loan.id ? 'Approving & Disbursing...' : 'Approve & Disburse'}
+                          {approvingLoan === loan.id ? '...' : 'Approve'}
                         </button>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  ))}
+                  {pendingLoans.length > 3 && (
+                    <p className="text-xs text-blue-600 text-center pt-2">
+                      +{pendingLoans.length - 3} more
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
 
-          {/* Active Loans */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Active Loans</h2>
-            
-            {loading ? (
-              <div className="text-center py-12">
-                <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-                <p className="mt-4 text-blue-700 text-lg">Loading...</p>
+            {/* Active Loans - Compact Card */}
+            <div className="card">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Active Loans</h2>
+                {activeLoans.length > 0 && (
+                  <span className="px-3 py-1 bg-green-600 text-white rounded-full text-sm font-semibold">
+                    {activeLoans.length}
+                  </span>
+                )}
               </div>
-            ) : activeLoans.length === 0 ? (
-              <p className="text-blue-700 text-lg text-center py-8">No active loans</p>
-            ) : (
-              <div className="space-y-3 md:space-y-4">
-                {activeLoans.map((loan) => (
-                  <div
-                    key={loan.id}
-                    className="p-4 md:p-5 bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-xl cursor-pointer hover:shadow-lg transition-shadow"
-                    onClick={() => handleViewLoanDetails(loan.id)}
-                  >
-                    <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 md:gap-4">
-                      <div className="flex-1">
-                        <p className="font-bold text-base md:text-lg text-blue-900">
-                          {loan.member_name} {loan.member_email && `(${loan.member_email})`}
-                        </p>
-                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mt-2">
-                          <div>
-                            <p className="text-xs md:text-sm text-blue-700">Loan Amount</p>
-                            <p className="text-sm md:text-base font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs md:text-sm text-blue-700">Outstanding</p>
-                            <p className="text-sm md:text-base font-semibold text-red-700">K{loan.outstanding_balance.toLocaleString()}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs md:text-sm text-blue-700">Total Paid</p>
-                            <p className="text-sm md:text-base font-semibold text-green-700">K{loan.total_paid.toLocaleString()}</p>
-                          </div>
-                          <div>
-                            <p className="text-xs md:text-sm text-blue-700">Repayments</p>
-                            <p className="text-sm md:text-base font-semibold text-blue-900">{loan.repayment_count}</p>
+              
+              {activeLoans.length === 0 ? (
+                <p className="text-blue-700 text-sm text-center py-6">No active loans</p>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {activeLoans.slice(0, 3).map((loan) => (
+                    <div
+                      key={loan.id}
+                      className="p-3 bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
+                      onClick={() => handleViewLoanDetails(loan.id)}
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm text-blue-900 truncate">
+                            {loan.member_name}
+                          </p>
+                          <div className="grid grid-cols-2 gap-1 mt-1">
+                            <div>
+                              <p className="text-xs text-blue-600">Loan</p>
+                              <p className="text-xs font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-red-600">Outstanding</p>
+                              <p className="text-xs font-semibold text-red-700">K{loan.outstanding_balance.toLocaleString()}</p>
+                            </div>
                           </div>
                         </div>
-                        {loan.disbursement_date && (
-                          <p className="text-xs text-blue-600 mt-2">
-                            Disbursed: {new Date(loan.disbursement_date).toLocaleDateString()}
+                        <span className="text-xs text-blue-600 flex-shrink-0">→</span>
+                      </div>
+                    </div>
+                  ))}
+                  {activeLoans.length > 3 && (
+                    <p className="text-xs text-blue-600 text-center pt-2">
+                      +{activeLoans.length - 3} more
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Pending Penalties - Compact Card */}
+            <div className="card">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Pending Penalties</h2>
+                {pendingPenalties.length > 0 && (
+                  <span className="px-3 py-1 bg-yellow-600 text-white rounded-full text-sm font-semibold">
+                    {pendingPenalties.length}
+                  </span>
+                )}
+              </div>
+              
+              {pendingPenalties.length === 0 ? (
+                <p className="text-blue-700 text-sm text-center py-6">No pending penalties</p>
+              ) : (
+                <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                  {pendingPenalties.slice(0, 3).map((penalty) => (
+                    <div
+                      key={penalty.id}
+                      className="p-3 bg-gradient-to-r from-yellow-50 to-yellow-100 border-2 border-yellow-300 rounded-lg hover:shadow-md transition-shadow"
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold text-sm text-blue-900 truncate">
+                            {penalty.penalty_type?.name || 'Penalty'}
                           </p>
+                          <p className="text-xs text-blue-700 truncate">
+                            {penalty.member_name || 'Unknown'}
+                          </p>
+                          <p className="text-xs text-blue-700">
+                            K{parseFloat(penalty.penalty_type?.fee_amount || '0').toLocaleString()}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => handleApprovePenalty(penalty.id)}
+                          disabled={approvingPenalty === penalty.id}
+                          className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors flex-shrink-0"
+                        >
+                          {approvingPenalty === penalty.id ? '...' : 'Approve'}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  {pendingPenalties.length > 3 && (
+                    <p className="text-xs text-blue-600 text-center pt-2">
+                      +{pendingPenalties.length - 3} more
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Reports Card */}
+            <div className="card md:col-span-2">
+              <div className="flex justify-between items-center mb-4">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Reports</h2>
+                <button
+                  onClick={copyFullReport}
+                  className="px-3 py-1 bg-blue-600 text-white rounded text-sm font-semibold hover:bg-blue-700 transition-colors"
+                >
+                  Copy Full Report
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                {/* Month Selector */}
+                <div className="flex items-center gap-4">
+                  <label className="text-sm font-semibold text-blue-900">Select Month:</label>
+                  <input
+                    type="month"
+                    value={selectedReportMonth.substring(0, 7)}
+                    onChange={(e) => {
+                      const [year, month] = e.target.value.split('-').map(Number);
+                      setSelectedReportMonth(`${year}-${String(month).padStart(2, '0')}-01`);
+                    }}
+                    className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                {loadingReports ? (
+                  <div className="text-center py-8">
+                    <div className="animate-spin rounded-full h-8 w-8 border-2 border-blue-200 border-t-blue-600 mx-auto"></div>
+                    <p className="mt-2 text-blue-700 text-sm">Loading reports...</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {/* Declarations Report */}
+                    <div className="bg-white border-2 border-blue-200 rounded-lg p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <h3 className="text-base font-bold text-blue-900">
+                          {formatMonth(selectedReportMonth)} Declarations
+                        </h3>
+                        <button
+                          onClick={copyDeclarationsReport}
+                          className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
+                        {declarationsReport.length === 0 ? (
+                          <p className="text-blue-700 text-center py-4">No declarations for this month</p>
+                        ) : (
+                          declarationsReport.map((member, index) => {
+                            const amount = member.declaration_amount 
+                              ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
+                              : 'K';
+                            return (
+                              <div key={member.member_id} className="flex items-center gap-2 py-1">
+                                <span className="text-blue-600 w-6 text-right">
+                                  {String(index + 1).padStart(2, ' ')}.
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleViewDeclarationDetails(member.member_id)}
+                                  className="flex-1 text-left text-blue-900 hover:text-blue-600 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-400 rounded px-1 -mx-1"
+                                >
+                                  {member.member_name}
+                                </button>
+                                <span className="text-blue-700 font-semibold">{amount}</span>
+                              </div>
+                            );
+                          })
                         )}
                       </div>
-                      <div className="text-blue-600 text-sm md:text-base font-medium">
-                        Click to view details →
+                    </div>
+
+                    {/* Loans Report */}
+                    <div className="bg-white border-2 border-green-200 rounded-lg p-4">
+                      <div className="flex justify-between items-center mb-3">
+                        <h3 className="text-base font-bold text-green-900">Loans</h3>
+                        <button
+                          onClick={copyLoansReport}
+                          className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 transition-colors"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
+                        {loansReport.length === 0 ? (
+                          <p className="text-green-700 text-center py-4">No active loans</p>
+                        ) : (
+                          loansReport.map((loan, index) => {
+                            const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
+                            return (
+                              <div key={loan.loan_id} className="flex items-center gap-2 py-1">
+                                <span className="text-green-600 w-6 text-right">
+                                  {String(index + 1).padStart(2, ' ')}.
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleViewLoanDetails(loan.loan_id)}
+                                  className="flex-1 text-left text-green-900 hover:text-green-600 hover:underline focus:outline-none focus:ring-2 focus:ring-green-400 rounded px-1 -mx-1"
+                                >
+                                  {loan.member_name}
+                                </button>
+                                <span className="text-green-700 font-semibold">
+                                  K{loan.loan_amount.toLocaleString()}{status}
+                                </span>
+                              </div>
+                            );
+                          })
+                        )}
                       </div>
                     </div>
                   </div>
-                ))}
+                )}
               </div>
-            )}
+            </div>
           </div>
+        )}
 
-          {/* Pending Penalties */}
-          <div className="card">
-            <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Pending Penalties</h2>
-            {penaltyNotification && (
-              <div
-                className={`mb-4 md:mb-6 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium ${
-                  penaltyNotification.type === 'success'
-                    ? 'bg-green-100 border-2 border-green-400 text-green-800'
-                    : 'bg-red-100 border-2 border-red-400 text-red-800'
-                }`}
-                role="alert"
-              >
-                {penaltyNotification.type === 'success' ? '✓ ' : ''}
-                {penaltyNotification.text}
-              </div>
-            )}
-            {loading ? (
-              <div className="text-center py-12">
-                <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-                <p className="mt-4 text-blue-700 text-lg">Loading...</p>
-              </div>
-            ) : pendingPenalties.length === 0 ? (
-              <p className="text-blue-700 text-lg text-center py-8">No pending penalties</p>
-            ) : (
-              <div className="space-y-3 md:space-y-4">
-                {pendingPenalties.map((penalty) => (
-                  <div
-                    key={penalty.id}
-                    className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 md:p-5 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-xl gap-3 md:gap-4"
-                  >
-                    <div className="flex-1">
-                      <p className="font-bold text-base md:text-lg text-blue-900">
-                        {penalty.penalty_type?.name || 'Penalty'}
-                      </p>
-                      <p className="text-sm md:text-base text-blue-700">
-                        Member: {penalty.member_name || 'Unknown'} {penalty.member_email && `(${penalty.member_email})`}
-                      </p>
-                      <p className="text-sm md:text-base text-blue-700">
-                        Fee: <span className="font-semibold">K{parseFloat(penalty.penalty_type?.fee_amount || '0').toLocaleString()}</span>
-                      </p>
-                      {penalty.notes && (
-                        <p className="text-xs text-blue-600 mt-1">
-                          Notes: {penalty.notes}
-                        </p>
-                      )}
-                      {penalty.date_issued && (
-                        <p className="text-xs text-blue-600 mt-1">
-                          Issued: {new Date(penalty.date_issued).toLocaleDateString()}
-                        </p>
-                      )}
-                    </div>
-                    <button
-                      onClick={() => handleApprovePenalty(penalty.id)}
-                      disabled={approvingPenalty === penalty.id}
-                      className="btn-primary bg-gradient-to-br from-green-500 to-green-600 border-green-600 w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      {approvingPenalty === penalty.id ? 'Approving…' : 'Approve'}
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
       </main>
 
       {/* Deposit Details Modal */}
@@ -644,7 +946,7 @@ export default function TreasurerDashboard() {
                   <div>
                     <p className="text-sm text-blue-600 font-medium mb-1">Declaration Month</p>
                     <p className="text-base text-blue-900">
-                      {new Date(selectedDeposit.effective_month).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+                      {formatMonth(selectedDeposit.effective_month)}
                     </p>
                   </div>
                 )}
@@ -717,7 +1019,7 @@ export default function TreasurerDashboard() {
               <div className="bg-gray-50 border-2 border-gray-300 rounded-xl p-4">
                 <h3 className="text-lg font-bold text-blue-900 mb-3">Proof of Payment</h3>
                 <button
-                  onClick={() => handleViewProof(selectedDeposit.upload_path)}
+                  onClick={() => handleViewProof(selectedDeposit.upload_path, selectedDeposit)}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
                 >
                   View/Download Proof File
@@ -819,9 +1121,9 @@ export default function TreasurerDashboard() {
                     </button>
                   </div>
                 </div>
-              ) : proofBlobUrl && selectedDeposit ? (
+              ) : proofBlobUrl && selectedDepositForProof ? (
                 <div className="w-full h-full">
-                  {isImage(selectedDeposit.upload_path) ? (
+                  {isImage(selectedDepositForProof.upload_path) ? (
                     <div className="flex items-center justify-center min-h-[500px]">
                       <img
                         src={proofBlobUrl}
@@ -842,15 +1144,15 @@ export default function TreasurerDashboard() {
               ) : null}
             </div>
 
-            {proofBlobUrl && (
+            {proofBlobUrl && selectedDepositForProof && (
               <div className="bg-gray-50 px-6 py-4 border-t border-gray-200 flex justify-between items-center">
                 <p className="text-sm text-gray-600">
-                  {selectedDeposit?.upload_path.split('/').pop() || 'Proof file'}
+                  {selectedDepositForProof.upload_path.split('/').pop() || 'Proof file'}
                 </p>
                 <div className="flex gap-3">
                   <a
                     href={proofBlobUrl}
-                    download={selectedDeposit?.upload_path.split('/').pop() || 'proof.pdf'}
+                    download={selectedDepositForProof.upload_path.split('/').pop() || 'proof.pdf'}
                     className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
                   >
                     Download
@@ -888,7 +1190,7 @@ export default function TreasurerDashboard() {
                 <p className="text-sm text-yellow-700">Amount: K{selectedDeposit.amount.toLocaleString()}</p>
                 {selectedDeposit.effective_month && (
                   <p className="text-sm text-yellow-700">
-                    Declaration Month: {new Date(selectedDeposit.effective_month).toLocaleDateString('en-US', { year: 'numeric', month: 'long' })}
+                    Declaration Month: {formatMonth(selectedDeposit.effective_month)}
                   </p>
                 )}
               </div>
@@ -1105,6 +1407,189 @@ export default function TreasurerDashboard() {
               >
                 Close
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Declaration Details Modal (Reports - view only) */}
+      {showDeclarationDetailsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onClick={closeDeclarationDetailsModal}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-blue-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
+              <h2 className="text-xl md:text-2xl font-bold">Declaration Details</h2>
+              <button
+                onClick={closeDeclarationDetailsModal}
+                className="text-white hover:text-blue-200 text-2xl font-bold"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              {loadingDeclarationDetails ? (
+                <div className="text-center py-12">
+                  <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto" />
+                  <p className="mt-4 text-blue-700 text-lg">Loading declaration details...</p>
+                </div>
+              ) : declarationDetails ? (
+                <div className="space-y-6">
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                    <h3 className="font-bold text-lg text-blue-900 mb-2">Member</h3>
+                    <p className="text-blue-800 font-semibold">{declarationDetails.member_name}</p>
+                    <p className="text-blue-700 text-sm mt-1">
+                      Effective month: {formatMonth(declarationDetails.effective_month)}
+                    </p>
+                  </div>
+                  {!declarationDetails.has_declaration ? (
+                    <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4">
+                      <p className="text-yellow-800 font-medium">No declaration for this month.</p>
+                    </div>
+                  ) : declarationDetails.declaration ? (
+                    <>
+                      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                        {declarationDetails.declaration.declared_savings_amount != null && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Savings</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_savings_amount.toLocaleString()}</p>
+                          </div>
+                        )}
+                        {declarationDetails.declaration.declared_social_fund != null && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Social Fund</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_social_fund.toLocaleString()}</p>
+                          </div>
+                        )}
+                        {declarationDetails.declaration.declared_admin_fund != null && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Admin Fund</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_admin_fund.toLocaleString()}</p>
+                          </div>
+                        )}
+                        {declarationDetails.declaration.declared_penalties != null && declarationDetails.declaration.declared_penalties > 0 && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Penalties</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_penalties.toLocaleString()}</p>
+                          </div>
+                        )}
+                        {declarationDetails.declaration.declared_interest_on_loan != null && declarationDetails.declaration.declared_interest_on_loan > 0 && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Interest on Loan</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_interest_on_loan.toLocaleString()}</p>
+                          </div>
+                        )}
+                        {declarationDetails.declaration.declared_loan_repayment != null && declarationDetails.declaration.declared_loan_repayment > 0 && (
+                          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
+                            <p className="text-xs text-gray-600 font-medium">Loan Repayment</p>
+                            <p className="font-semibold text-gray-900">K{declarationDetails.declaration.declared_loan_repayment.toLocaleString()}</p>
+                          </div>
+                        )}
+                      </div>
+                      <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 flex justify-between items-center">
+                        <span className="font-bold text-blue-900">Total</span>
+                        <span className="text-xl font-bold text-blue-900">K{declarationDetails.declaration.total.toLocaleString()}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-gray-700">Declaration status:</span>
+                        <span className={`px-2 py-1 rounded text-sm font-semibold ${
+                          declarationDetails.declaration.status === 'approved' ? 'bg-green-200 text-green-900' :
+                          declarationDetails.declaration.status === 'pending' ? 'bg-yellow-200 text-yellow-900' :
+                          declarationDetails.declaration.status === 'proof' ? 'bg-blue-200 text-blue-900' :
+                          declarationDetails.declaration.status === 'rejected' ? 'bg-red-200 text-red-900' :
+                          'bg-gray-200 text-gray-800'
+                        }`}>
+                          {declarationDetails.declaration.status === 'proof' ? 'Proof Submitted' : declarationDetails.declaration.status}
+                        </span>
+                      </div>
+                      {declarationDetails.deposit_proof && (
+                        <div className="bg-gray-50 border-2 border-gray-200 rounded-xl p-4">
+                          <h3 className="font-bold text-lg text-gray-900 mb-2">Deposit Proof</h3>
+                          <div className="space-y-1 text-sm">
+                            <p><span className="font-medium text-gray-700">Status:</span> {declarationDetails.deposit_proof.status}</p>
+                            <p><span className="font-medium text-gray-700">Amount:</span> K{declarationDetails.deposit_proof.amount.toLocaleString()}</p>
+                            {declarationDetails.deposit_proof.uploaded_at && (
+                              <p><span className="font-medium text-gray-700">Uploaded:</span> {new Date(declarationDetails.deposit_proof.uploaded_at).toLocaleString()}</p>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="text-center py-12">
+                  <p className="text-red-700 text-lg">Failed to load declaration details.</p>
+                </div>
+              )}
+            </div>
+            <div className="bg-gray-50 px-6 py-4 border-t border-gray-200 flex justify-end">
+              <button
+                onClick={closeDeclarationDetailsModal}
+                className="btn-secondary"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Loan Approval Confirmation Modal */}
+      {showLoanApprovalModal && loanToApprove && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={cancelApproveLoan}>
+          <div
+            className="bg-white rounded-xl shadow-2xl max-w-md w-full"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-green-600 text-white px-6 py-4 rounded-t-xl">
+              <h2 className="text-xl md:text-2xl font-bold">Confirm Loan Approval</h2>
+            </div>
+
+            <div className="p-6 md:p-8">
+              <div className="mb-6">
+                <p className="text-base md:text-lg text-blue-900 mb-4">
+                  Are you sure you want to approve and disburse this loan?
+                </p>
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-sm text-blue-700 font-medium">Member:</span>
+                    <span className="text-sm text-blue-900 font-semibold">{loanToApprove.member_name}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-blue-700 font-medium">Loan Amount:</span>
+                    <span className="text-sm text-blue-900 font-semibold">K{loanToApprove.amount.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-sm text-blue-700 font-medium">Term:</span>
+                    <span className="text-sm text-blue-900 font-semibold">
+                      {loanToApprove.term_months} {loanToApprove.term_months === '1' ? 'Month' : 'Months'}
+                    </span>
+                  </div>
+                </div>
+                <div className="mt-4 p-3 bg-yellow-50 border-2 border-yellow-300 rounded-xl">
+                  <p className="text-sm text-yellow-800 font-medium">
+                    ⚠️ This will post the loan to the member's account and make it active.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col sm:flex-row justify-end gap-3 pt-4 border-t-2 border-gray-200">
+                <button
+                  type="button"
+                  onClick={cancelApproveLoan}
+                  disabled={approvingLoan === loanToApprove.id}
+                  className="btn-secondary disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmApproveLoan}
+                  disabled={approvingLoan === loanToApprove.id}
+                  className="px-4 py-2 md:px-6 md:py-3 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200"
+                >
+                  {approvingLoan === loanToApprove.id ? 'Approving...' : 'Approve & Disburse Loan'}
+                </button>
+              </div>
             </div>
           </div>
         </div>

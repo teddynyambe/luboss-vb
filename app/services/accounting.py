@@ -200,9 +200,13 @@ def get_member_social_fund_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's social fund accumulated payments from ledger.
+    """Get member's social fund balance due from ledger.
     
-    Returns accumulated payments made (sum of all payment debits/credits).
+    Returns balance due = Total Debits (required amounts) - Total Credits (payments).
+    This is a balance-due account where:
+    - Required amount → Debit (increases balance)
+    - Payment → Credit (reduces balance)
+    - Balance = Debits - Credits
     """
     from app.models.ledger import JournalLine, JournalEntry
     
@@ -215,29 +219,75 @@ def get_member_social_fund_balance(
     if not member_social_fund_account:
         return Decimal("0.00")
     
-    # Get accumulated payment amounts (from deposit_approval) - check both debits and credits (handle legacy data)
-    query_payment_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    # Get total debits (required amounts) and total credits (payments)
+    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
-        JournalEntry.source_type == "deposit_approval",
         JournalEntry.reversed_by.is_(None),
         JournalLine.debit_amount > 0
     )
-    query_payment_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
-        JournalEntry.source_type == "deposit_approval",
         JournalEntry.reversed_by.is_(None),
         JournalLine.credit_amount > 0
     )
     
     if as_of_date:
-        query_payment_debits = query_payment_debits.filter(JournalEntry.entry_date <= as_of_date)
-        query_payment_credits = query_payment_credits.filter(JournalEntry.entry_date <= as_of_date)
+        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
     
-    payment_debits = query_payment_debits.scalar() or Decimal("0.00")
-    payment_credits = query_payment_credits.scalar() or Decimal("0.00")
-    # Sum both debits and credits to get total accumulated payments
-    # (handles both new debit-based payments and legacy credit-based payments)
-    accumulated_payments = payment_debits + payment_credits
+    total_debits = query_debits.scalar() or Decimal("0.00")
+    total_credits = query_credits.scalar() or Decimal("0.00")
+    
+    # Balance = Debits - Credits (balance due)
+    balance_due = total_debits - total_credits
+    
+    return max(Decimal("0.00"), balance_due)  # Ensure non-negative
+
+
+def get_member_social_fund_payments(
+    db: Session,
+    member_id: UUID,
+    as_of_date: datetime = None
+) -> Decimal:
+    """Get member's social fund accumulated payments from ledger.
+    
+    Returns total accumulated payments made (sum of all credits/payments).
+    This shows how much the member has paid towards their social fund requirement.
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    
+    # Find member's social fund account (member-specific)
+    member_social_fund_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%social fund%")
+    ).first()
+    
+    if not member_social_fund_account:
+        return Decimal("0.00")
+    
+    # Get total credits (payments) - also handle legacy debits as payments
+    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_social_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalLine.credit_amount > 0
+    )
+    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_social_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalLine.debit_amount > 0
+    )
+    
+    if as_of_date:
+        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
+        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
+    
+    total_credits = query_credits.scalar() or Decimal("0.00")
+    total_debits = query_debits.scalar() or Decimal("0.00")
+    
+    # Accumulated payments = credits (new) + debits (legacy)
+    accumulated_payments = total_credits + total_debits
     
     return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
 
@@ -247,9 +297,13 @@ def get_member_admin_fund_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's admin fund accumulated payments from ledger.
+    """Get member's admin fund balance due from ledger.
     
-    Returns accumulated payments made (sum of all payment debits/credits).
+    Returns balance due = Total Debits (required amounts) - Total Credits (payments).
+    This is a balance-due account where:
+    - Required amount → Debit (increases balance)
+    - Payment → Credit (reduces balance)
+    - Balance = Debits - Credits
     """
     from app.models.ledger import JournalLine, JournalEntry
     
@@ -262,29 +316,75 @@ def get_member_admin_fund_balance(
     if not member_admin_fund_account:
         return Decimal("0.00")
     
-    # Get accumulated payment amounts (from deposit_approval) - check both debits and credits (handle legacy data)
-    query_payment_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    # Get total debits (required amounts) and total credits (payments)
+    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
-        JournalEntry.source_type == "deposit_approval",
         JournalEntry.reversed_by.is_(None),
         JournalLine.debit_amount > 0
     )
-    query_payment_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
-        JournalEntry.source_type == "deposit_approval",
         JournalEntry.reversed_by.is_(None),
         JournalLine.credit_amount > 0
     )
     
     if as_of_date:
-        query_payment_debits = query_payment_debits.filter(JournalEntry.entry_date <= as_of_date)
-        query_payment_credits = query_payment_credits.filter(JournalEntry.entry_date <= as_of_date)
+        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
     
-    payment_debits = query_payment_debits.scalar() or Decimal("0.00")
-    payment_credits = query_payment_credits.scalar() or Decimal("0.00")
-    # Sum both debits and credits to get total accumulated payments
-    # (handles both new debit-based payments and legacy credit-based payments)
-    accumulated_payments = payment_debits + payment_credits
+    total_debits = query_debits.scalar() or Decimal("0.00")
+    total_credits = query_credits.scalar() or Decimal("0.00")
+    
+    # Balance = Debits - Credits (balance due)
+    balance_due = total_debits - total_credits
+    
+    return max(Decimal("0.00"), balance_due)  # Ensure non-negative
+
+
+def get_member_admin_fund_payments(
+    db: Session,
+    member_id: UUID,
+    as_of_date: datetime = None
+) -> Decimal:
+    """Get member's admin fund accumulated payments from ledger.
+    
+    Returns total accumulated payments made (sum of all credits/payments).
+    This shows how much the member has paid towards their admin fund requirement.
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    
+    # Find member's admin fund account (member-specific)
+    member_admin_fund_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%admin fund%")
+    ).first()
+    
+    if not member_admin_fund_account:
+        return Decimal("0.00")
+    
+    # Get total credits (payments) - also handle legacy debits as payments
+    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_admin_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalLine.credit_amount > 0
+    )
+    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_admin_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalLine.debit_amount > 0
+    )
+    
+    if as_of_date:
+        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
+        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
+    
+    total_credits = query_credits.scalar() or Decimal("0.00")
+    total_debits = query_debits.scalar() or Decimal("0.00")
+    
+    # Accumulated payments = credits (new) + debits (legacy)
+    accumulated_payments = total_credits + total_debits
     
     return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
 

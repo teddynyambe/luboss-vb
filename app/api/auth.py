@@ -13,7 +13,16 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/register", response_model=UserResponse)
 def register(user_data: UserRegister, db: Session = Depends(get_db)):
-    """Register a new user (creates member_profile with PENDING status)."""
+    """Register a new user (creates member_profile with INACTIVE status)."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"=== REGISTRATION REQUEST START ===")
+    logger.info(f"Email: {user_data.email}")
+    logger.info(f"First Name: {user_data.first_name}")
+    logger.info(f"Last Name: {user_data.last_name}")
+    logger.info(f"Has NRC: {bool(user_data.nrc_number)}")
+    
     try:
         user = create_user(
             db=db,
@@ -31,6 +40,7 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
             last_name_next_of_kin=user_data.last_name_next_of_kin,
             phone_number_next_of_kin=user_data.phone_number_next_of_kin
         )
+        logger.info(f"Registration successful for {user_data.email}, returning response")
         return UserResponse(
             id=str(user.id),
             email=user.email,
@@ -40,12 +50,26 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
         )
     except HTTPException:
         # Re-raise HTTP exceptions (already have proper error messages)
+        logger.error(f"HTTPException during registration for {user_data.email}")
         raise
     except Exception as e:
+        # Log the full error for debugging
+        import traceback
+        error_type = type(e).__name__
+        error_msg = str(e)
+        tb_str = traceback.format_exc()
+        
+        logger.error(f"=== REGISTRATION FAILED ===")
+        logger.error(f"Email: {user_data.email}")
+        logger.error(f"Error Type: {error_type}")
+        logger.error(f"Error Message: {error_msg}")
+        logger.error(f"Full Traceback:\n{tb_str}")
+        logger.error(f"=== END REGISTRATION ERROR ===")
+        
         # Catch any other unexpected errors
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Registration failed: {str(e)}"
+            detail=f"Registration failed: {error_msg} (Type: {error_type})"
         )
 
 
@@ -70,13 +94,18 @@ def get_current_user_info(
 ):
     """Get current user information including roles."""
     roles = get_user_roles(current_user, db)
+    # If no roles from RBAC system, fall back to legacy role enum
+    if not roles and current_user.role:
+        # Map legacy enum to role name (capitalize first letter)
+        legacy_role = current_user.role.value.capitalize()
+        roles = [legacy_role]
     return UserResponse(
         id=str(current_user.id),
         email=current_user.email,
         first_name=current_user.first_name,
         last_name=current_user.last_name,
         approved=current_user.approved,
-        roles=roles,
+        roles=roles if roles else None,
         phone_number=current_user.phone_number,
         nrc_number=current_user.nrc_number,
         physical_address=current_user.physical_address,
@@ -134,13 +163,18 @@ def update_profile(
         db.commit()
         db.refresh(current_user)
         roles = get_user_roles(current_user, db)
+        # If no roles from RBAC system, fall back to legacy role enum
+        if not roles and current_user.role:
+            # Map legacy enum to role name (capitalize first letter)
+            legacy_role = current_user.role.value.capitalize()
+            roles = [legacy_role]
         return UserResponse(
             id=str(current_user.id),
             email=current_user.email,
             first_name=current_user.first_name,
             last_name=current_user.last_name,
             approved=current_user.approved,
-            roles=roles,
+            roles=roles if roles else None,
             phone_number=current_user.phone_number,
             nrc_number=current_user.nrc_number,
             physical_address=current_user.physical_address,
