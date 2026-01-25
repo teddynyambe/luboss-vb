@@ -55,7 +55,7 @@ Phases have a predefined order within a cycle:
 
 1. **Timing**:
    - Declarations can be submitted for the **current month** or **future months**
-   - Declarations cannot be submitted for **past months** (unless editing a rejected declaration)
+   - Declarations cannot be submitted for **past months** (unless editing a rejected declaration). This also accounts for profit allocation. Such a declaratioin will not benefit from profit sharing in that month because funds where not available for borrowing.
    - Only **one declaration per member per month per cycle** is allowed
 
 2. **Late Declaration Penalties**:

@@ -1,0 +1,24 @@
+[Unit]
+Description=Luboss95 Village Banking v2 Backend API
+After=network.target postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/luboss-vb
+Environment="PATH=/var/www/luboss-vb/app/venv/bin"
+ExecStart=/var/www/luboss-vb/app/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8002 --workers 2
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luboss-backend
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
