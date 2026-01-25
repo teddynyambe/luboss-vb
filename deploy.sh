@@ -644,9 +644,36 @@ deploy() {
     # The next.config.ts already reads from NEXT_PUBLIC_BASE_PATH, so we set it during build
     print_success "Next.js will use basePath from environment variable"
     
-    # 3. Update backend environment (if .env.production exists, update it)
+    # 3. Check and setup backend environment
     print_info "Checking backend environment..."
-    remote_exec "cd ${DEPLOY_DIR} && if [ -f app/.env.production ]; then echo 'Backend .env.production exists'; else echo 'Backend .env.production not found - using app/.env'; fi"
+    local backend_env_exists=false
+    if remote_exec "test -f ${DEPLOY_DIR}/app/.env.production" 2>/dev/null; then
+        backend_env_exists=true
+        print_success "Backend .env.production exists"
+    elif remote_exec "test -f ${DEPLOY_DIR}/app/.env" 2>/dev/null; then
+        backend_env_exists=true
+        print_info "Backend .env exists (using app/.env)"
+    else
+        print_warning "Backend environment file not found!"
+        print_info "Creating app/.env from template..."
+        
+        # Copy template to server
+        if [ -f "deploy/env.backend.template" ]; then
+            remote_copy "deploy/env.backend.template" "/tmp/env.backend.template"
+            remote_exec "cp /tmp/env.backend.template ${DEPLOY_DIR}/app/.env"
+            print_success "Backend .env template created"
+            print_warning "IMPORTANT: You must edit ${DEPLOY_DIR}/app/.env on the server with:"
+            print_warning "  - DATABASE_URL (PostgreSQL connection string)"
+            print_warning "  - SECRET_KEY (JWT secret key)"
+            print_warning "  - Other required configuration"
+            print_info "After editing, run ./deploy.sh again to continue."
+            exit 1
+        else
+            print_error "Environment template not found. Cannot create .env file."
+            print_info "Please manually create ${DEPLOY_DIR}/app/.env on the server with required variables."
+            exit 1
+        fi
+    fi
     
     # 4. Update frontend environment
     print_info "Updating frontend environment..."
@@ -773,11 +800,25 @@ EOF"
     
     # 5. Run database migrations
     print_info "Running database migrations..."
-    remote_exec "cd ${DEPLOY_DIR} && ${DEPLOY_DIR}/app/venv/bin/python -m alembic upgrade head"
-    if [ $? -eq 0 ]; then
+    local migration_output=$(remote_exec "cd ${DEPLOY_DIR} && ${DEPLOY_DIR}/app/venv/bin/python -m alembic upgrade head 2>&1")
+    local migration_exit=$?
+    
+    if [ $migration_exit -eq 0 ]; then
         print_success "Database migrations completed"
     else
         print_error "Database migration failed!"
+        echo "Migration output: $migration_output"
+        
+        # Check if it's a configuration error
+        if echo "$migration_output" | grep -q "DATABASE_URL\|SECRET_KEY\|Field required"; then
+            print_error "Missing required environment variables!"
+            print_info "Please ensure ${DEPLOY_DIR}/app/.env (or .env.production) contains:"
+            print_info "  - DATABASE_URL=postgresql://user:password@host:port/database"
+            print_info "  - SECRET_KEY=your-secret-key"
+            print_info "Edit the file on the server, then run ./deploy.sh again."
+        else
+            print_info "Check the error above and fix the issue, then run ./deploy.sh again."
+        fi
         exit 1
     fi
     
