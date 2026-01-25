@@ -28,7 +28,9 @@ NGINX_SITES_AVAILABLE=/etc/nginx/sites-available
 NGINX_SITES_ENABLED=/etc/nginx/sites-enabled
 NGINX_SITE_NAME=luboss-vb  # This will be included in the main production config
 
-# Git Repository (if different from current)
+# Git Repository
+# Leave empty to auto-detect from local repository's origin remote
+# Or set explicitly: GIT_REPO_URL=https://github.com/username/luboss-vb.git
 GIT_REPO_URL=
 GIT_BRANCH=main
 

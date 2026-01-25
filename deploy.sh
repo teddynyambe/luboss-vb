@@ -496,6 +496,52 @@ dry_run_deploy() {
 deploy() {
     print_info "Deploying to ${DEPLOY_DIR}..."
     
+    # 0. Check if deployment directory exists, create and clone if needed
+    if ! remote_exec "test -d ${DEPLOY_DIR}" 2>/dev/null; then
+        print_info "Deployment directory does not exist. Setting up for first deployment..."
+        
+        # Get git repository URL (from config or auto-detect from local repo)
+        local repo_url="${GIT_REPO_URL}"
+        if [ -z "$repo_url" ]; then
+            print_info "GIT_REPO_URL not set, attempting to detect from local repository..."
+            repo_url=$(git remote get-url origin 2>/dev/null || echo "")
+            if [ -z "$repo_url" ]; then
+                print_error "Cannot determine git repository URL."
+                print_info "Please set GIT_REPO_URL in deploy.conf or ensure local repository has 'origin' remote."
+                exit 1
+            fi
+            print_info "Detected repository URL: ${repo_url}"
+        fi
+        
+        # Create parent directory
+        remote_exec "sudo mkdir -p $(dirname ${DEPLOY_DIR})"
+        
+        # Clone repository
+        print_info "Cloning repository from ${repo_url}..."
+        remote_exec "sudo git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}"
+        
+        # Set ownership
+        remote_exec "sudo chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+        print_success "Repository cloned"
+    elif ! remote_exec "test -d ${DEPLOY_DIR}/.git" 2>/dev/null; then
+        print_warning "Directory exists but is not a git repository."
+        print_info "Attempting to initialize git repository..."
+        
+        # Get git repository URL
+        local repo_url="${GIT_REPO_URL}"
+        if [ -z "$repo_url" ]; then
+            repo_url=$(git remote get-url origin 2>/dev/null || echo "")
+            if [ -z "$repo_url" ]; then
+                print_error "Cannot determine git repository URL."
+                print_info "Please set GIT_REPO_URL in deploy.conf."
+                exit 1
+            fi
+        fi
+        
+        remote_exec "cd ${DEPLOY_DIR} && git init && git remote add origin ${repo_url} && git fetch && git checkout -b ${GIT_BRANCH:-main} origin/${GIT_BRANCH:-main} || git checkout ${GIT_BRANCH:-main}"
+        print_success "Git repository initialized"
+    fi
+    
     # 1. Pull latest code
     print_info "Pulling latest code from git..."
     remote_exec "cd ${DEPLOY_DIR} && git pull origin ${GIT_BRANCH:-main}"
