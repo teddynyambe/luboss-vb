@@ -658,8 +658,28 @@ EOF"
     
     # 4.5. Setup Python virtual environment if it doesn't exist
     print_info "Checking Python virtual environment..."
-    if ! remote_exec "test -d ${DEPLOY_DIR}/app/venv" 2>/dev/null; then
-        print_info "Virtual environment not found. Creating it..."
+    local venv_exists=false
+    local venv_valid=false
+    
+    if remote_exec "test -d ${DEPLOY_DIR}/app/venv" 2>/dev/null; then
+        venv_exists=true
+        # Check if venv is valid (has pip)
+        if remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+            venv_valid=true
+        fi
+    fi
+    
+        if [ "$venv_exists" = false ] || [ "$venv_valid" = false ]; then
+        if [ "$venv_exists" = true ] && [ "$venv_valid" = false ]; then
+            print_warning "Virtual environment exists but is incomplete (missing pip). Recreating it..."
+            remote_exec "rm -rf ${DEPLOY_DIR}/app/venv"
+        fi
+        
+        if [ "$venv_exists" = false ]; then
+            print_info "Virtual environment not found. Creating it..."
+        else
+            print_info "Recreating virtual environment..."
+        fi
         
         # Find Python 3.11+ on the server
         local python_cmd=$(remote_exec "command -v python3.11 || command -v python3.12 || command -v python3.13 || command -v python3 || command -v python" 2>/dev/null | head -1)
