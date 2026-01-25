@@ -71,9 +71,9 @@ export default function UploadConstitutionPage() {
     setUploading(false);
     if (res.error) {
       const detail = typeof (res as { detail?: string | string[] }).detail === 'string'
-        ? (res as { detail: string }).detail
-        : Array.isArray((res as { detail?: string[] }).detail)
-          ? (res as { detail: string[] }).detail?.join(', ')
+        ? (res as unknown as { detail: string }).detail
+        : Array.isArray((res as unknown as { detail?: string[] }).detail)
+          ? (res as unknown as { detail: string[] }).detail?.join(', ')
           : res.error;
       setMessage({ type: 'error', text: detail || res.error });
       return;
