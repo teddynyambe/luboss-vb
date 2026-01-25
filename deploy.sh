@@ -221,14 +221,25 @@ get_remote_file_hash() {
     remote_exec "if [ -f '${file_path}' ]; then sha256sum '${file_path}' 2>/dev/null | cut -d' ' -f1; else echo 'FILE_NOT_FOUND'; fi"
 }
 
+# Helper function to get venv path (checks both .venv and venv)
+get_venv_path() {
+    local venv_path="${DEPLOY_DIR}/app/.venv"
+    if ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
+        venv_path="${DEPLOY_DIR}/app/venv"
+    fi
+    echo "$venv_path"
+}
+
 # Helper function to get current database migration version
 get_current_migration_version() {
-    remote_exec "cd ${DEPLOY_DIR} && ${DEPLOY_DIR}/app/venv/bin/python -m alembic current 2>/dev/null | grep -oP '^\w+' | head -1 || echo 'unknown'"
+    local venv_path=$(get_venv_path)
+    remote_exec "cd ${DEPLOY_DIR} && ${venv_path}/bin/python -m alembic current 2>/dev/null | grep -oP '^\w+' | head -1 || echo 'unknown'"
 }
 
 # Helper function to get pending migrations
 get_pending_migrations() {
-    remote_exec "cd ${DEPLOY_DIR} && ${DEPLOY_DIR}/app/venv/bin/python -m alembic heads 2>/dev/null | head -1"
+    local venv_path=$(get_venv_path)
+    remote_exec "cd ${DEPLOY_DIR} && ${venv_path}/bin/python -m alembic heads 2>/dev/null | head -1"
 }
 
 # Helper function to get service status
@@ -245,7 +256,8 @@ get_package_lock_hash() {
 
 # Helper function to get pip freeze hash
 get_pip_freeze_hash() {
-    remote_exec "cd ${DEPLOY_DIR}/app && ${DEPLOY_DIR}/app/venv/bin/pip freeze 2>/dev/null | sha256sum | cut -d' ' -f1 || echo 'unknown'"
+    local venv_path=$(get_venv_path)
+    remote_exec "cd ${DEPLOY_DIR}/app && ${venv_path}/bin/pip freeze 2>/dev/null | sha256sum | cut -d' ' -f1 || echo 'unknown'"
 }
 
 # Function to extract JSON value (portable method)
@@ -690,10 +702,16 @@ EOF"
     local venv_exists=false
     local venv_valid=false
     
-    if remote_exec "test -d ${DEPLOY_DIR}/app/venv" 2>/dev/null; then
+    # Check for both .venv and venv (some systems create .venv)
+    local venv_path="${DEPLOY_DIR}/app/.venv"
+    if ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
+        venv_path="${DEPLOY_DIR}/app/venv"
+    fi
+    
+    if remote_exec "test -d ${venv_path}" 2>/dev/null; then
         venv_exists=true
         # Check if venv is valid (has pip)
-        if remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+        if remote_exec "test -f ${venv_path}/bin/pip" 2>/dev/null; then
             venv_valid=true
         fi
     fi
@@ -757,28 +775,28 @@ EOF"
         print_info "Verifying virtual environment..."
         sleep 1  # Brief wait for filesystem to sync
         
-        if ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+        if ! remote_exec "test -f ${venv_path}/bin/pip" 2>/dev/null; then
             print_warning "Virtual environment created but pip is missing. Attempting to install pip..."
             
             # Try to install pip using ensurepip
-            local ensurepip_output=$(remote_exec "cd ${DEPLOY_DIR}/app && ${DEPLOY_DIR}/app/venv/bin/python -m ensurepip --upgrade 2>&1")
+            local ensurepip_output=$(remote_exec "cd ${DEPLOY_DIR}/app && ${venv_path}/bin/python -m ensurepip --upgrade 2>&1")
             local ensurepip_exit=$?
             
-            if [ $ensurepip_exit -ne 0 ] || ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+            if [ $ensurepip_exit -ne 0 ] || ! remote_exec "test -f ${venv_path}/bin/pip" 2>/dev/null; then
                 print_error "Failed to install pip in virtual environment."
                 echo "ensurepip output: $ensurepip_output"
                 print_info "Trying alternative: installing pip via get-pip.py..."
                 
                 # Try downloading and installing pip manually
-                remote_exec "cd ${DEPLOY_DIR}/app && curl -sS https://bootstrap.pypa.io/get-pip.py | ${DEPLOY_DIR}/app/venv/bin/python"
+                remote_exec "cd ${DEPLOY_DIR}/app && curl -sS https://bootstrap.pypa.io/get-pip.py | ${venv_path}/bin/python"
                 
-                if ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+                if ! remote_exec "test -f ${venv_path}/bin/pip" 2>/dev/null; then
                     print_error "All methods to install pip failed."
                     print_info "Please manually fix the virtual environment on the server:"
                     echo "  cd ${DEPLOY_DIR}/app"
-                    echo "  rm -rf venv"
-                    echo "  python3.11 -m venv venv"
-                    echo "  source venv/bin/activate"
+                    echo "  rm -rf .venv"
+                    echo "  python3.11 -m venv .venv"
+                    echo "  source .venv/bin/activate"
                     echo "  pip install --upgrade pip"
                     exit 1
                 fi
@@ -789,20 +807,27 @@ EOF"
         
         # Upgrade pip and install dependencies
         print_info "Upgrading pip and installing dependencies..."
-        remote_exec "cd ${DEPLOY_DIR}/app && ${DEPLOY_DIR}/app/venv/bin/pip install --upgrade pip && ${DEPLOY_DIR}/app/venv/bin/pip install -q -r requirements.txt"
+        remote_exec "cd ${DEPLOY_DIR}/app && ${venv_path}/bin/pip install --upgrade pip && ${venv_path}/bin/pip install -q -r requirements.txt"
         print_success "Dependencies installed"
     else
         print_success "Virtual environment exists"
+        # Ensure venv_path is set even if venv already exists
+        if [ -z "$venv_path" ] || ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
+            venv_path="${DEPLOY_DIR}/app/.venv"
+            if ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
+                venv_path="${DEPLOY_DIR}/app/venv"
+            fi
+        fi
     fi
     
     # 5.5. Update Python dependencies (always, to ensure latest)
     print_info "Updating Python dependencies..."
-    remote_exec "cd ${DEPLOY_DIR}/app && ${DEPLOY_DIR}/app/venv/bin/pip install -q --upgrade -r requirements.txt"
+    remote_exec "cd ${DEPLOY_DIR}/app && ${venv_path}/bin/pip install -q --upgrade -r requirements.txt"
     print_success "Python dependencies updated"
     
     # 5. Run database migrations
     print_info "Running database migrations..."
-    local migration_output=$(remote_exec "cd ${DEPLOY_DIR} && ${DEPLOY_DIR}/app/venv/bin/python -m alembic upgrade head 2>&1")
+    local migration_output=$(remote_exec "cd ${DEPLOY_DIR} && ${venv_path}/bin/python -m alembic upgrade head 2>&1")
     local migration_exit=$?
     
     if [ $migration_exit -eq 0 ]; then
