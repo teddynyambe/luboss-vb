@@ -717,14 +717,46 @@ EOF"
         local venv_output=$(remote_exec "cd ${DEPLOY_DIR}/app && $python_cmd -m venv venv 2>&1")
         local venv_exit=$?
         
-        if [ $venv_exit -eq 0 ]; then
-            print_success "Virtual environment created"
-        else
+        if [ $venv_exit -ne 0 ]; then
             print_error "Failed to create virtual environment."
             echo "Error: $venv_output"
             print_info "Please ensure python3-venv is installed: sudo apt-get install -y ${venv_package}"
             exit 1
         fi
+        
+        # Verify venv was created and pip exists
+        print_info "Verifying virtual environment..."
+        sleep 1  # Brief wait for filesystem to sync
+        
+        if ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+            print_warning "Virtual environment created but pip is missing. Attempting to install pip..."
+            
+            # Try to install pip using ensurepip
+            local ensurepip_output=$(remote_exec "cd ${DEPLOY_DIR}/app && ${DEPLOY_DIR}/app/venv/bin/python -m ensurepip --upgrade 2>&1")
+            local ensurepip_exit=$?
+            
+            if [ $ensurepip_exit -ne 0 ] || ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+                print_error "Failed to install pip in virtual environment."
+                echo "ensurepip output: $ensurepip_output"
+                print_info "Trying alternative: installing pip via get-pip.py..."
+                
+                # Try downloading and installing pip manually
+                remote_exec "cd ${DEPLOY_DIR}/app && curl -sS https://bootstrap.pypa.io/get-pip.py | ${DEPLOY_DIR}/app/venv/bin/python"
+                
+                if ! remote_exec "test -f ${DEPLOY_DIR}/app/venv/bin/pip" 2>/dev/null; then
+                    print_error "All methods to install pip failed."
+                    print_info "Please manually fix the virtual environment on the server:"
+                    echo "  cd ${DEPLOY_DIR}/app"
+                    echo "  rm -rf venv"
+                    echo "  python3.11 -m venv venv"
+                    echo "  source venv/bin/activate"
+                    echo "  pip install --upgrade pip"
+                    exit 1
+                fi
+            fi
+        fi
+        
+        print_success "Virtual environment created and verified"
         
         # Upgrade pip and install dependencies
         print_info "Upgrading pip and installing dependencies..."
