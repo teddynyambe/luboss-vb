@@ -533,6 +533,13 @@ deploy() {
                 exit 1
             fi
             print_info "Detected repository URL: ${repo_url}"
+            
+            # If HTTPS URL detected and might be private, suggest SSH
+            if echo "$repo_url" | grep -q "^https://"; then
+                print_info "Note: Using HTTPS URL. If repository is private, consider using SSH URL:"
+                local ssh_url=$(echo "$repo_url" | sed 's|https://github.com/|git@github.com:|' | sed 's|\.git$||')
+                print_info "  GIT_REPO_URL=${ssh_url}.git"
+            fi
         fi
         
         # Create parent directory (try without sudo first)
@@ -554,14 +561,37 @@ deploy() {
         print_info "Cloning repository from ${repo_url}..."
         local temp_dir="${HOME}/luboss-vb-temp-$$"
         
-        # Clone to user's home directory first
-        if ! remote_exec "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${temp_dir}" 2>/dev/null; then
-            print_error "Failed to clone repository. Please check:"
-            print_info "  1. Git is installed on the server"
-            print_info "  2. You have access to the repository"
-            print_info "  3. Network connectivity is available"
+        # Check if git is installed
+        if ! remote_exec "command -v git" >/dev/null 2>&1; then
+            print_error "Git is not installed on the server."
+            print_info "Please install git: sudo apt-get install git (Ubuntu/Debian) or sudo yum install git (CentOS/RHEL)"
             exit 1
         fi
+        
+        # Clone to user's home directory first (show errors for debugging)
+        print_info "Attempting to clone repository..."
+        local clone_output=$(remote_exec "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${temp_dir} 2>&1")
+        local clone_exit=$?
+        
+        if [ $clone_exit -ne 0 ]; then
+            print_error "Failed to clone repository."
+            echo "Git output: $clone_output"
+            print_info ""
+            print_info "Possible issues:"
+            print_info "  1. Repository is private and requires authentication"
+            print_info "  2. Network connectivity issues on server"
+            print_info "  3. Branch '${GIT_BRANCH:-main}' doesn't exist"
+            print_info ""
+            print_info "Solutions:"
+            print_info "  - If repository is private, set up SSH keys on server:"
+            print_info "    ssh-keygen -t rsa -b 4096 -C 'deploy@server'"
+            print_info "    cat ~/.ssh/id_rsa.pub  # Add to GitHub SSH keys"
+            print_info "  - Or use SSH URL instead: git@github.com:teddynyambe/luboss-vb.git"
+            print_info "  - Or clone manually on server first, then run deploy script again"
+            exit 1
+        fi
+        
+        print_success "Repository cloned successfully"
         
         # Move to final location (may require sudo)
         print_info "Moving repository to ${DEPLOY_DIR}..."
