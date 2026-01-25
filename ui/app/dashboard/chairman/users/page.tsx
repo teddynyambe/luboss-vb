@@ -207,7 +207,8 @@ export default function UserManagementPage() {
       const ratings: Record<string, UserCreditRating> = {};
       
       // Load credit rating for each member
-      for (const member of membersResponse.data) {
+      const members = Array.isArray(membersResponse.data) ? membersResponse.data : [];
+      for (const member of members) {
         try {
           const ratingResponse = await api.get(`/api/chairman/members/${member.id}/credit-rating/${cycleId}`);
           if (ratingResponse.data && ratingResponse.data.tier_name) {
