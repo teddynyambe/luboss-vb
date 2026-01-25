@@ -224,9 +224,9 @@ get_remote_file_hash() {
 # Helper function to get venv path (checks both .venv and venv)
 get_venv_path() {
     local venv_path="${DEPLOY_DIR}/app/.venv"
-    if ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
-        venv_path="${DEPLOY_DIR}/app/venv"
-    fi
+    #if ! remote_exec "test -d ${venv_path}" 2>/dev/null; then
+    #    venv_path="${DEPLOY_DIR}/app/.venv"
+    #fi
     echo "$venv_path"
 }
 
@@ -719,7 +719,8 @@ EOF"
         if [ "$venv_exists" = false ] || [ "$venv_valid" = false ]; then
         if [ "$venv_exists" = true ] && [ "$venv_valid" = false ]; then
             print_warning "Virtual environment exists but is incomplete (missing pip). Recreating it..."
-            remote_exec "rm -rf ${DEPLOY_DIR}/app/venv"
+            remote_exec "rm -rf ${venv_path}"
+            venv_path="${DEPLOY_DIR}/app/.venv"  # Use .venv for new creation
         fi
         
         if [ "$venv_exists" = false ]; then
@@ -851,7 +852,8 @@ EOF"
     
     # 7. Build frontend
     print_info "Building frontend (this may take a few minutes)..."
-    remote_exec "cd ${DEPLOY_DIR}/ui && NEXT_PUBLIC_BASE_PATH='${DEPLOY_PATH}' npm ci --production && NEXT_PUBLIC_BASE_PATH='${DEPLOY_PATH}' npm run build"
+    # Note: npm ci without --production to include devDependencies needed for build (TypeScript, etc.)
+    remote_exec "cd ${DEPLOY_DIR}/ui && NEXT_PUBLIC_BASE_PATH='${DEPLOY_PATH}' npm ci && NEXT_PUBLIC_BASE_PATH='${DEPLOY_PATH}' npm run build"
     if [ $? -eq 0 ]; then
         print_success "Frontend build completed"
     else

@@ -274,13 +274,13 @@ export default function ManageCyclesPage() {
             tier_name: tier.tier_name,
             tier_order: tier.tier_order,
             description: tier.description || '',
-            multiplier: typeof tier.multiplier === 'number' ? tier.multiplier : parseFloat(tier.multiplier.toString()),
+            multiplier: typeof tier.multiplier === 'number' ? tier.multiplier : parseFloat(String(tier.multiplier)),
             interest_ranges: tier.interest_ranges?.map(range => ({
               id: range.id,
               term_months: range.term_months || null,
               effective_rate_percent: typeof range.effective_rate_percent === 'number' 
                 ? range.effective_rate_percent 
-                : parseFloat(range.effective_rate_percent.toString())
+                : parseFloat(String(range.effective_rate_percent))
             })) || []
           })));
         }
