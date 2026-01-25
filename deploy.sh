@@ -97,8 +97,10 @@ SSH_CONTROL_DIR="$HOME/.ssh/controlmasters"
 mkdir -p "$SSH_CONTROL_DIR" 2>/dev/null || true
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 SSH_OPTS="${SSH_OPTS} -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_DIR}/%r@%h:%p -o ControlPersist=300"
+SCP_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 if [ -n "$SSH_PORT" ]; then
     SSH_OPTS="${SSH_OPTS} -p ${SSH_PORT}"
+    SCP_OPTS="${SCP_OPTS} -P ${SSH_PORT}"  # scp uses -P (capital) for port
 fi
 
 SSH_TARGET="${SERVER_USER}@${SERVER_HOST}"
@@ -148,9 +150,9 @@ remote_copy() {
     local src=$1
     local dest=$2
     if [ "$USE_SSHPASS" = true ]; then
-        sshpass -p "${SSH_PASSWORD}" scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
+        sshpass -p "${SSH_PASSWORD}" scp $SCP_OPTS "$src" "${SSH_TARGET}:${dest}"
     else
-        scp $SSH_OPTS "$src" "${SSH_TARGET}:${dest}"
+        scp $SCP_OPTS "$src" "${SSH_TARGET}:${dest}"
     fi
 }
 
