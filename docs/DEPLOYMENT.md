@@ -47,6 +47,45 @@ sudo lsof -i:3000  # Should return nothing
 - `sshpass` (for password authentication) or SSH keys configured
 - `rsync` (optional, for file transfers)
 
+### Reducing Password Prompts
+
+The deployment script uses SSH connection multiplexing to reuse connections, but you may still be prompted for passwords for sudo commands. To reduce prompts:
+
+**Option 1: Configure Passwordless Sudo (Recommended)**
+
+On the server, add the deployment user to sudoers with NOPASSWD for specific commands:
+
+```bash
+# SSH into server
+ssh user@your-server.com
+
+# Create sudoers file for deployment
+sudo visudo -f /etc/sudoers.d/luboss-deploy
+
+# Add this line (replace 'your-username' with actual username):
+your-username ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/nginx, /bin/cp, /bin/ln, /bin/mkdir, /bin/chown, /usr/bin/git
+```
+
+**Option 2: Use SSH Keys with Agent Forwarding**
+
+```bash
+# On local machine
+ssh-add ~/.ssh/id_rsa  # Add your SSH key to agent
+ssh -A user@server     # Use agent forwarding
+```
+
+**Option 3: Use sshpass (Less Secure)**
+
+Install `sshpass` and set `SSH_PASSWORD` in `deploy.conf`:
+
+```bash
+# macOS
+brew install sshpass
+
+# Linux
+sudo apt-get install sshpass
+```
+
 ## Initial Server Setup
 
 ### 1. Clone Repository on Server

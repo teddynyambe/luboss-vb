@@ -92,8 +92,11 @@ if [ "$USE_SSHPASS" = false ]; then
     fi
 fi
 
-# SSH options
+# SSH options with connection multiplexing to reduce password prompts
+SSH_CONTROL_DIR="$HOME/.ssh/controlmasters"
+mkdir -p "$SSH_CONTROL_DIR" 2>/dev/null || true
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
+SSH_OPTS="${SSH_OPTS} -o ControlMaster=auto -o ControlPath=${SSH_CONTROL_DIR}/%r@%h:%p -o ControlPersist=300"
 if [ -n "$SSH_PORT" ]; then
     SSH_OPTS="${SSH_OPTS} -p ${SSH_PORT}"
 fi
@@ -120,6 +123,24 @@ remote_exec() {
     else
         ssh $SSH_OPTS $SSH_TARGET "$1"
     fi
+}
+
+# Function to execute remote command with sudo (tries without sudo first)
+remote_exec_sudo() {
+    local cmd=$1
+    # Try without sudo first
+    if remote_exec "$cmd" 2>/dev/null; then
+        return 0
+    fi
+    # If that fails, try with sudo -n (non-interactive, fails if password needed)
+    if remote_exec "sudo -n $cmd" 2>/dev/null; then
+        return 0
+    fi
+    # If sudo -n fails, we need password - but this will still prompt
+    # Note: For better experience, configure passwordless sudo on server:
+    # echo "${SERVER_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/nginx" | sudo tee /etc/sudoers.d/luboss-deploy
+    print_warning "Sudo command requires password. Consider setting up passwordless sudo for deployment."
+    remote_exec "sudo $cmd"
 }
 
 # Function to copy file to server
@@ -211,7 +232,8 @@ get_pending_migrations() {
 # Helper function to get service status
 get_service_status() {
     local service_name=$1
-    remote_exec "sudo systemctl is-active ${service_name} 2>/dev/null || echo 'inactive'"
+    # Try without sudo first (if user has permissions)
+    remote_exec "systemctl is-active ${service_name} 2>/dev/null || sudo -n systemctl is-active ${service_name} 2>/dev/null || echo 'inactive'"
 }
 
 # Helper function to get package-lock.json hash
@@ -513,15 +535,21 @@ deploy() {
             print_info "Detected repository URL: ${repo_url}"
         fi
         
-        # Create parent directory
-        remote_exec "sudo mkdir -p $(dirname ${DEPLOY_DIR})"
+        # Create parent directory (try without sudo first)
+        print_info "Creating deployment directory..."
+        if ! remote_exec "mkdir -p $(dirname ${DEPLOY_DIR})" 2>/dev/null; then
+            print_info "Directory creation requires sudo privileges..."
+            remote_exec_sudo "mkdir -p $(dirname ${DEPLOY_DIR})"
+        fi
         
-        # Clone repository
+        # Clone repository (try without sudo first)
         print_info "Cloning repository from ${repo_url}..."
-        remote_exec "sudo git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}"
-        
-        # Set ownership
-        remote_exec "sudo chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+        if ! remote_exec "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}" 2>/dev/null; then
+            print_info "Repository clone requires sudo privileges..."
+            remote_exec_sudo "git clone -b ${GIT_BRANCH:-main} ${repo_url} ${DEPLOY_DIR}"
+            # Set ownership if we used sudo
+            remote_exec_sudo "chown -R ${SERVER_USER}:${SERVER_USER} ${DEPLOY_DIR}"
+        fi
         print_success "Repository cloned"
     elif ! remote_exec "test -d ${DEPLOY_DIR}/.git" 2>/dev/null; then
         print_warning "Directory exists but is not a git repository."
@@ -593,17 +621,18 @@ EOF"
     print_info "Updating Nginx configuration..."
     if [ -f "deploy/nginx-luboss.conf" ]; then
         remote_copy "deploy/nginx-luboss.conf" "/tmp/nginx-luboss.conf"
-        remote_exec "sudo cp /tmp/nginx-luboss.conf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME} && sudo ln -sf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME} ${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+        remote_exec_sudo "cp /tmp/nginx-luboss.conf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+        remote_exec_sudo "ln -sf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME} ${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
         
         # Test Nginx configuration
         print_info "Testing Nginx configuration..."
-        if remote_exec "sudo nginx -t" 2>&1 | grep -q "successful"; then
+        if remote_exec_sudo "nginx -t" 2>&1 | grep -q "successful"; then
             print_success "Nginx configuration is valid"
-            remote_exec "sudo systemctl reload nginx"
+            remote_exec_sudo "systemctl reload nginx"
             print_success "Nginx reloaded"
         else
             print_error "Nginx configuration test failed!"
-            remote_exec "sudo nginx -t"
+            remote_exec_sudo "nginx -t"
             exit 1
         fi
     else
@@ -612,22 +641,22 @@ EOF"
     
     # 9. Restart backend service
     print_info "Restarting backend service..."
-    if remote_exec "sudo systemctl is-active --quiet ${BACKEND_SERVICE_NAME}" 2>/dev/null; then
-        remote_exec "sudo systemctl restart ${BACKEND_SERVICE_NAME}"
+    if remote_exec "systemctl is-active --quiet ${BACKEND_SERVICE_NAME} 2>/dev/null || sudo -n systemctl is-active --quiet ${BACKEND_SERVICE_NAME}" 2>/dev/null; then
+        remote_exec_sudo "systemctl restart ${BACKEND_SERVICE_NAME}"
         print_success "Backend service restarted"
     else
         print_warning "Backend service not running, starting it..."
-        remote_exec "sudo systemctl start ${BACKEND_SERVICE_NAME}" || print_warning "Failed to start backend service (may need manual setup)"
+        remote_exec_sudo "systemctl start ${BACKEND_SERVICE_NAME}" || print_warning "Failed to start backend service (may need manual setup)"
     fi
     
     # 10. Restart frontend service
     print_info "Restarting frontend service..."
-    if remote_exec "sudo systemctl is-active --quiet ${FRONTEND_SERVICE_NAME}" 2>/dev/null; then
-        remote_exec "sudo systemctl restart ${FRONTEND_SERVICE_NAME}"
+    if remote_exec "systemctl is-active --quiet ${FRONTEND_SERVICE_NAME} 2>/dev/null || sudo -n systemctl is-active --quiet ${FRONTEND_SERVICE_NAME}" 2>/dev/null; then
+        remote_exec_sudo "systemctl restart ${FRONTEND_SERVICE_NAME}"
         print_success "Frontend service restarted"
     else
         print_warning "Frontend service not running, starting it..."
-        remote_exec "sudo systemctl start ${FRONTEND_SERVICE_NAME}" || print_warning "Failed to start frontend service (may need manual setup)"
+        remote_exec_sudo "systemctl start ${FRONTEND_SERVICE_NAME}" || print_warning "Failed to start frontend service (may need manual setup)"
     fi
     
     # 11. Verify deployment
