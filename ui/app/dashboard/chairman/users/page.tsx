@@ -159,7 +159,8 @@ export default function UserManagementPage() {
     setError(null);
     const response = await api.post(`/api/chairman/members/${memberId}/toggle-status`);
     if (!response.error) {
-      const statusText = response.data?.status === 'active' ? 'activated' : 'deactivated';
+      const status = (response.data as { status?: string })?.status;
+      const statusText = status === 'active' ? 'activated' : 'deactivated';
       showMessage('success', `Member ${statusText} successfully`);
       await loadUsers();
       await loadMembers();
