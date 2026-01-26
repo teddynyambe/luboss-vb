@@ -1526,9 +1526,10 @@ def get_account_transactions(
             
             # 2. Get individual penalty records (PENDING and APPROVED only).
             # PAID penalties are excluded; they appear as journal lines from deposit approvals above.
+            # Use in_() to explicitly filter for the statuses we want, avoiding enum name/value issues
             penalty_records = db.query(PenaltyRecord).filter(
                 PenaltyRecord.member_id == member_profile.id,
-                PenaltyRecord.status != PenaltyRecordStatus.PAID
+                PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING, PenaltyRecordStatus.APPROVED])
             ).order_by(PenaltyRecord.date_issued.desc()).all()
             
             for penalty in penalty_records:
@@ -1545,7 +1546,7 @@ def get_account_transactions(
                     description += f" - {penalty.notes}"
                 
                 # Add status indicator for non-PAID penalties (show status for PENDING and APPROVED)
-                if penalty.status != PenaltyRecordStatus.PAID.value:
+                if penalty.status != PenaltyRecordStatus.PAID:
                     description += f" ({penalty.status.value})"
                 
                 # Handle None date_issued
