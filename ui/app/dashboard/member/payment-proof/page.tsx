@@ -42,6 +42,7 @@ export default function PaymentProofPage() {
   const [viewLoading, setViewLoading] = useState(true);
   const [viewError, setViewError] = useState('');
   const [selectedDepositForProof, setSelectedDepositForProof] = useState<DepositProof | null>(null);
+  const [selectedDeposit, setSelectedDeposit] = useState<DepositProof | null>(null);
   const [showResponseModal, setShowResponseModal] = useState(false);
   const [responseText, setResponseText] = useState('');
   const [submittingResponse, setSubmittingResponse] = useState(false);
