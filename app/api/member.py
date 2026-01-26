@@ -1545,7 +1545,7 @@ def get_account_transactions(
                     description += f" - {penalty.notes}"
                 
                 # Add status indicator for non-PAID penalties (show status for PENDING and APPROVED)
-                if penalty.status != PenaltyRecordStatus.PAID:
+                if penalty.status != PenaltyRecordStatus.PAID.value:
                     description += f" ({penalty.status.value})"
                 
                 # Handle None date_issued

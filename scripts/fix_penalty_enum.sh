@@ -33,17 +33,34 @@ else
     echo "   This might need a migration fix"
 fi
 
-# Restart backend
+# Clear Python cache (important for enum changes)
 echo ""
-echo "3. Restarting backend service..."
-sudo systemctl restart luboss-backend
+echo "3. Clearing Python bytecode cache..."
+find /var/www/luboss-vb/app -type d -name __pycache__ -exec rm -r {} + 2>/dev/null || true
+find /var/www/luboss-vb/app -name "*.pyc" -delete 2>/dev/null || true
+find /var/www/luboss-vb/app -name "*.pyo" -delete 2>/dev/null || true
+echo "✅ Python cache cleared"
 
-# Wait a moment
+# Kill all Python processes related to the backend (force reload)
+echo ""
+echo "4. Stopping backend service and killing any remaining processes..."
+sudo systemctl stop luboss-backend
 sleep 2
+
+# Kill any remaining uvicorn processes for this app
+pkill -f "uvicorn.*app.main:app" 2>/dev/null || true
+sleep 1
+
+# Restart backend
+echo "5. Starting backend service..."
+sudo systemctl start luboss-backend
+
+# Wait for service to fully start
+sleep 5
 
 # Check status
 echo ""
-echo "4. Checking backend status..."
+echo "6. Checking backend status..."
 if sudo systemctl is-active --quiet luboss-backend; then
     echo "✅ Backend is running"
 else
@@ -54,7 +71,7 @@ fi
 
 # Check recent logs for errors
 echo ""
-echo "5. Checking for enum errors in logs..."
+echo "7. Checking for enum errors in logs..."
 RECENT_ERRORS=$(sudo journalctl -u luboss-backend -n 20 --no-pager | grep -i "penaltyrecordstatus\|enum" | tail -3)
 if [ -z "$RECENT_ERRORS" ]; then
     echo "✅ No recent enum errors in logs"
