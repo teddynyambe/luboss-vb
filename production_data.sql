@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict 6cSO2pjix44Zp7UW51bpOPLNYpWE4UxqDJwTuHNnfFFerpH4TYnSNhLSNCbRJCN
+\restrict QS0zphcpZiv7pnYpXXDksewxGHiH6lb02PcykM7gdiiLRSLw1r5z2twFM1K1l79
 
 -- Dumped from database version 17.7 (Homebrew)
 -- Dumped by pg_dump version 17.7 (Homebrew)
@@ -540,5 +540,5 @@ COPY public.vb_group (id, name, description, created_at) FROM stdin;
 -- PostgreSQL database dump complete
 --
 
-\unrestrict 6cSO2pjix44Zp7UW51bpOPLNYpWE4UxqDJwTuHNnfFFerpH4TYnSNhLSNCbRJCN
+\unrestrict QS0zphcpZiv7pnYpXXDksewxGHiH6lb02PcykM7gdiiLRSLw1r5z2twFM1K1l79
 
