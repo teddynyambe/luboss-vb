@@ -118,7 +118,34 @@ alembic current
 sudo -u postgres psql -d village_bank -c "\dt" | head -20
 ```
 
-## Step 5: Export Data from Local Database
+## Step 5a: Create Missing Table (If Needed)
+
+If `credit_rating_interest_range` table is missing after migrations, create it:
+
+```bash
+# Create the missing credit_rating_interest_range table
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE IF NOT EXISTS credit_rating_interest_range (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tier_id UUID NOT NULL REFERENCES credit_rating_tier(id),
+    cycle_id UUID NOT NULL REFERENCES cycle(id),
+    term_months VARCHAR(10),
+    effective_rate_percent NUMERIC(5, 2) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS ix_credit_rating_interest_range_tier_id ON credit_rating_interest_range(tier_id);
+CREATE INDEX IF NOT EXISTS ix_credit_rating_interest_range_cycle_id ON credit_rating_interest_range(cycle_id);
+
+GRANT ALL PRIVILEGES ON TABLE credit_rating_interest_range TO luboss;
+ALTER TABLE credit_rating_interest_range OWNER TO luboss;
+"
+
+# Verify it was created
+sudo -u postgres psql -d village_bank -c "\d credit_rating_interest_range"
+```
+
+## Step 6: Export Data from Local Database
 
 **On your local machine:**
 
@@ -126,7 +153,8 @@ sudo -u postgres psql -d village_bank -c "\dt" | head -20
 # Navigate to project directory
 cd /Users/teddy/vm_shared/teddy/Projects/luboss-vb
 
-# Export ALL data (excluding staging tables)
+# Export ALL data (excluding ONLY staging tables)
+# This includes: users, declarations, loans, deposits, cycles, credit ratings, etc.
 pg_dump -h localhost -U teddy -d village_bank \
   --data-only \
   --exclude-table=stg_members \
@@ -138,6 +166,10 @@ pg_dump -h localhost -U teddy -d village_bank \
   --no-owner \
   --no-privileges \
   --file=production_data.sql
+
+# Verify the export includes important tables
+echo "Checking export includes key tables:"
+grep -E "^(COPY|INSERT INTO) (\"user\"|declaration|loan|deposit_proof|cycle|credit_rating)" production_data.sql | head -20
 
 # Check file was created
 ls -lh production_data.sql
@@ -192,7 +224,7 @@ EOF
 sudo -u postgres psql -d village_bank -c "SELECT email, first_name, last_name FROM \"user\" LIMIT 10;"
 ```
 
-## Step 9: Restart Backend
+## Step 10: Restart Backend
 
 **On production server:**
 
@@ -275,6 +307,22 @@ cd /var/www/luboss-vb
 source app/venv/bin/activate
 alembic upgrade head
 echo "✅ Migrations complete"
+
+echo "=== Step 7a: Creating missing credit_rating_interest_range table (if needed) ==="
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE IF NOT EXISTS credit_rating_interest_range (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tier_id UUID NOT NULL REFERENCES credit_rating_tier(id),
+    cycle_id UUID NOT NULL REFERENCES cycle(id),
+    term_months VARCHAR(10),
+    effective_rate_percent NUMERIC(5, 2) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_credit_rating_interest_range_tier_id ON credit_rating_interest_range(tier_id);
+CREATE INDEX IF NOT EXISTS ix_credit_rating_interest_range_cycle_id ON credit_rating_interest_range(cycle_id);
+GRANT ALL PRIVILEGES ON TABLE credit_rating_interest_range TO luboss;
+ALTER TABLE credit_rating_interest_range OWNER TO luboss;
+" 2>/dev/null && echo "✅ Table created/verified" || echo "⚠️  Table may already exist"
 
 echo "=== Step 8: Importing data ==="
 sudo -u postgres psql -d village_bank << 'EOF'
