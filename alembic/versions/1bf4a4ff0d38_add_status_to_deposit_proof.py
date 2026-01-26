@@ -31,7 +31,7 @@ def upgrade() -> None:
     # Add status column with default value
     op.add_column('deposit_proof', 
         sa.Column('status', sa.Enum('submitted', 'approved', 'rejected', name='depositproofstatus', create_type=False), 
-                  server_default="'submitted'", nullable=False)
+                  server_default=sa.text("'submitted'"), nullable=False)
     )
 
 
