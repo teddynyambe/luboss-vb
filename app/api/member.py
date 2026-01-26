@@ -1526,10 +1526,12 @@ def get_account_transactions(
             
             # 2. Get individual penalty records (PENDING and APPROVED only).
             # PAID penalties are excluded; they appear as journal lines from deposit approvals above.
-            # Use in_() to explicitly filter for the statuses we want, avoiding enum name/value issues
+            # Use text() with explicit enum casting to ensure lowercase values are used
+            # SQLAlchemy's SQLEnum uses enum names (PENDING) instead of values (pending), so we work around it
+            from sqlalchemy import text
             penalty_records = db.query(PenaltyRecord).filter(
                 PenaltyRecord.member_id == member_profile.id,
-                PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING, PenaltyRecordStatus.APPROVED])
+                text("penalty_record.status IN ('pending', 'approved')")
             ).order_by(PenaltyRecord.date_issued.desc()).all()
             
             for penalty in penalty_records:
