@@ -1026,6 +1026,15 @@ EOF"
     print_info "Verifying deployment..."
     sleep 2
     
+    # Verify enum fix is in code (if penalty_record model exists)
+    if remote_exec "test -f ${DEPLOY_DIR}/app/models/transaction.py" 2>/dev/null; then
+        if remote_exec "grep -q 'PAID = \"paid\"' ${DEPLOY_DIR}/app/models/transaction.py" 2>/dev/null; then
+            print_success "PenaltyRecordStatus enum fix verified (lowercase values)"
+        else
+            print_warning "PenaltyRecordStatus enum may still have uppercase values - check app/models/transaction.py"
+        fi
+    fi
+    
     # Check backend health
     if remote_exec "curl -sf http://localhost:${BACKEND_PORT}/health > /dev/null" 2>/dev/null; then
         print_success "Backend health check passed"
