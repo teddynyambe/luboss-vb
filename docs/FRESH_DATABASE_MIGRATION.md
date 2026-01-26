@@ -24,7 +24,19 @@ sudo -u postgres pg_dump -d village_bank > /tmp/village_bank_backup_$(date +%Y%m
 ls -lh /tmp/village_bank_backup_*.sql
 ```
 
-## Step 2: Drop and Recreate Database
+## Step 2: Stop Backend Service (If Running)
+
+**On production server:**
+
+```bash
+# Stop backend to release database connections
+sudo systemctl stop luboss-backend
+
+# Verify it's stopped
+sudo systemctl status luboss-backend
+```
+
+## Step 3: Drop and Recreate Database
 
 **On production server:**
 
@@ -33,7 +45,7 @@ ls -lh /tmp/village_bank_backup_*.sql
 sudo -u postgres psql
 
 # In psql, run:
-DROP DATABASE village_bank;
+DROP DATABASE IF EXISTS village_bank;
 CREATE DATABASE village_bank OWNER luboss;
 GRANT ALL PRIVILEGES ON DATABASE village_bank TO luboss;
 
@@ -41,7 +53,17 @@ GRANT ALL PRIVILEGES ON DATABASE village_bank TO luboss;
 \q
 ```
 
-## Step 3: Enable Extensions
+**Note:** If you get "database is being accessed by other users", make sure the backend service is stopped, or terminate connections:
+```bash
+# Terminate all connections to the database
+sudo -u postgres psql -c "
+SELECT pg_terminate_backend(pg_stat_activity.pid)
+FROM pg_stat_activity
+WHERE pg_stat_activity.datname = 'village_bank'
+  AND pid <> pg_backend_pid();"
+```
+
+## Step 4: Enable Extensions
 
 **On production server:**
 
@@ -53,7 +75,27 @@ sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;
 sudo -u postgres psql -d village_bank -c "\dx"
 ```
 
-## Step 4: Run Migrations
+## Step 4: Create alembic_version Table (Important!)
+
+**On production server:**
+
+Before running migrations, create the `alembic_version` table with a larger column size to accommodate long revision IDs:
+
+```bash
+# Create alembic_version table with VARCHAR(50) instead of default VARCHAR(32)
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(50) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);"
+
+# Verify it was created
+sudo -u postgres psql -d village_bank -c "\d alembic_version"
+```
+
+**Why?** Some migration revision IDs are 32+ characters long, and the default `VARCHAR(32)` causes errors.
+
+## Step 5: Run Migrations
 
 **On production server:**
 
@@ -63,6 +105,9 @@ source app/venv/bin/activate
 
 # Run all migrations to create schema
 alembic upgrade head
+
+# Verify migrations completed
+alembic current
 
 # Verify tables were created
 sudo -u postgres psql -d village_bank -c "\dt" | head -20
@@ -93,7 +138,7 @@ pg_dump -h localhost -U teddy -d village_bank \
 ls -lh production_data.sql
 ```
 
-## Step 6: Transfer to Server
+## Step 7: Transfer to Server
 
 **On your local machine:**
 
@@ -102,7 +147,7 @@ ls -lh production_data.sql
 scp production_data.sql teddy@luboss95vb.com:/tmp/
 ```
 
-## Step 7: Import Data to Production
+## Step 8: Import Data to Production
 
 **On production server:**
 
@@ -118,7 +163,7 @@ SET session_replication_role = 'origin';
 EOF
 ```
 
-## Step 8: Verify Data
+## Step 9: Verify Data
 
 **On production server:**
 
@@ -208,17 +253,25 @@ sudo -u postgres psql -c "CREATE DATABASE village_bank OWNER luboss;"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE village_bank TO luboss;"
 echo "✅ Database created"
 
-echo "=== Step 4: Enabling extensions ==="
+echo "=== Step 5: Enabling extensions ==="
 sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 echo "✅ Extensions enabled"
 
-echo "=== Step 5: Running migrations ==="
+echo "=== Step 6: Create alembic_version table ==="
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(50) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);"
+echo "✅ alembic_version table created"
+
+echo "=== Step 7: Running migrations ==="
 cd /var/www/luboss-vb
 source app/venv/bin/activate
 alembic upgrade head
 echo "✅ Migrations complete"
 
-echo "=== Step 6: Importing data ==="
+echo "=== Step 8: Importing data ==="
 sudo -u postgres psql -d village_bank << 'EOF'
 SET session_replication_role = 'replica';
 \i /tmp/production_data.sql
@@ -226,10 +279,10 @@ SET session_replication_role = 'origin';
 EOF
 echo "✅ Data imported"
 
-echo "=== Step 7: Verifying ==="
+echo "=== Step 9: Verifying ==="
 sudo -u postgres psql -d village_bank -c "SELECT COUNT(*) as user_count FROM \"user\";"
 
-echo "=== Step 8: Restarting backend ==="
+echo "=== Step 10: Restarting backend ==="
 sudo systemctl restart luboss-backend
 sleep 2
 sudo systemctl status luboss-backend --no-pager -l | head -10
@@ -273,6 +326,13 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE village_bank TO lubos
 # Enable extensions
 sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
+# Create alembic_version table with correct size
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE IF NOT EXISTS alembic_version (
+    version_num VARCHAR(50) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);"
+
 # Run migrations
 cd /var/www/luboss-vb && source app/venv/bin/activate && alembic upgrade head
 
@@ -292,14 +352,63 @@ sudo systemctl restart luboss-backend
 
 ## Important Notes
 
-1. **Backup First**: Always backup before dropping!
-2. **Check File Size**: Make sure `production_data.sql` was created and has content
-3. **Import Errors**: Some errors during import are OK (missing tables, enum mismatches) - the important data (users, etc.) should import
-4. **Verify After**: Always check that users were imported before considering it complete
+1. **Backup First**: Always backup before dropping the database!
+2. **Create alembic_version First**: Must create `alembic_version` table with `VARCHAR(50)` before running migrations to avoid "value too long" errors
+3. **Check File Size**: Make sure `production_data.sql` was created and has content before transferring
+4. **Import Errors**: Some errors during import are OK (missing tables that will be created later, enum mismatches) - the important data (users, etc.) should import successfully
+5. **Verify After**: Always check that users were imported before considering it complete
+6. **Stop Backend First**: If the database is in use, stop the backend service before dropping: `sudo systemctl stop luboss-backend`
 
 ## Troubleshooting
 
+### Database is Being Accessed Error
+
+If you get "database is being accessed by other users" when dropping:
+
+```bash
+# Stop backend service
+sudo systemctl stop luboss-backend
+
+# Terminate all connections
+sudo -u postgres psql -c "
+SELECT pg_terminate_backend(pg_stat_activity.pid)
+FROM pg_stat_activity
+WHERE pg_stat_activity.datname = 'village_bank'
+  AND pid <> pg_backend_pid();"
+
+# Then try dropping again
+sudo -u postgres psql -c "DROP DATABASE village_bank;"
+```
+
+### Migration Error: "value too long for type character varying(32)"
+
+This means `alembic_version` table wasn't created with the correct size. Fix it:
+
+```bash
+# Drop and recreate with correct size
+sudo -u postgres psql -d village_bank -c "DROP TABLE IF EXISTS alembic_version;"
+sudo -u postgres psql -d village_bank -c "
+CREATE TABLE alembic_version (
+    version_num VARCHAR(50) NOT NULL,
+    CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
+);"
+
+# Then run migrations again
+cd /var/www/luboss-vb && source app/venv/bin/activate && alembic upgrade head
+```
+
+### Import Errors
+
 If import fails:
 - Check file was transferred: `ls -lh /tmp/production_data.sql`
-- Try importing without FK disable first
+- Check file has content: `head -20 /tmp/production_data.sql`
+- Try importing without FK disable first: `sudo -u postgres psql -d village_bank -f /tmp/production_data.sql`
 - Check PostgreSQL logs: `sudo tail -f /var/log/postgresql/postgresql-*.log`
+- Some errors are OK (missing tables that will be created later, enum mismatches)
+
+### No Users After Import
+
+If no users were imported:
+- Check the export file has user data: `grep -i "INSERT INTO.*user" production_data.sql | head -5`
+- Verify import ran: Check for COPY statements in the output
+- Use seed script as alternative: `python scripts/seed_data.py && python scripts/create_admin.py`
