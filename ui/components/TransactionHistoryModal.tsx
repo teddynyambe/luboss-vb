@@ -26,7 +26,8 @@ export default function TransactionHistoryModal({
     try {
       const response = await memberApi.getAccountTransactions(type);
       if (response.data) {
-        setTransactions(response.data.transactions);
+        const transactionData = response.data as { transactions?: any[] } | undefined;
+        setTransactions(transactionData?.transactions || []);
       } else {
         setError(response.error || 'Failed to load transactions');
       }

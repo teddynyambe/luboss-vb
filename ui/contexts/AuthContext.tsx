@@ -62,8 +62,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const login = async (email: string, password: string): Promise<boolean> => {
     try {
       const response = await authApi.login({ email, password });
-      if (response.data && response.data.access_token) {
-        api.setToken(response.data.access_token);
+      const loginData = response.data as { access_token?: string } | undefined;
+      if (loginData && loginData.access_token) {
+        api.setToken(loginData.access_token);
         // Wait a bit for token to be set, then load user
         await new Promise(resolve => setTimeout(resolve, 100));
         await loadUser();
@@ -88,8 +89,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       console.error('Registration error:', error);
       // Extract error message from response
       let errorMessage = 'Registration failed. Please try again.';
-      if (error?.response?.data?.detail) {
-        errorMessage = error.response.data.detail;
+      const errorDetail = (error?.response?.data as { detail?: string | string[] } | undefined)?.detail;
+      if (errorDetail) {
+        errorMessage = typeof errorDetail === 'string' ? errorDetail : errorDetail.join(', ');
       } else if (error?.message) {
         errorMessage = error.message;
       } else if (typeof error === 'string') {
