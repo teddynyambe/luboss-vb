@@ -258,9 +258,10 @@ export default function UserManagementPage() {
         if (member && selectedCycle) {
           // Load existing credit rating if any
           const ratingResponse = await api.get(`/api/chairman/members/${member.id}/credit-rating/${selectedCycle}`);
-          if (ratingResponse.data) {
-            setSelectedTier(ratingResponse.data.tier_id);
-            setRatingNotes(ratingResponse.data.notes || '');
+          const ratingData = ratingResponse.data as { tier_id?: string; notes?: string } | undefined;
+          if (ratingData) {
+            setSelectedTier(ratingData.tier_id);
+            setRatingNotes(ratingData.notes || '');
           }
         }
       }
