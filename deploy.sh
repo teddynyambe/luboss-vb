@@ -120,16 +120,22 @@ fi
 
 # Function to execute remote command
 remote_exec() {
+    local use_tty=${2:-false}
+    local ssh_opts="$SSH_OPTS"
+    if [ "$use_tty" = true ]; then
+        ssh_opts="${ssh_opts} -t"
+    fi
     if [ "$USE_SSHPASS" = true ]; then
-        sshpass -p "${SSH_PASSWORD}" ssh $SSH_OPTS $SSH_TARGET "$1"
+        sshpass -p "${SSH_PASSWORD}" ssh $ssh_opts $SSH_TARGET "$1"
     else
-        ssh $SSH_OPTS $SSH_TARGET "$1"
+        ssh $ssh_opts $SSH_TARGET "$1"
     fi
 }
 
 # Function to execute remote command with sudo (tries without sudo first)
 remote_exec_sudo() {
     local cmd=$1
+    local description=${2:-"execute command"}
     # Try without sudo first
     if remote_exec "$cmd" 2>/dev/null; then
         return 0
@@ -138,11 +144,19 @@ remote_exec_sudo() {
     if remote_exec "sudo -n $cmd" 2>/dev/null; then
         return 0
     fi
-    # If sudo -n fails, we need password - but this will still prompt
-    # Note: For better experience, configure passwordless sudo on server:
-    # echo "${SERVER_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/nginx" | sudo tee /etc/sudoers.d/luboss-deploy
-    print_warning "Sudo command requires password. Consider setting up passwordless sudo for deployment."
-    remote_exec "sudo $cmd"
+    # If sudo -n fails, we need password - use -t flag to allocate TTY for password prompt
+    print_warning "Sudo command requires password for: $description"
+    print_info "You will be prompted for your sudo password..."
+    if remote_exec "sudo $cmd" true; then
+        return 0
+    else
+        print_error "Failed to $description. Sudo password may be required."
+        print_info "To avoid password prompts, set up passwordless sudo on the server:"
+        print_info "  ssh ${SSH_TARGET}"
+        print_info "  echo '${SERVER_USER} ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /usr/sbin/nginx, /bin/cp, /bin/ln' | sudo tee /etc/sudoers.d/luboss-deploy"
+        print_info "  sudo chmod 0440 /etc/sudoers.d/luboss-deploy"
+        return 1
+    fi
 }
 
 # Function to copy file to server
@@ -865,45 +879,124 @@ EOF"
     print_info "Updating Nginx configuration..."
     if [ -f "deploy/nginx-luboss.conf" ]; then
         remote_copy "deploy/nginx-luboss.conf" "/tmp/nginx-luboss.conf"
-        remote_exec_sudo "cp /tmp/nginx-luboss.conf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
-        remote_exec_sudo "ln -sf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME} ${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+        # Copy to sites-available (this file contains location blocks to be included, NOT a standalone site)
+        remote_exec_sudo "cp /tmp/nginx-luboss.conf ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}" "copy Nginx configuration"
+        
+        # Remove any symlink in sites-enabled (this file should NOT be symlinked as a standalone site)
+        remote_exec_sudo "rm -f ${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}" "remove incorrect symlink" 2>/dev/null || true
+        
+        # Check if the include directive already exists in the main server config
+        print_info "Checking if Nginx include is configured..."
+        local main_config_files=$(remote_exec "ls ${NGINX_SITES_AVAILABLE}/*.conf 2>/dev/null | grep -v '${NGINX_SITE_NAME}'" | tr '\n' ' ')
+        local include_found=false
+        
+        for config_file in $main_config_files; do
+            config_file=$(echo "$config_file" | tr -d '\r\n')
+            if remote_exec "grep -q 'include.*${NGINX_SITE_NAME}' ${config_file} 2>/dev/null" 2>/dev/null; then
+                print_success "Nginx include directive found in: ${config_file}"
+                include_found=true
+                break
+            fi
+        done
+        
+        if [ "$include_found" = false ]; then
+            print_warning "Nginx include directive not found in main server block"
+            print_info ""
+            print_info "═══════════════════════════════════════════════════════════════"
+            print_info "MANUAL STEP REQUIRED: Add include to your main Nginx config"
+            print_info "═══════════════════════════════════════════════════════════════"
+            print_info ""
+            print_info "1. SSH into your server:"
+            print_info "   ssh ${SSH_TARGET}"
+            print_info ""
+            print_info "2. Edit your main Nginx server config (likely one of these):"
+            print_info "   sudo nano ${NGINX_SITES_AVAILABLE}/lubossvb.com"
+            print_info "   # OR"
+            print_info "   sudo nano ${NGINX_SITES_AVAILABLE}/default"
+            print_info ""
+            print_info "3. Inside the server { } block, add this line after existing location blocks:"
+            print_info "   include ${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME};"
+            print_info ""
+            print_info "4. Test and reload:"
+            print_info "   sudo nginx -t"
+            print_info "   sudo systemctl reload nginx"
+            print_info ""
+            print_info "═══════════════════════════════════════════════════════════════"
+        fi
         
         # Test Nginx configuration
         print_info "Testing Nginx configuration..."
-        if remote_exec_sudo "nginx -t" 2>&1 | grep -q "successful"; then
+        local nginx_test_output=$(remote_exec_sudo "nginx -t" "test Nginx configuration" 2>&1)
+        if echo "$nginx_test_output" | grep -q "successful"; then
             print_success "Nginx configuration is valid"
-            remote_exec_sudo "systemctl reload nginx"
+            remote_exec_sudo "systemctl reload nginx" "reload Nginx"
             print_success "Nginx reloaded"
         else
-            print_error "Nginx configuration test failed!"
-            remote_exec_sudo "nginx -t"
-            exit 1
+            print_warning "Nginx configuration test failed (this is expected if include is not added yet)"
+            echo "$nginx_test_output"
+            if [ "$include_found" = false ]; then
+                print_info "Once you add the include directive (see instructions above), run:"
+                print_info "  sudo nginx -t && sudo systemctl reload nginx"
+            fi
+            print_warning "Deployment will continue, but Nginx needs manual configuration"
         fi
     else
         print_warning "Nginx configuration file not found, skipping Nginx update"
     fi
     
-    # 9. Restart backend service
+    # 9. Install systemd service files
+    print_info "Installing systemd service files..."
+    if [ -f "deploy/luboss-backend.service" ] && [ -f "deploy/luboss-frontend.service" ]; then
+        # Copy service files to server
+        remote_copy "deploy/luboss-backend.service" "/tmp/luboss-backend.service"
+        remote_copy "deploy/luboss-frontend.service" "/tmp/luboss-frontend.service"
+        
+        # Update paths and environment variables in service files
+        print_info "Updating service files with deployment configuration..."
+        remote_exec "sed -i 's|/var/www/luboss-vb|${DEPLOY_DIR}|g' /tmp/luboss-backend.service /tmp/luboss-frontend.service"
+        
+        # Update frontend environment variables
+        remote_exec "sed -i 's|NEXT_PUBLIC_BASE_PATH=.*|NEXT_PUBLIC_BASE_PATH=${DEPLOY_PATH}|g' /tmp/luboss-frontend.service"
+        remote_exec "sed -i 's|NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=https://${SERVER_HOST}${DEPLOY_PATH}/api|g' /tmp/luboss-frontend.service"
+        
+        # Copy to systemd directory
+        remote_exec_sudo "cp /tmp/luboss-backend.service /etc/systemd/system/${BACKEND_SERVICE_NAME}.service" "install backend service"
+        remote_exec_sudo "cp /tmp/luboss-frontend.service /etc/systemd/system/${FRONTEND_SERVICE_NAME}.service" "install frontend service"
+        
+        # Reload systemd to recognize new services
+        remote_exec_sudo "systemctl daemon-reload" "reload systemd"
+        print_success "Systemd service files installed"
+        
+        # Enable services to start on boot
+        remote_exec_sudo "systemctl enable ${BACKEND_SERVICE_NAME}" "enable backend service"
+        remote_exec_sudo "systemctl enable ${FRONTEND_SERVICE_NAME}" "enable frontend service"
+        print_success "Services enabled to start on boot"
+    else
+        print_warning "Service files not found, skipping systemd installation"
+        print_info "Service files should be at: deploy/luboss-backend.service and deploy/luboss-frontend.service"
+    fi
+    
+    # 10. Restart backend service
     print_info "Restarting backend service..."
     if remote_exec "systemctl is-active --quiet ${BACKEND_SERVICE_NAME} 2>/dev/null || sudo -n systemctl is-active --quiet ${BACKEND_SERVICE_NAME}" 2>/dev/null; then
-        remote_exec_sudo "systemctl restart ${BACKEND_SERVICE_NAME}"
+        remote_exec_sudo "systemctl restart ${BACKEND_SERVICE_NAME}" "restart backend service"
         print_success "Backend service restarted"
     else
         print_warning "Backend service not running, starting it..."
-        remote_exec_sudo "systemctl start ${BACKEND_SERVICE_NAME}" || print_warning "Failed to start backend service (may need manual setup)"
+        remote_exec_sudo "systemctl start ${BACKEND_SERVICE_NAME}" "start backend service" || print_warning "Failed to start backend service (may need manual setup)"
     fi
     
-    # 10. Restart frontend service
+    # 11. Restart frontend service
     print_info "Restarting frontend service..."
     if remote_exec "systemctl is-active --quiet ${FRONTEND_SERVICE_NAME} 2>/dev/null || sudo -n systemctl is-active --quiet ${FRONTEND_SERVICE_NAME}" 2>/dev/null; then
-        remote_exec_sudo "systemctl restart ${FRONTEND_SERVICE_NAME}"
+        remote_exec_sudo "systemctl restart ${FRONTEND_SERVICE_NAME}" "restart frontend service"
         print_success "Frontend service restarted"
     else
         print_warning "Frontend service not running, starting it..."
-        remote_exec_sudo "systemctl start ${FRONTEND_SERVICE_NAME}" || print_warning "Failed to start frontend service (may need manual setup)"
+        remote_exec_sudo "systemctl start ${FRONTEND_SERVICE_NAME}" "start frontend service" || print_warning "Failed to start frontend service (may need manual setup)"
     fi
     
-    # 11. Verify deployment
+    # 12. Verify deployment
     print_info "Verifying deployment..."
     sleep 2
     

@@ -19,26 +19,54 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Check if table exists before modifying
+    from sqlalchemy import inspect
+    conn = op.get_bind()
+    inspector = inspect(conn)
+    tables = inspector.get_table_names()
+    
+    if 'credit_rating_interest_range' not in tables:
+        # Table doesn't exist yet, skip this migration
+        # The table will be created in the initial schema with the correct structure
+        return
+    
+    # Check if column already exists (might have been created in initial schema)
+    columns = [col['name'] for col in inspector.get_columns('credit_rating_interest_range')]
+    
+    if 'effective_rate_percent' in columns:
+        # Column already exists, skip
+        return
+    
     # Add new effective_rate_percent column
     op.add_column('credit_rating_interest_range', 
                   sa.Column('effective_rate_percent', sa.Numeric(5, 2), nullable=True))
     
     # Migrate data: use average of min and max, or min if max is null, or default to 12.00
-    op.execute("""
-        UPDATE credit_rating_interest_range
-        SET effective_rate_percent = COALESCE(
-            (min_rate_percent + max_rate_percent) / 2.0,
-            min_rate_percent,
-            12.00
-        )
-    """)
+    if 'min_rate_percent' in columns and 'max_rate_percent' in columns:
+        op.execute("""
+            UPDATE credit_rating_interest_range
+            SET effective_rate_percent = COALESCE(
+                (min_rate_percent + max_rate_percent) / 2.0,
+                min_rate_percent,
+                12.00
+            )
+        """)
+    else:
+        # Set default value if old columns don't exist
+        op.execute("""
+            UPDATE credit_rating_interest_range
+            SET effective_rate_percent = 12.00
+            WHERE effective_rate_percent IS NULL
+        """)
     
     # Make the column NOT NULL now that we have data
     op.alter_column('credit_rating_interest_range', 'effective_rate_percent', nullable=False)
     
-    # Drop old columns
-    op.drop_column('credit_rating_interest_range', 'min_rate_percent')
-    op.drop_column('credit_rating_interest_range', 'max_rate_percent')
+    # Drop old columns if they exist
+    if 'min_rate_percent' in columns:
+        op.drop_column('credit_rating_interest_range', 'min_rate_percent')
+    if 'max_rate_percent' in columns:
+        op.drop_column('credit_rating_interest_range', 'max_rate_percent')
 
 
 def downgrade() -> None:

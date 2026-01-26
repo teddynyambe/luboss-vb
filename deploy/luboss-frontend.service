@@ -10,7 +10,9 @@ Group=www-data
 WorkingDirectory=/var/www/luboss-vb/ui
 Environment="NODE_ENV=production"
 Environment="PORT=3000"
-ExecStart=/usr/bin/npm start
+Environment="NEXT_PUBLIC_BASE_PATH=/test"
+Environment="NEXT_PUBLIC_API_URL=https://lubossvb.com/test/api"
+ExecStart=/usr/bin/npm run start
 Restart=always
 RestartSec=10
 StandardOutput=journal
