@@ -89,7 +89,12 @@ CREATE TABLE IF NOT EXISTS alembic_version (
     CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
 );"
 
-# Verify it was created
+# Grant permissions to luboss user
+sudo -u postgres psql -d village_bank -c "
+GRANT ALL PRIVILEGES ON TABLE alembic_version TO luboss;
+ALTER TABLE alembic_version OWNER TO luboss;"
+
+# Verify it was created and has correct permissions
 sudo -u postgres psql -d village_bank -c "\d alembic_version"
 ```
 
@@ -326,12 +331,14 @@ sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE village_bank TO lubos
 # Enable extensions
 sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# Create alembic_version table with correct size
+# Create alembic_version table with correct size and permissions
 sudo -u postgres psql -d village_bank -c "
 CREATE TABLE IF NOT EXISTS alembic_version (
     version_num VARCHAR(50) NOT NULL,
     CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
-);"
+);
+GRANT ALL PRIVILEGES ON TABLE alembic_version TO luboss;
+ALTER TABLE alembic_version OWNER TO luboss;"
 
 # Run migrations
 cd /var/www/luboss-vb && source app/venv/bin/activate && alembic upgrade head
@@ -391,7 +398,23 @@ sudo -u postgres psql -d village_bank -c "
 CREATE TABLE alembic_version (
     version_num VARCHAR(50) NOT NULL,
     CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num)
-);"
+);
+GRANT ALL PRIVILEGES ON TABLE alembic_version TO luboss;
+ALTER TABLE alembic_version OWNER TO luboss;"
+
+# Then run migrations again
+cd /var/www/luboss-vb && source app/venv/bin/activate && alembic upgrade head
+```
+
+### Migration Error: "permission denied for table alembic_version"
+
+The `luboss` user doesn't have permissions on the table. Fix it:
+
+```bash
+# Grant permissions
+sudo -u postgres psql -d village_bank -c "
+GRANT ALL PRIVILEGES ON TABLE alembic_version TO luboss;
+ALTER TABLE alembic_version OWNER TO luboss;"
 
 # Then run migrations again
 cd /var/www/luboss-vb && source app/venv/bin/activate && alembic upgrade head
