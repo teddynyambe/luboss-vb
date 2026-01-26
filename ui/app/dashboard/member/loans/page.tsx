@@ -131,8 +131,8 @@ export default function LoanApplicationPage() {
       if (response.data) {
         setLoanEligibility(response.data);
         // If available terms exist, set the first one as default (only if not preserving form data)
-        const eligibilityData = response.data as { available_terms?: Array<{ term_months?: number }> } | undefined;
-        if (!preserveFormData && eligibilityData?.available_terms && eligibilityData.available_terms.length > 0) {
+        const eligibilityData = response.data as { available_terms?: Array<{ term_months?: number }> };
+        if (!preserveFormData && eligibilityData.available_terms && eligibilityData.available_terms.length > 0) {
           const firstTerm = eligibilityData.available_terms[0];
           if (firstTerm.term_months) {
             setFormData(prev => ({ ...prev, term_months: firstTerm.term_months }));
