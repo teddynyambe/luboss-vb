@@ -76,7 +76,8 @@ export default function PaymentProofPage() {
     try {
       const response = await memberApi.getDeclarations();
       if (response.data) {
-        const pending = response.data.filter(d => d.status === 'pending');
+        const declarations = Array.isArray(response.data) ? response.data : [];
+        const pending = declarations.filter(d => d.status === 'pending');
         setDeclarations(pending);
       }
     } catch (err) {
@@ -575,7 +576,7 @@ export default function PaymentProofPage() {
                             {getStatusBadge(deposit.status)}
                           </div>
                           <div className="text-sm text-blue-600 space-y-1">
-                            <p>Amount: K{parseFloat(deposit.amount.toString()).toLocaleString()}</p>
+                            <p>Amount: K{parseFloat(String(deposit.amount)).toLocaleString()}</p>
                             <p>Uploaded: {formatDate(deposit.uploaded_at)}</p>
                             {deposit.reference && <p>Reference: {deposit.reference}</p>}
                           </div>

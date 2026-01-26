@@ -43,7 +43,8 @@ export default function UploadDepositProofPage() {
       const response = await memberApi.getDeclarations();
       if (response.data) {
         // Filter for PENDING declarations (those that need proof)
-        const pending = response.data.filter(d => d.status === 'pending');
+        const declarations = Array.isArray(response.data) ? response.data : [];
+        const pending = declarations.filter(d => d.status === 'pending');
         setDeclarations(pending);
       }
     } catch (err) {

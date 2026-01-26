@@ -245,7 +245,8 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
     try {
       const response = await memberApi.getDeclarations();
       if (response.data) {
-        const declaration = response.data.find(d => d.id === declarationId);
+        const declarations = Array.isArray(response.data) ? response.data : [];
+        const declaration = declarations.find(d => d.id === declarationId);
         if (declaration) {
           // Check if it's the current month and can be edited
           // Parse date string (YYYY-MM-DD) without timezone conversion

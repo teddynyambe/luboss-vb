@@ -111,7 +111,8 @@ export default function UserManagementPage() {
       if (response.data && Array.isArray(response.data)) {
         setMembers(response.data);
         // Merge member data with users
-        const memberMap = new Map(response.data.map((m: any) => [m.user_id, m]));
+        const members = Array.isArray(response.data) ? response.data : [];
+        const memberMap = new Map(members.map((m: any) => [m.user_id, m]));
         setUsers(prevUsers => 
           prevUsers.map(user => {
             const member = memberMap.get(user.id);
@@ -284,7 +285,8 @@ export default function UserManagementPage() {
       
       const membersResponse = await api.get('/api/chairman/members');
       if (membersResponse.data) {
-        const member = membersResponse.data.find((m: any) => m.user_id === showCreditRatingModal);
+        const members = Array.isArray(membersResponse.data) ? membersResponse.data : [];
+        const member = members.find((m: any) => m.user_id === showCreditRatingModal);
         if (member) {
           memberId = member.id; // Use member_id if found
         }
