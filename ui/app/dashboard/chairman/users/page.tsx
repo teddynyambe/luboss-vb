@@ -260,7 +260,7 @@ export default function UserManagementPage() {
           const ratingResponse = await api.get(`/api/chairman/members/${member.id}/credit-rating/${selectedCycle}`);
           const ratingData = ratingResponse.data as { tier_id?: string; notes?: string } | undefined;
           if (ratingData) {
-            setSelectedTier(ratingData.tier_id);
+            setSelectedTier(ratingData.tier_id || '');
             setRatingNotes(ratingData.notes || '');
           }
         }
