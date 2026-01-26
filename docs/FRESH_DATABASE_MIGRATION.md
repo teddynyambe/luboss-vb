@@ -2,12 +2,40 @@
 
 ## Overview
 
-This guide will:
-1. Drop the production database
-2. Create a new empty database
-3. Run migrations to create schema
-4. Export all data from local database
-5. Import data to production
+This guide provides a complete process to:
+1. Backup production database (safety first!)
+2. Stop backend service to release database connections
+3. Drop and recreate the production database
+4. Enable required extensions (pgvector)
+5. Create alembic_version table with correct permissions
+6. Run migrations to create schema
+7. Create any missing tables (if needed)
+8. Export all data from local database
+9. Transfer data to production server
+10. Import all data to production
+11. Verify data was imported correctly
+12. Restart backend service
+
+**✅ This process has been tested and verified to work successfully.**
+
+## Quick Summary
+
+This migration process will:
+- ✅ Export all production data (users, declarations, cycles, loans, deposits, etc.) from local database
+- ✅ Create a fresh database on production server
+- ✅ Run all migrations to create the complete schema
+- ✅ Import all data to production
+- ✅ Verify all data was imported correctly
+
+**Time Required:** Approximately 5-10 minutes depending on data size.
+
+**Data Included:** All tables except staging tables (`stg_*`). This includes:
+- Users, member profiles, roles
+- Cycles, declarations, deposits
+- Loans, repayments, penalties
+- Credit ratings, interest ranges
+- Ledger accounts, journal entries
+- All other production data
 
 ## Step 1: Backup Production Database (Important!)
 
@@ -75,7 +103,7 @@ sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;
 sudo -u postgres psql -d village_bank -c "\dx"
 ```
 
-## Step 4: Create alembic_version Table (Important!)
+## Step 5: Create alembic_version Table (Important!)
 
 **On production server:**
 
@@ -100,7 +128,7 @@ sudo -u postgres psql -d village_bank -c "\d alembic_version"
 
 **Why?** Some migration revision IDs are 32+ characters long, and the default `VARCHAR(32)` causes errors.
 
-## Step 5: Run Migrations
+## Step 6: Run Migrations
 
 **On production server:**
 
@@ -118,9 +146,13 @@ alembic current
 sudo -u postgres psql -d village_bank -c "\dt" | head -20
 ```
 
-## Step 5a: Create Missing Table (If Needed)
+## Step 6a: Create Missing Tables (If Needed)
 
-If `credit_rating_interest_range` table is missing after migrations, create it:
+Some tables may not be created by migrations. Create them if missing:
+
+### Create credit_rating_interest_range Table
+
+This table is required but may not be in the initial schema migration:
 
 ```bash
 # Create the missing credit_rating_interest_range table
@@ -145,7 +177,7 @@ ALTER TABLE credit_rating_interest_range OWNER TO luboss;
 sudo -u postgres psql -d village_bank -c "\d credit_rating_interest_range"
 ```
 
-## Step 6: Export Data from Local Database
+## Step 7: Export Data from Local Database
 
 **On your local machine:**
 
@@ -169,7 +201,10 @@ pg_dump -h localhost -U teddy -d village_bank \
 
 # Verify the export includes important tables
 echo "Checking export includes key tables:"
-grep -E "^(COPY|INSERT INTO) (\"user\"|declaration|loan|deposit_proof|cycle|credit_rating)" production_data.sql | head -20
+grep -E "^(COPY|INSERT INTO) (\"user\"|declaration|loan|deposit_proof|cycle|credit_rating_interest_range)" production_data.sql | head -20
+
+# Check file size to ensure it has content
+ls -lh production_data.sql
 
 # Check file was created
 ls -lh production_data.sql
@@ -184,7 +219,7 @@ ls -lh production_data.sql
 scp production_data.sql teddy@luboss95vb.com:/tmp/
 ```
 
-## Step 8: Import Data to Production
+## Step 9: Import Data to Production
 
 **On production server:**
 
@@ -217,14 +252,16 @@ UNION ALL SELECT 'user_role', COUNT(*) FROM user_role
 UNION ALL SELECT 'ledger_account', COUNT(*) FROM ledger_account
 UNION ALL SELECT 'cycle', COUNT(*) FROM cycle
 UNION ALL SELECT 'declaration', COUNT(*) FROM declaration
-UNION ALL SELECT 'loan', COUNT(*) FROM loan;
+UNION ALL SELECT 'loan', COUNT(*) FROM loan
+UNION ALL SELECT 'deposit_proof', COUNT(*) FROM deposit_proof
+UNION ALL SELECT 'credit_rating_interest_range', COUNT(*) FROM credit_rating_interest_range;
 EOF
 
 # List some users
 sudo -u postgres psql -d village_bank -c "SELECT email, first_name, last_name FROM \"user\" LIMIT 10;"
 ```
 
-## Step 10: Restart Backend
+## Step 11: Restart Backend
 
 **On production server:**
 
@@ -290,7 +327,7 @@ sudo -u postgres psql -c "CREATE DATABASE village_bank OWNER luboss;"
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE village_bank TO luboss;"
 echo "✅ Database created"
 
-echo "=== Step 5: Enabling extensions ==="
+echo "=== Step 4: Enabling extensions ==="
 sudo -u postgres psql -d village_bank -c "CREATE EXTENSION IF NOT EXISTS vector;"
 echo "✅ Extensions enabled"
 
@@ -302,13 +339,13 @@ CREATE TABLE IF NOT EXISTS alembic_version (
 );"
 echo "✅ alembic_version table created"
 
-echo "=== Step 7: Running migrations ==="
+echo "=== Step 6: Running migrations ==="
 cd /var/www/luboss-vb
 source app/venv/bin/activate
 alembic upgrade head
 echo "✅ Migrations complete"
 
-echo "=== Step 7a: Creating missing credit_rating_interest_range table (if needed) ==="
+echo "=== Step 6a: Creating missing credit_rating_interest_range table (if needed) ==="
 sudo -u postgres psql -d village_bank -c "
 CREATE TABLE IF NOT EXISTS credit_rating_interest_range (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -324,7 +361,7 @@ GRANT ALL PRIVILEGES ON TABLE credit_rating_interest_range TO luboss;
 ALTER TABLE credit_rating_interest_range OWNER TO luboss;
 " 2>/dev/null && echo "✅ Table created/verified" || echo "⚠️  Table may already exist"
 
-echo "=== Step 8: Importing data ==="
+echo "=== Step 7: Importing data ==="
 sudo -u postgres psql -d village_bank << 'EOF'
 SET session_replication_role = 'replica';
 \i /tmp/production_data.sql
@@ -335,7 +372,7 @@ echo "✅ Data imported"
 echo "=== Step 9: Verifying ==="
 sudo -u postgres psql -d village_bank -c "SELECT COUNT(*) as user_count FROM \"user\";"
 
-echo "=== Step 10: Restarting backend ==="
+echo "=== Step 9: Restarting backend ==="
 sudo systemctl restart luboss-backend
 sleep 2
 sudo systemctl status luboss-backend --no-pager -l | head -10
@@ -398,8 +435,15 @@ SET session_replication_role = 'replica';
 SET session_replication_role = 'origin';
 EOF
 
-# Verify
-sudo -u postgres psql -d village_bank -c "SELECT COUNT(*) FROM \"user\";"
+# Verify all key tables
+sudo -u postgres psql -d village_bank << 'EOF'
+SELECT 'user' as table_name, COUNT(*) as rows FROM "user"
+UNION ALL SELECT 'declaration', COUNT(*) FROM declaration
+UNION ALL SELECT 'cycle', COUNT(*) FROM cycle
+UNION ALL SELECT 'loan', COUNT(*) FROM loan
+UNION ALL SELECT 'deposit_proof', COUNT(*) FROM deposit_proof
+UNION ALL SELECT 'credit_rating_interest_range', COUNT(*) FROM credit_rating_interest_range;
+EOF
 
 # Restart backend
 sudo systemctl restart luboss-backend
@@ -408,11 +452,14 @@ sudo systemctl restart luboss-backend
 ## Important Notes
 
 1. **Backup First**: Always backup before dropping the database!
-2. **Create alembic_version First**: Must create `alembic_version` table with `VARCHAR(50)` before running migrations to avoid "value too long" errors
-3. **Check File Size**: Make sure `production_data.sql` was created and has content before transferring
-4. **Import Errors**: Some errors during import are OK (missing tables that will be created later, enum mismatches) - the important data (users, etc.) should import successfully
-5. **Verify After**: Always check that users were imported before considering it complete
-6. **Stop Backend First**: If the database is in use, stop the backend service before dropping: `sudo systemctl stop luboss-backend`
+2. **Stop Backend First**: Stop the backend service before dropping to avoid "database is being accessed" errors
+3. **Create alembic_version First**: Must create `alembic_version` table with `VARCHAR(50)` and grant permissions to `luboss` user before running migrations
+4. **Grant Permissions**: Always grant permissions to `luboss` user on any tables created manually
+5. **Create Missing Tables**: Some tables like `credit_rating_interest_range` may not be in migrations - create them manually if needed
+6. **Check File Size**: Make sure `production_data.sql` was created and has content before transferring
+7. **Import Errors**: Some errors during import are OK (missing tables that will be created later, enum mismatches) - the important data (users, declarations, cycles, etc.) should import successfully
+8. **Verify After**: Always check that users, declarations, and cycles were imported before considering it complete
+9. **Export Includes All Data**: The export command only excludes staging tables (`stg_*`) - all production data (declarations, loans, deposits, cycles, etc.) is included
 
 ## Troubleshooting
 
@@ -480,6 +527,54 @@ If import fails:
 ### No Users After Import
 
 If no users were imported:
-- Check the export file has user data: `grep -i "INSERT INTO.*user" production_data.sql | head -5`
-- Verify import ran: Check for COPY statements in the output
+- Check the export file has user data: `grep -i "INSERT INTO.*user\|COPY.*user" production_data.sql | head -5`
+- Verify import ran: Check for COPY statements in the output (they show row counts)
 - Use seed script as alternative: `python scripts/seed_data.py && python scripts/create_admin.py`
+
+### Missing credit_rating_interest_range Table
+
+If you get errors about missing `credit_rating_interest_range` table:
+- Create it using Step 5a above
+- Grant permissions to `luboss` user
+- Restart backend: `sudo systemctl restart luboss-backend`
+
+### Verify All Data Was Imported
+
+After import, verify all key tables have data:
+
+```bash
+sudo -u postgres psql -d village_bank << 'EOF'
+SELECT 
+    'user' as table_name, COUNT(*) as rows FROM "user"
+UNION ALL SELECT 'declaration', COUNT(*) FROM declaration
+UNION ALL SELECT 'cycle', COUNT(*) FROM cycle
+UNION ALL SELECT 'loan', COUNT(*) FROM loan
+UNION ALL SELECT 'deposit_proof', COUNT(*) FROM deposit_proof
+UNION ALL SELECT 'credit_rating_interest_range', COUNT(*) FROM credit_rating_interest_range
+ORDER BY table_name;
+EOF
+```
+
+All tables should show row counts > 0 if data was imported successfully.
+
+## Success Checklist
+
+After completing the migration, verify:
+
+- [ ] ✅ Database created successfully
+- [ ] ✅ All migrations ran without errors
+- [ ] ✅ `credit_rating_interest_range` table exists
+- [ ] ✅ Users imported (check count > 0)
+- [ ] ✅ Declarations imported (check count > 0)
+- [ ] ✅ Cycles imported (check count > 0)
+- [ ] ✅ Backend service restarted successfully
+- [ ] ✅ API health check returns `{"status":"healthy"}`
+- [ ] ✅ Can log in with existing user credentials
+- [ ] ✅ Application loads without errors
+
+## Notes
+
+- **Export includes ALL data**: The export command only excludes staging tables. All production data (declarations, cycles, loans, deposits, credit ratings, etc.) is included.
+- **Some import errors are OK**: You may see errors for tables that don't exist yet or enum mismatches, but the important data (users, declarations, cycles) should import successfully.
+- **Missing tables**: If a table is missing after migrations (like `credit_rating_interest_range`), create it manually using Step 6a.
+- **Permissions**: Always grant permissions to the `luboss` user on any manually created tables.
