@@ -21,6 +21,7 @@ from typing import Optional, List
 from decimal import Decimal
 from datetime import date, datetime
 from uuid import UUID
+import uuid
 import os
 from pathlib import Path
 from app.core.config import DEPOSIT_PROOFS_DIR
@@ -357,16 +358,28 @@ def get_applicable_penalties(
                         system_user_id = get_system_user_id(db)
                         if system_user_id:
                             # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
-                            late_penalty = PenaltyRecord(
-                                member_id=member_profile.id,
-                                penalty_type_id=penalty_type_id,
-                                status=PenaltyRecordStatus.APPROVED,  # Auto-approved for cycle-defined penalties
-                                created_by=system_user_id,  # Use admin user for system-generated penalties
-                                notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
-                            )
-                            db.add(late_penalty)
+                            # Use raw SQL to insert with proper enum casting to avoid SQLAlchemy enum name conversion
+                            from sqlalchemy import text
+                            status_value = PenaltyRecordStatus.APPROVED.value  # "approved" - lowercase string
+                            
+                            # Insert using raw SQL to ensure lowercase enum value is used
+                            # Cast the string to the PostgreSQL enum type using CAST() function
+                            penalty_id = uuid.uuid4()
+                            db.execute(text("""
+                                INSERT INTO penalty_record 
+                                (id, member_id, penalty_type_id, status, created_by, notes, date_issued)
+                                VALUES 
+                                (CAST(:id AS uuid), CAST(:member_id AS uuid), CAST(:penalty_type_id AS uuid), 
+                                 CAST(:status AS penaltyrecordstatus), CAST(:created_by AS uuid), :notes, NOW())
+                            """), {
+                                'id': str(penalty_id),
+                                'member_id': str(member_profile.id),
+                                'penalty_type_id': str(penalty_type_id),
+                                'status': status_value,  # "approved" - lowercase string
+                                'created_by': str(system_user_id),
+                                'notes': f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
+                            })
                             db.commit()
-                            db.refresh(late_penalty)
     
     # Get all cycle phases to check auto_apply_penalty flags
     all_phases = db.query(CyclePhase).filter(
@@ -574,8 +587,27 @@ def get_my_declarations(
     
     today = date.today()
     
-    return [
-        {
+    result = []
+    for d in declarations:
+        # Check for rejected deposit proof
+        rejected_proof = db.query(DepositProof).filter(
+            DepositProof.declaration_id == d.id,
+            DepositProof.status == DepositProofStatus.REJECTED.value
+        ).first()
+        
+        rejected_deposit_proof = None
+        if rejected_proof:
+            rejected_deposit_proof = {
+                "id": str(rejected_proof.id),
+                "amount": float(rejected_proof.amount),
+                "reference": rejected_proof.reference,
+                "treasurer_comment": rejected_proof.treasurer_comment,
+                "member_response": rejected_proof.member_response,
+                "upload_path": rejected_proof.upload_path,
+                "rejected_at": rejected_proof.rejected_at.isoformat() if rejected_proof.rejected_at else None
+            }
+        
+        result.append({
             "id": str(d.id),
             "cycle_id": str(d.cycle_id),
             "effective_month": d.effective_month.isoformat(),
@@ -592,14 +624,12 @@ def get_my_declarations(
                 _can_edit_declaration(d.effective_month) and d.status == DeclarationStatus.PENDING
             ) or (
                 # Allow editing if there's a rejected deposit proof for this declaration
-                db.query(DepositProof).filter(
-                    DepositProof.declaration_id == d.id,
-                    DepositProof.status == DepositProofStatus.REJECTED.value
-                ).first() is not None
-            )
-        }
-        for d in declarations
-    ]
+                rejected_proof is not None
+            ),
+            "rejected_deposit_proof": rejected_deposit_proof
+        })
+    
+    return result
 
 
 @router.get("/declarations/current-month")
@@ -636,6 +666,24 @@ def get_current_month_declaration(
     if not declaration:
         return None
     
+    # Check for rejected deposit proof
+    rejected_proof = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration.id,
+        DepositProof.status == DepositProofStatus.REJECTED.value
+    ).first()
+    
+    rejected_deposit_proof = None
+    if rejected_proof:
+        rejected_deposit_proof = {
+            "id": str(rejected_proof.id),
+            "amount": float(rejected_proof.amount),
+            "reference": rejected_proof.reference,
+            "treasurer_comment": rejected_proof.treasurer_comment,
+            "member_response": rejected_proof.member_response,
+            "upload_path": rejected_proof.upload_path,
+            "rejected_at": rejected_proof.rejected_at.isoformat() if rejected_proof.rejected_at else None
+        }
+    
     return {
         "id": str(declaration.id),
         "cycle_id": str(declaration.cycle_id),
@@ -649,7 +697,8 @@ def get_current_month_declaration(
         "status": declaration.status.value,
         "created_at": declaration.created_at.isoformat() if declaration.created_at else None,
         "updated_at": declaration.updated_at.isoformat() if declaration.updated_at else None,
-        "can_edit": _can_edit_declaration(declaration.effective_month)
+        "can_edit": _can_edit_declaration(declaration.effective_month) or (rejected_proof is not None),
+        "rejected_deposit_proof": rejected_deposit_proof
     }
 
 
@@ -1016,7 +1065,7 @@ def apply_for_loan(
                             late_penalty = PenaltyRecord(
                                 member_id=member_profile.id,
                                 penalty_type_id=penalty_type_id,
-                                status=PenaltyRecordStatus.APPROVED,  # Auto-approved for cycle-defined penalties
+                                status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
                                 created_by=system_user_id,  # Use admin user for system-generated penalties
                                 notes=f"Late Loan Application - Loan application submitted after day {monthly_end_day} of {today.strftime('%B %Y')} (Loan application period ends on day {monthly_end_day})"
                             )
@@ -1495,13 +1544,19 @@ def get_account_transactions(
             from sqlalchemy import extract
             from datetime import date as date_type
             
-            # Get member's penalties account
+            # Get member's penalties account (for payments/credits)
             penalties_account = db.query(LedgerAccount).filter(
                 LedgerAccount.member_id == member_profile.id,
                 LedgerAccount.account_name.ilike("%penalties%")
             ).first()
             
-            # 1. Get journal lines (payment entries) for this account
+            # Get member's savings account (for penalty charges/debits)
+            savings_account = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == member_profile.id,
+                LedgerAccount.account_name.ilike("%savings%")
+            ).first()
+            
+            # 1. Get journal lines (payment entries/credits) from penalties account
             if penalties_account:
                 journal_lines = db.query(JournalLine).join(JournalEntry).filter(
                     JournalLine.ledger_account_id == penalties_account.id,
@@ -1524,17 +1579,95 @@ def get_account_transactions(
                         "is_penalty_record": False
                     })
             
+            # 1b. Get journal lines (penalty charges/debits) from savings account
+            # When penalties are approved, they debit the savings account
+            penalty_charge_lines = []
+            if savings_account:
+                penalty_charge_lines = db.query(JournalLine).join(JournalEntry).filter(
+                    JournalLine.ledger_account_id == savings_account.id,
+                    JournalEntry.reversed_by.is_(None),  # Exclude reversed entries
+                    JournalEntry.source_type == "penalty",  # Only penalty-related entries
+                    JournalLine.debit_amount > 0  # Only debits (charges)
+                ).order_by(JournalEntry.entry_date.desc()).all()
+                
+                for line in penalty_charge_lines:
+                    # Get the penalty record to show details
+                    penalty_record = None
+                    if line.journal_entry.source_ref:
+                        try:
+                            penalty_uuid = UUID(line.journal_entry.source_ref)
+                            penalty_record = db.query(PenaltyRecord).filter(PenaltyRecord.id == penalty_uuid).first()
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Build description
+                    description = line.description or line.journal_entry.description or "Penalty charged"
+                    if penalty_record and penalty_record.penalty_type:
+                        description = f"{penalty_record.penalty_type.name}"
+                        if penalty_record.notes:
+                            description += f" - {penalty_record.notes}"
+                    
+                    debit_val = float(line.debit_amount) if line.debit_amount is not None else 0.0
+                    
+                    transactions.append({
+                        "id": f"penalty_charge_{line.id}",
+                        "date": line.journal_entry.entry_date.isoformat() if line.journal_entry.entry_date else None,
+                        "description": description,
+                        "debit": debit_val,
+                        "credit": 0.0,
+                        "amount": debit_val,
+                        "is_penalty_record": False,
+                        "is_penalty_charge": True
+                    })
+            
             # 2. Get individual penalty records (PENDING and APPROVED only).
             # PAID penalties are excluded; they appear as journal lines from deposit approvals above.
-            # Use text() with explicit enum casting to ensure lowercase values are used
+            # Use text() with explicit enum casting - handle both uppercase (old) and lowercase (new) enum values
             # SQLAlchemy's SQLEnum uses enum names (PENDING) instead of values (pending), so we work around it
             from sqlalchemy import text
+            # Check database enum values and use appropriate case
+            # Production uses lowercase, but local might still have uppercase
+            enum_check = db.execute(text("""
+                SELECT enumlabel 
+                FROM pg_enum 
+                WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'penaltyrecordstatus')
+                AND enumlabel IN ('pending', 'PENDING')
+                LIMIT 1;
+            """)).scalar()
+            
+            if enum_check and enum_check == 'pending':
+                # Production database with lowercase enum
+                status_filter = text("penalty_record.status IN ('pending', 'approved')")
+            else:
+                # Local database with uppercase enum (legacy)
+                status_filter = text("penalty_record.status IN ('PENDING', 'APPROVED')")
+            
             penalty_records = db.query(PenaltyRecord).filter(
                 PenaltyRecord.member_id == member_profile.id,
-                text("penalty_record.status IN ('pending', 'approved')")
+                status_filter
             ).order_by(PenaltyRecord.date_issued.desc()).all()
             
+            # Track which penalties already appear in journal lines (to avoid duplicates in penalty records section)
+            # Build a set of penalty IDs that we found in journal lines above
+            penalties_in_journal_lines = set()
+            if savings_account:
+                # Get all penalty IDs from journal lines we already processed above
+                for line in penalty_charge_lines:
+                    if line.journal_entry.source_ref:
+                        try:
+                            penalty_id = UUID(line.journal_entry.source_ref)
+                            penalties_in_journal_lines.add(penalty_id)
+                        except (ValueError, TypeError):
+                            pass
+            
             for penalty in penalty_records:
+                # Skip APPROVED penalties that already appear in journal lines (to avoid duplicates)
+                # Only skip if we actually found them in the journal lines section above
+                # This ensures that:
+                # 1. Penalties without journal entries (old data) still show in penalty records
+                # 2. Penalties with journal entries that don't show in journal lines (edge cases) still show in penalty records
+                if penalty.status == PenaltyRecordStatus.APPROVED and penalty.id in penalties_in_journal_lines:
+                    continue
                 penalty_type = penalty.penalty_type
                 # Handle None values safely
                 if penalty_type and penalty_type.fee_amount is not None:
@@ -1568,6 +1701,9 @@ def get_account_transactions(
             
             # Note: Late declaration penalties are now created as PenaltyRecord entries
             # automatically when declarations are created late, so they appear in section 2 above
+            
+            # Sort all transactions by date (most recent first)
+            transactions.sort(key=lambda x: x["date"] or "", reverse=True)
         
         elif type == "social_fund":
             # Get member's social fund account (member-specific)
@@ -1888,7 +2024,7 @@ def upload_deposit_proof(
                             late_penalty = PenaltyRecord(
                                 member_id=member_profile.id,
                                 penalty_type_id=penalty_type_id,
-                                status=PenaltyRecordStatus.APPROVED,  # Auto-approved for cycle-defined penalties
+                                status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
                                 created_by=system_user_id,  # Use admin user for system-generated penalties
                                 notes=f"Late Deposits - Deposit submitted after day {monthly_end_day} of {next_month_name} (Deposit period: {start_s} of {effective_name} to {end_s} of {next_month_name})"
                             )
@@ -1987,4 +2123,184 @@ def respond_to_deposit_proof_comment(
     return {
         "message": "Response submitted successfully",
         "deposit_id": str(deposit.id)
+    }
+
+
+@router.put("/deposits/{deposit_id}/resubmit")
+def resubmit_deposit_proof(
+    deposit_id: str,
+    file: Optional[UploadFile] = File(None),
+    amount: Optional[float] = Form(None),
+    reference: Optional[str] = Form(None),
+    member_response: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Resubmit a rejected deposit proof.
+    
+    Allows updating a REJECTED deposit proof with optional:
+    - New file (if provided, replaces old file)
+    - Updated amount (must match declaration total)
+    - Updated reference
+    - Member response/comment
+    
+    Changes deposit proof status from REJECTED to SUBMITTED
+    and declaration status from PENDING to PROOF.
+    """
+    from uuid import UUID
+    from app.models.cycle import Cycle, CycleStatus
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        deposit_uuid = UUID(deposit_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid deposit ID format")
+    
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+    
+    if member_profile.status != MemberStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Member account is not active")
+    
+    # Get deposit proof
+    deposit = db.query(DepositProof).filter(DepositProof.id == deposit_uuid).first()
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Deposit proof not found")
+    
+    # Verify it belongs to the member
+    if deposit.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="You can only resubmit your own deposit proofs")
+    
+    # Only allow resubmission if proof is rejected
+    if deposit.status != DepositProofStatus.REJECTED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resubmit. Deposit proof status is {deposit.status}. Only rejected proofs can be resubmitted."
+        )
+    
+    # Get associated declaration
+    if not deposit.declaration_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Deposit proof is not associated with a declaration"
+        )
+    
+    declaration = db.query(Declaration).filter(Declaration.id == deposit.declaration_id).first()
+    if not declaration:
+        raise HTTPException(status_code=404, detail="Associated declaration not found")
+    
+    # Verify declaration belongs to member
+    if declaration.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="Declaration does not belong to you")
+    
+    # Declaration must be in PENDING status to allow resubmission
+    if declaration.status != DeclarationStatus.PENDING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot resubmit. Declaration status is {declaration.status.value}. Declaration must be PENDING to resubmit proof."
+        )
+    
+    # Handle file upload if provided
+    old_file_path = None
+    if file and file.filename:
+        # Validate file type
+        allowed_extensions = {'.pdf', '.jpg', '.jpeg', '.png', '.gif'}
+        file_ext = Path(file.filename).suffix.lower()
+        if file_ext not in allowed_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
+            )
+        
+        # Store old file path for deletion
+        old_file_path = Path(deposit.upload_path) if deposit.upload_path else None
+        
+        # Create upload directory
+        DEPOSIT_PROOFS_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Generate unique filename
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_filename = "".join(c for c in file.filename if c.isalnum() or c in "._- ") if file.filename else "proof"
+        new_file_path = DEPOSIT_PROOFS_DIR / f"deposit_{deposit.declaration_id}_{timestamp}_{safe_filename}"
+        
+        # Save new file
+        try:
+            content = file.file.read()
+            with open(new_file_path, "wb") as f:
+                f.write(content)
+            deposit.upload_path = str(new_file_path)
+            logger.info(f"New deposit proof file saved: {new_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save new deposit proof file: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+        
+        # Delete old file if it exists
+        if old_file_path and old_file_path.exists():
+            try:
+                old_file_path.unlink()
+                logger.info(f"Old deposit proof file deleted: {old_file_path}")
+            except Exception as e:
+                # Log warning but don't fail - old file deletion is non-critical
+                logger.warning(f"Failed to delete old deposit proof file {old_file_path}: {str(e)}")
+    
+    # Handle amount update if provided
+    if amount is not None:
+        # Calculate declaration total
+        declaration_total = Decimal("0.00")
+        if declaration.declared_savings_amount:
+            declaration_total += declaration.declared_savings_amount
+        if declaration.declared_social_fund:
+            declaration_total += declaration.declared_social_fund
+        if declaration.declared_admin_fund:
+            declaration_total += declaration.declared_admin_fund
+        if declaration.declared_penalties:
+            declaration_total += declaration.declared_penalties
+        if declaration.declared_interest_on_loan:
+            declaration_total += declaration.declared_interest_on_loan
+        if declaration.declared_loan_repayment:
+            declaration_total += declaration.declared_loan_repayment
+        
+        deposit_amount = Decimal(str(amount))
+        
+        # Validate amount matches declaration total (with small tolerance for rounding)
+        if abs(deposit_amount - declaration_total) > Decimal("0.01"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Deposit amount ({deposit_amount}) does not match declaration total ({declaration_total}). "
+                       f"Difference: {abs(deposit_amount - declaration_total)}"
+            )
+        
+        deposit.amount = deposit_amount
+    
+    # Update reference if provided
+    if reference is not None:
+        deposit.reference = reference
+    
+    # Update member response if provided
+    if member_response is not None:
+        deposit.member_response = member_response
+    
+    # Update deposit proof status to SUBMITTED
+    deposit.status = DepositProofStatus.SUBMITTED.value
+    
+    # Update declaration status to PROOF (proof resubmitted, awaiting treasurer approval)
+    declaration.status = DeclarationStatus.PROOF
+    
+    # Note: We keep rejected_at and rejected_by for audit trail
+    # They show the history of the rejection even after resubmission
+    
+    db.commit()
+    db.refresh(deposit)
+    db.refresh(declaration)
+    
+    logger.info(f"Deposit proof {deposit.id} resubmitted successfully. Declaration {declaration.id} status updated to PROOF.")
+    
+    return {
+        "message": "Deposit proof resubmitted successfully",
+        "deposit_proof_id": str(deposit.id),
+        "declaration_status": declaration.status.value
     }

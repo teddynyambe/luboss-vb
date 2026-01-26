@@ -16,6 +16,16 @@ interface Cycle {
   end_date?: string;
 }
 
+interface RejectedDepositProof {
+  id: string;
+  amount: number;
+  reference?: string;
+  treasurer_comment?: string;
+  member_response?: string;
+  upload_path: string;
+  rejected_at?: string;
+}
+
 interface Declaration {
   id: string;
   cycle_id: string;
@@ -30,6 +40,7 @@ interface Declaration {
   created_at: string;
   updated_at?: string;
   can_edit?: boolean;
+  rejected_deposit_proof?: RejectedDepositProof;
 }
 
 export default function DeclarationsPage() {
@@ -429,6 +440,24 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
     });
   };
 
+  const calculateDeclarationTotal = (): number => {
+    // Sum all amounts including penalties if present (even though penalties are auto-filled)
+    let total = (
+      (formData.declared_savings_amount || 0) +
+      (formData.declared_social_fund || 0) +
+      (formData.declared_admin_fund || 0) +
+      (formData.declared_interest_on_loan || 0) +
+      (formData.declared_loan_repayment || 0)
+    );
+    
+    // Include penalties if they are present (auto-filled from applicable penalties)
+    if (formData.declared_penalties && formData.declared_penalties > 0) {
+      total += formData.declared_penalties;
+    }
+    
+    return total;
+  };
+  
   const formatDate = (dateString: string) => {
     if (!dateString) return 'Invalid Date';
     // Handle both "YYYY-MM-DD" and "YYYY-MM-DDTHH:MM:SS" formats
@@ -800,43 +829,80 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                 </div>
               </div>
 
-                  <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4 pt-6 border-t-2 border-blue-200">
-                    {isEditing ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={handleCancelEdit}
-                          className="btn-secondary text-center"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="submit"
-                          disabled={loading}
-                          className="btn-primary disabled:opacity-50"
-                        >
-                          {loading ? 'Updating...' : 'Update Declaration'}
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <Link
-                          href="/dashboard/member"
-                          className="btn-secondary text-center"
-                        >
-                          Cancel
-                        </Link>
-                        <button
-                          type="submit"
-                          disabled={loading}
-                          className="btn-primary disabled:opacity-50"
-                        >
-                          {loading ? 'Submitting...' : 'Submit Declaration'}
-                        </button>
-                      </>
-                    )}
+                  <div className="pt-6 border-t-2 border-blue-200">
+                    <div className="flex flex-col sm:flex-row justify-between items-center gap-4 mb-4">
+                      <div className="flex-1">
+                        <p className="text-sm md:text-base text-blue-700 font-medium mb-1">Total Declaration Amount</p>
+                        <p className="text-2xl md:text-3xl font-bold text-blue-900">
+                          K{calculateDeclarationTotal().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4">
+                      {isEditing ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={handleCancelEdit}
+                            className="btn-secondary text-center"
+                          >
+                            Cancel
+                          </button>
+                          <button
+                            type="submit"
+                            disabled={loading}
+                            className="btn-primary disabled:opacity-50"
+                          >
+                            {loading ? 'Updating...' : 'Update Declaration'}
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <Link
+                            href="/dashboard/member"
+                            className="btn-secondary text-center"
+                          >
+                            Cancel
+                          </Link>
+                          <button
+                            type="submit"
+                            disabled={loading}
+                            className="btn-primary disabled:opacity-50"
+                          >
+                            {loading ? 'Submitting...' : 'Submit Declaration'}
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                 </form>
+                )}
+                
+                {/* Informational message when editing declaration with rejected proof */}
+                {isEditing && currentMonthDeclaration?.rejected_deposit_proof && (
+                  <div className="mt-6 bg-yellow-50 border-2 border-yellow-300 rounded-xl p-4 md:p-6">
+                    <div className="flex items-start gap-3">
+                      <span className="text-2xl">ℹ️</span>
+                      <div className="flex-1">
+                        <h3 className="text-lg md:text-xl font-bold text-yellow-900 mb-2">
+                          Deposit Proof Rejected
+                        </h3>
+                        <div className="mb-3 p-3 bg-yellow-100 border border-yellow-300 rounded-lg">
+                          <p className="text-sm font-semibold text-yellow-800 mb-1">Treasurer's Comment:</p>
+                          <p className="text-sm text-yellow-700">{currentMonthDeclaration.rejected_deposit_proof.treasurer_comment || 'No comment provided'}</p>
+                        </div>
+                        <p className="text-sm md:text-base text-yellow-800 mb-3">
+                          Your deposit proof has been rejected. After updating your declaration, please go to the <strong>Payment Proof</strong> page to resubmit your deposit proof with any necessary corrections.
+                        </p>
+                        <Link
+                          href="/dashboard/member/payment-proof"
+                          className="inline-block btn-primary"
+                        >
+                          Go to Payment Proof Page
+                        </Link>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             ) : (

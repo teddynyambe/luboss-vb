@@ -245,6 +245,9 @@ def create_declaration(
     # Check if declaration is late and create automatic penalty record
     from app.models.cycle import CyclePhase, PhaseType
     from datetime import date as date_type
+    import logging
+    
+    logger = logging.getLogger(__name__)
     
     declaration_phase = db.query(CyclePhase).filter(
         CyclePhase.cycle_id == cycle_id,
@@ -256,6 +259,8 @@ def create_declaration(
         monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
         penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
         
+        logger.info(f"Late declaration penalty check: auto_apply={auto_apply}, monthly_end_day={monthly_end_day}, penalty_type_id={penalty_type_id}")
+        
         if auto_apply and monthly_end_day and penalty_type_id:
             today = date_type.today()
             is_late = False
@@ -264,10 +269,17 @@ def create_declaration(
             if today.year == effective_month.year and today.month == effective_month.month:
                 if today.day > monthly_end_day:
                     is_late = True
+                    logger.info(f"Declaration is late: today.day ({today.day}) > monthly_end_day ({monthly_end_day})")
+                else:
+                    logger.info(f"Declaration is NOT late: today.day ({today.day}) <= monthly_end_day ({monthly_end_day})")
             elif today.year > effective_month.year or (today.year == effective_month.year and today.month > effective_month.month):
                 is_late = True
+                logger.info(f"Declaration is late: past month (today={today}, effective_month={effective_month})")
+            else:
+                logger.info(f"Declaration is NOT late: future month (today={today}, effective_month={effective_month})")
             
             if is_late:
+                logger.info(f"Creating late declaration penalty for member {member_id}, effective_month={effective_month}")
                 # Get penalty type
                 penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
                 if penalty_type:
@@ -295,19 +307,91 @@ def create_declaration(
                         system_user_id = get_system_user_id(db)
                         if not system_user_id:
                             # If no admin exists, skip penalty creation (shouldn't happen in production)
-                            import logging
-                            logging.warning(f"No admin user found to create system penalty for member {member_id}")
+                            logger.warning(f"No admin user found to create system penalty for member {member_id}")
                         else:
-                            # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
-                            late_penalty = PenaltyRecord(
-                                member_id=member_id,
-                                penalty_type_id=penalty_type_id,
-                                status=PenaltyRecordStatus.APPROVED,  # Auto-approved for cycle-defined penalties
-                                created_by=system_user_id,  # Use admin user for system-generated penalties
-                                notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_month.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
-                            )
-                            db.add(late_penalty)
-                            db.flush()
+                            # Get or create member's savings account (needed for posting penalty to ledger)
+                            member_savings = db.query(LedgerAccount).filter(
+                                LedgerAccount.member_id == member_id,
+                                LedgerAccount.account_name.ilike("%savings%")
+                            ).first()
+                            
+                            if not member_savings:
+                                # Create savings account if it doesn't exist
+                                short_id = str(member_id).replace('-', '')[:8]
+                                member_savings = LedgerAccount(
+                                    account_code=f"MEM_SAV_{short_id}",
+                                    account_name=f"Member Savings - {member_id}",
+                                    account_type=AccountType.LIABILITY,
+                                    member_id=member_id,
+                                    description=f"Savings account for member {member_id}"
+                                )
+                                db.add(member_savings)
+                                db.flush()
+                                logger.info(f"Created member savings account for late declaration penalty: {member_savings.id}")
+                            
+                            # Get penalty income account
+                            penalty_income = db.query(LedgerAccount).filter(
+                                LedgerAccount.account_code == "PENALTY_INCOME"
+                            ).first()
+                            
+                            if not penalty_income:
+                                logger.warning(f"PENALTY_INCOME account not found, cannot post late declaration penalty to ledger")
+                            else:
+                                # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
+                                late_penalty = PenaltyRecord(
+                                    member_id=member_id,
+                                    penalty_type_id=penalty_type_id,
+                                    status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
+                                    created_by=system_user_id,  # Use admin user for system-generated penalties
+                                    notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_month.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
+                                )
+                                db.add(late_penalty)
+                                db.flush()
+                                
+                                # Post penalty to ledger immediately (since it's auto-approved)
+                                journal_entry = create_journal_entry(
+                                    db=db,
+                                    description=f"Late declaration penalty for member {member_id}",
+                                    lines=[
+                                        {
+                                            "account_id": member_savings.id,
+                                            "debit_amount": penalty_type.fee_amount,
+                                            "credit_amount": Decimal("0.00"),
+                                            "description": "Late declaration penalty charged to member"
+                                        },
+                                        {
+                                            "account_id": penalty_income.id,
+                                            "debit_amount": Decimal("0.00"),
+                                            "credit_amount": penalty_type.fee_amount,
+                                            "description": "Penalty income"
+                                        }
+                                    ],
+                                    source_ref=str(late_penalty.id),
+                                    source_type="penalty",
+                                    created_by=system_user_id
+                                )
+                                
+                                # Link journal entry to penalty record
+                                late_penalty.journal_entry_id = journal_entry.id
+                                late_penalty.approved_by = system_user_id
+                                late_penalty.approved_at = datetime.utcnow()
+                                
+                                logger.info(f"✅ Created late declaration penalty: {late_penalty.id} and posted to ledger: {journal_entry.id}")
+                    else:
+                        logger.info(f"Penalty already exists for this declaration, skipping creation")
+            else:
+                logger.info(f"Declaration is not late, no penalty created")
+        else:
+            missing = []
+            if not auto_apply:
+                missing.append("auto_apply_penalty=False")
+            if not monthly_end_day:
+                missing.append("monthly_end_day not set")
+            if not penalty_type_id:
+                missing.append("penalty_type_id not set")
+            logger.warning(f"Late declaration penalty not configured: {', '.join(missing)}")
+    else:
+        logger.warning(f"No declaration phase found for cycle {cycle_id}")
     
     db.commit()
     db.refresh(declaration)
@@ -660,7 +744,7 @@ def approve_deposit(
             
             # If this penalty amount fits in the remaining amount, mark it as paid
             if penalty_amount <= remaining_penalty_amount:
-                penalty.status = PenaltyRecordStatus.PAID
+                penalty.status = PenaltyRecordStatus.PAID.value  # Use .value to ensure lowercase string is sent
                 remaining_penalty_amount -= penalty_amount
             # If partial payment, we could handle it here, but for now we'll only mark complete payments
     
@@ -843,7 +927,7 @@ def approve_penalty(
     )
     
     # Set status to APPROVED (not PAID - that happens when deposit is approved)
-    penalty.status = PenaltyRecordStatus.APPROVED
+    penalty.status = PenaltyRecordStatus.APPROVED.value  # Use .value to ensure lowercase string is sent
     penalty.approved_by = approved_by
     penalty.approved_at = datetime.utcnow()
     penalty.journal_entry_id = journal_entry.id

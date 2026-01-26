@@ -57,12 +57,15 @@ EOF
 # Also create a proper SQL insert file
 echo ""
 echo "3. Creating SQL insert statements..."
-psql "$DATABASE_URL" -t -A -F"," <<EOF > "${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql"
+INSERT_FILE="${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql"
+
+# Write header
+cat > "$INSERT_FILE" <<EOF
 -- SQL INSERT statements for penalty_record
 -- Generated: $(date)
 -- 
 -- Usage: Review this file, then run on production:
---   psql -d village_bank -f ${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql
+--   psql -d village_bank -f $INSERT_FILE
 
 BEGIN;
 
@@ -70,7 +73,10 @@ BEGIN;
 SET session_replication_role = 'replica';
 
 -- Insert penalty records
-$(psql "$DATABASE_URL" -t <<INNER_EOF
+EOF
+
+# Generate INSERT statements (read-only query, no transaction)
+psql "$DATABASE_URL" -t -A <<EOF >> "$INSERT_FILE"
 SELECT 
     'INSERT INTO penalty_record (id, member_id, penalty_type_id, date_issued, status, created_by, approved_by, approved_at, journal_entry_id, notes) VALUES (' ||
     quote_literal(id::text) || ', ' ||
@@ -85,8 +91,10 @@ SELECT
     COALESCE(quote_literal(notes), 'NULL') || ');'
 FROM penalty_record
 ORDER BY date_issued;
-INNER_EOF
-)
+EOF
+
+# Write footer
+cat >> "$INSERT_FILE" <<EOF
 
 -- Re-enable foreign key checks
 SET session_replication_role = 'origin';
@@ -98,10 +106,10 @@ echo "✅ Export complete!"
 echo ""
 echo "Files created:"
 echo "  1. ${EXPORT_FILE_TIMESTAMPED} - CSV format"
-echo "  2. ${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql - SQL INSERT statements"
+echo "  2. ${INSERT_FILE} - SQL INSERT statements"
 echo ""
 echo "Next steps:"
-echo "  1. Review the SQL file: ${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql"
+echo "  1. Review the SQL file: ${INSERT_FILE}"
 echo "  2. Transfer to production server"
 echo "  3. Run on production: psql -d village_bank -f ${EXPORT_FILE_TIMESTAMPED%.sql}_inserts.sql"
 echo ""

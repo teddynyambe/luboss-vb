@@ -183,15 +183,26 @@ def approve_deposit_proof(
         logger.error("BANK_CASH account not found")
         raise HTTPException(status_code=500, detail="BANK_CASH ledger account not found")
     
-    # Get member-specific savings account
+    # Get or create member-specific savings account
     member_savings = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == deposit.member_id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
     
     if not member_savings:
-        logger.error(f"Member savings account not found for member: {deposit.member_id}")
-        raise HTTPException(status_code=500, detail="Member savings account not found")
+        # Create savings account if it doesn't exist
+        from app.models.ledger import AccountType
+        short_id = str(deposit.member_id).replace('-', '')[:8]
+        member_savings = LedgerAccount(
+            account_code=f"MEM_SAV_{short_id}",
+            account_name=f"Member Savings - {deposit.member_id}",
+            account_type=AccountType.LIABILITY,
+            member_id=deposit.member_id,
+            description=f"Savings account for member {deposit.member_id}"
+        )
+        db.add(member_savings)
+        db.flush()  # Flush to get the ID without committing
+        logger.info(f"Created member savings account: {member_savings.id} for member: {deposit.member_id}")
     
     logger.info(f"Found accounts: BANK_CASH={bank_cash.id}, Member Savings={member_savings.id}")
     

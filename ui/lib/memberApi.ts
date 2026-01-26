@@ -18,6 +18,16 @@ export interface LoanApplicationCreate {
   notes?: string;
 }
 
+export interface RejectedDepositProof {
+  id: string;
+  amount: number;
+  reference?: string;
+  treasurer_comment?: string;
+  member_response?: string;
+  upload_path: string;
+  rejected_at?: string;
+}
+
 export interface Declaration {
   id: string;
   cycle_id: string;
@@ -32,6 +42,7 @@ export interface Declaration {
   created_at: string;
   updated_at?: string;
   can_edit?: boolean;
+  rejected_deposit_proof?: RejectedDepositProof;
 }
 
 export interface LoanApplication {
@@ -105,6 +116,20 @@ export const memberApi = {
     const formData = new FormData();
     formData.append('response', response);
     return api.postFormData<{ message: string; deposit_id: string }>(`/api/member/deposits/${depositId}/respond`, formData);
+  },
+  
+  resubmitDepositProof: (depositId: string, data: {
+    file?: File;
+    amount?: number;
+    reference?: string;
+    member_response?: string;
+  }) => {
+    const formData = new FormData();
+    if (data.file) formData.append('file', data.file);
+    if (data.amount !== undefined) formData.append('amount', data.amount.toString());
+    if (data.reference !== undefined) formData.append('reference', data.reference);
+    if (data.member_response !== undefined) formData.append('member_response', data.member_response);
+    return api.putFormData<{ message: string; deposit_proof_id: string; declaration_status: string }>(`/api/member/deposits/${depositId}/resubmit`, formData);
   },
   
   applyForLoan: (data: LoanApplicationCreate) =>

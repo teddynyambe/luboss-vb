@@ -58,7 +58,7 @@ def create_penalty(
         penalty = PenaltyRecord(
             member_id=member_uuid,
             penalty_type_id=penalty_data.penalty_type_id,
-            status=PenaltyRecordStatus.PENDING,  # Compliance-created penalties start as PENDING
+            status=PenaltyRecordStatus.PENDING.value,  # Use .value to ensure lowercase string is sent
             created_by=current_user.id,
             notes=penalty_data.notes
         )

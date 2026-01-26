@@ -8,9 +8,24 @@ set -e  # Exit on error
 
 # Parse command line arguments
 DRY_RUN=false
+IMPORT_PENALTY_DATA=false
+PENALTY_DATA_FILE=""
+
+# Check for --dry-run first (before loading config)
 if [[ "$1" == "--dry-run" ]]; then
     DRY_RUN=true
     set +e  # Don't exit on error in dry-run mode
+    shift
+fi
+
+# Check for --import-penalty-data
+if [[ "$1" == "--import-penalty-data" ]]; then
+    IMPORT_PENALTY_DATA=true
+    shift
+    if [[ -n "$1" && "$1" != --* ]]; then
+        PENALTY_DATA_FILE="$1"
+        shift
+    fi
 fi
 
 # Colors for output
@@ -59,6 +74,9 @@ if [ "$DRY_RUN" = true ]; then
     print_info "DRY RUN MODE: Starting deployment analysis for ${SERVER_USER}@${SERVER_HOST}"
 else
     print_info "Starting deployment to ${SERVER_USER}@${SERVER_HOST}"
+    if [ "$IMPORT_PENALTY_DATA" = true ]; then
+        print_info "Penalty data import enabled"
+    fi
 fi
 
 # Check for uncommitted changes (skip in dry-run mode)
@@ -305,6 +323,135 @@ load_deployment_log() {
     LAST_FRONTEND_SERVICE_STATUS=$(extract_json_value "$log_content" "frontend_service_status")
     
     return 0
+}
+
+# Function to import penalty data
+import_penalty_data() {
+    print_info "Importing penalty data..."
+    
+    # Determine SQL file location
+    local sql_file=""
+    if [ -n "$PENALTY_DATA_FILE" ]; then
+        # File specified on command line
+        if [ -f "$PENALTY_DATA_FILE" ]; then
+            # Local file - copy to server
+            print_info "Copying penalty data file to server..."
+            remote_copy "$PENALTY_DATA_FILE" "/tmp/penalty_data_import.sql"
+            sql_file="/tmp/penalty_data_import.sql"
+        else
+            print_error "Penalty data file not found: $PENALTY_DATA_FILE"
+            return 1
+        fi
+    else
+        # Look for penalty data file in deploy directory
+        if [ -f "deploy/penalty_data.sql" ]; then
+            print_info "Found penalty data file in deploy/penalty_data.sql"
+            remote_copy "deploy/penalty_data.sql" "/tmp/penalty_data_import.sql"
+            sql_file="/tmp/penalty_data_import.sql"
+        else
+            print_warning "No penalty data file specified or found"
+            print_info "To import penalty data:"
+            print_info "  1. Create deploy/penalty_data.sql with INSERT statements, or"
+            print_info "  2. Use --import-penalty-data /path/to/file.sql"
+            return 0
+        fi
+    fi
+    
+    # Check current penalty record count
+    local current_count=$(remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -t -c \"SELECT COUNT(*) FROM penalty_record;\" 2>/dev/null" | xargs || echo "0")
+    if [ -z "$current_count" ]; then
+        current_count="0"
+    fi
+    print_info "Current penalty records in database: $current_count"
+    
+    if [ "$current_count" != "0" ] && [ "$current_count" != "" ]; then
+        print_warning "Penalty records already exist in database ($current_count records)"
+        read -p "Continue with import anyway? This may create duplicates. (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Penalty data import skipped"
+            return 0
+        fi
+    fi
+    
+    # Check dependencies
+    print_info "Checking dependencies..."
+    local member_count=$(remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -t -c \"SELECT COUNT(*) FROM member_profile;\" 2>/dev/null" | xargs || echo "0")
+    local penalty_type_count=$(remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -t -c \"SELECT COUNT(*) FROM penalty_type;\" 2>/dev/null" | xargs || echo "0")
+    local user_count=$(remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -t -c \"SELECT COUNT(*) FROM \\\"user\\\";\" 2>/dev/null" | xargs || echo "0")
+    
+    print_info "Current database state:"
+    print_info "  Members: $member_count"
+    print_info "  Penalty types: $penalty_type_count"
+    print_info "  Users: $user_count"
+    
+    if [ "$member_count" = "0" ] || [ "$member_count" = "" ]; then
+        print_warning "No members found in database."
+        print_info "Penalty records require member_id foreign keys."
+        read -p "Continue anyway? Import will fail if member_id values don't exist. (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Penalty data import skipped. Import members first, then retry."
+            return 0
+        fi
+        print_warning "Proceeding without member validation..."
+    fi
+    
+    if [ "$penalty_type_count" = "0" ] || [ "$penalty_type_count" = "" ]; then
+        print_warning "No penalty types found in database."
+        print_info "Penalty records require penalty_type_id foreign keys."
+        read -p "Continue anyway? Import will fail if penalty_type_id values don't exist. (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Penalty data import skipped. Import penalty types first, then retry."
+            return 0
+        fi
+        print_warning "Proceeding without penalty type validation..."
+    fi
+    
+    if [ "$member_count" != "0" ] && [ "$penalty_type_count" != "0" ]; then
+        print_success "Dependencies OK (members: $member_count, penalty types: $penalty_type_count)"
+    fi
+    
+    # Validate SQL file
+    print_info "Validating SQL file..."
+    if ! remote_exec "grep -q 'INSERT INTO penalty_record' ${sql_file} 2>/dev/null"; then
+        print_warning "SQL file doesn't appear to contain INSERT statements"
+        read -p "Continue anyway? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_info "Penalty data import cancelled"
+            return 0
+        fi
+    fi
+    
+    # Import data
+    print_info "Importing penalty data..."
+    local import_output=$(remote_exec_sudo "sudo -u postgres psql -d ${DATABASE_NAME} -f ${sql_file} 2>&1" "import penalty data")
+    local import_exit=$?
+    
+    if [ $import_exit -eq 0 ]; then
+        # Check new count
+        local new_count=$(remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -t -c \"SELECT COUNT(*) FROM penalty_record;\" 2>/dev/null" | xargs || echo "0")
+        if [ "$new_count" != "$current_count" ] && [ "$new_count" != "" ]; then
+            local imported=$((new_count - current_count))
+            print_success "Penalty data imported successfully! ($imported new records)"
+            
+            # Show status breakdown
+            print_info "Status breakdown:"
+            remote_exec "sudo -u postgres psql -d ${DATABASE_NAME} -c \"SELECT status, COUNT(*) FROM penalty_record GROUP BY status;\" 2>/dev/null" || true
+        else
+            print_warning "Import completed but no new records found (may have been duplicates or errors)"
+        fi
+    else
+        print_error "Penalty data import failed!"
+        print_info "Import output: $import_output"
+        print_warning "Check the error messages above and fix any issues"
+        return 1
+    fi
+    
+    # Clean up
+    remote_exec "rm -f ${sql_file} 2>/dev/null" || true
 }
 
 # Function to create deployment log on server
@@ -1047,6 +1194,11 @@ EOF"
         print_success "Frontend is responding"
     else
         print_warning "Frontend check failed (service may still be starting)"
+    fi
+    
+    # 13. Optional: Import penalty data
+    if [ "$IMPORT_PENALTY_DATA" = true ]; then
+        import_penalty_data
     fi
     
     print_success "Deployment completed!"

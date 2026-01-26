@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, DateTime, Date, Numeric, Enum as SQLEnum, Text
+from sqlalchemy import Column, String, ForeignKey, DateTime, Date, Numeric, Enum as SQLEnum, Text, TypeDecorator
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import uuid
@@ -39,6 +39,63 @@ class PenaltyRecordStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     PAID = "paid"
+
+
+class PenaltyRecordStatusType(TypeDecorator):
+    """Custom type to ensure enum values (lowercase strings) are used instead of enum names.
+    
+    The database enum expects lowercase values ('approved', 'pending', 'paid'),
+    but SQLAlchemy's SQLEnum uses enum names by default. This TypeDecorator
+    uses String as the base type and handles conversion to ensure lowercase values.
+    """
+    # Use String as the base type - we'll cast it to the enum in SQL
+    impl = String(20)
+    cache_ok = True
+    
+    def load_dialect_impl(self, dialect):
+        """Return the dialect-specific implementation."""
+        if dialect.name == 'postgresql':
+            # For PostgreSQL, we need to cast the string to the enum type
+            # But we'll handle this in process_bind_param
+            return dialect.type_descriptor(String(20))
+        return dialect.type_descriptor(String(20))
+    
+    def process_bind_param(self, value, dialect):
+        """Convert enum to its value (lowercase string) when binding to database."""
+        if value is None:
+            return None
+        
+        # If it's an enum instance, get its value
+        if isinstance(value, PenaltyRecordStatus):
+            return value.value  # Return "approved", "pending", or "paid"
+        
+        # If it's already a string, check if it's an enum name (uppercase) or value (lowercase)
+        if isinstance(value, str):
+            # Map enum names to values
+            name_to_value = {
+                'PENDING': 'pending',
+                'APPROVED': 'approved',
+                'PAID': 'paid'
+            }
+            # If it's an uppercase enum name, convert to lowercase value
+            if value in name_to_value:
+                return name_to_value[value]
+            # Otherwise, ensure it's lowercase
+            return value.lower()
+        
+        return value
+    
+    def process_result_value(self, value, dialect):
+        """Convert database value back to enum when reading."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            # Convert string to enum
+            try:
+                return PenaltyRecordStatus(value.lower())
+            except ValueError:
+                return value
+        return value
 
 
 class DepositProofStatus(str, enum.Enum):
@@ -202,7 +259,7 @@ class PenaltyRecord(Base):
     member_id = Column(UUID(as_uuid=True), ForeignKey("member_profile.id"), nullable=False, index=True)
     penalty_type_id = Column(UUID(as_uuid=True), ForeignKey("penalty_type.id"), nullable=False, index=True)
     date_issued = Column(DateTime, nullable=False, server_default="now()")
-    status = Column(SQLEnum(PenaltyRecordStatus), default=PenaltyRecordStatus.PENDING, nullable=False)
+    status = Column(PenaltyRecordStatusType(), default=PenaltyRecordStatus.PENDING.value, nullable=False)
     created_by = Column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=False)
     approved_by = Column(UUID(as_uuid=True), ForeignKey("user.id"), nullable=True)
     approved_at = Column(DateTime, nullable=True)
