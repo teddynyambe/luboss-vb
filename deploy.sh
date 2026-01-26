@@ -664,7 +664,33 @@ deploy() {
     
     # 1. Pull latest code
     print_info "Pulling latest code from git..."
+    
+    # Check for local changes that might conflict
+    local has_local_changes=$(remote_exec "cd ${DEPLOY_DIR} && git status --porcelain 2>/dev/null | wc -l" || echo "0")
+    if [ "$has_local_changes" != "0" ] && [ "$has_local_changes" != "" ]; then
+        print_warning "Local changes detected. Stashing them before pull..."
+        remote_exec "cd ${DEPLOY_DIR} && git stash push -m 'Stashed before deployment $(date +%Y-%m-%d)' || true"
+        print_info "Local changes stashed"
+    fi
+    
+    # Pull latest code
     remote_exec "cd ${DEPLOY_DIR} && git pull origin ${GIT_BRANCH:-main}"
+    
+    # Try to reapply stashed changes (if any)
+    if [ "$has_local_changes" != "0" ] && [ "$has_local_changes" != "" ]; then
+        print_info "Attempting to reapply stashed changes..."
+        local stash_result=$(remote_exec "cd ${DEPLOY_DIR} && git stash pop 2>&1" || echo "failed")
+        if echo "$stash_result" | grep -q "CONFLICT"; then
+            print_warning "Stash conflicts detected. Resolving by keeping remote version..."
+            remote_exec "cd ${DEPLOY_DIR} && git checkout --theirs alembic/versions/*.py 2>/dev/null || true"
+            remote_exec "cd ${DEPLOY_DIR} && git add alembic/versions/*.py 2>/dev/null || true"
+            remote_exec "cd ${DEPLOY_DIR} && git stash drop 2>/dev/null || true"
+            print_info "Conflicts resolved - using remote version"
+        else
+            print_success "Stashed changes reapplied successfully"
+        fi
+    fi
+    
     print_success "Code updated"
     
     # 2. Update Next.js config with basePath via environment variable
