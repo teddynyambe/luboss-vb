@@ -135,7 +135,7 @@ export default function LoanApplicationPage() {
         if (!preserveFormData && eligibilityData.available_terms && eligibilityData.available_terms.length > 0) {
           const firstTerm = eligibilityData.available_terms[0];
           if (firstTerm.term_months) {
-            setFormData(prev => ({ ...prev, term_months: firstTerm.term_months }));
+            setFormData(prev => ({ ...prev, term_months: String(firstTerm.term_months) }));
           }
         }
       } else {
