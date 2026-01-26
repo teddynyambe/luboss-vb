@@ -253,7 +253,8 @@ export default function UserManagementPage() {
     try {
       const membersResponse = await api.get('/api/chairman/members');
       if (membersResponse.data) {
-        const member = membersResponse.data.find((m: any) => m.user_id === userId);
+        const members = Array.isArray(membersResponse.data) ? membersResponse.data : [];
+        const member = members.find((m: any) => m.user_id === userId);
         if (member && selectedCycle) {
           // Load existing credit rating if any
           const ratingResponse = await api.get(`/api/chairman/members/${member.id}/credit-rating/${selectedCycle}`);
