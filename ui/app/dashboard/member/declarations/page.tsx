@@ -141,19 +141,32 @@ export default function DeclarationsPage() {
       if (response.data) {
         setCurrentMonthDeclaration(response.data);
         // If editing, populate form with existing data
-        if (response.data.can_edit) {
+        const declarationData = response.data as {
+          can_edit?: boolean;
+          cycle_id?: string;
+          effective_month?: string;
+          declared_savings_amount?: number;
+          declared_social_fund?: number;
+          declared_admin_fund?: number;
+          declared_penalties?: number;
+          declared_interest_on_loan?: number;
+          declared_loan_repayment?: number;
+        };
+        if (declarationData.can_edit) {
+          const cycleId = declarationData.cycle_id ?? '';
+          const effectiveMonth = declarationData.effective_month ?? '';
           setFormData({
-            cycle_id: response.data.cycle_id,
-            effective_month: response.data.effective_month,
-            declared_savings_amount: response.data.declared_savings_amount,
-            declared_social_fund: response.data.declared_social_fund,
-            declared_admin_fund: response.data.declared_admin_fund,
-            declared_penalties: response.data.declared_penalties,
-            declared_interest_on_loan: response.data.declared_interest_on_loan,
-            declared_loan_repayment: response.data.declared_loan_repayment,
+            cycle_id: cycleId,
+            effective_month: effectiveMonth,
+            declared_savings_amount: declarationData.declared_savings_amount ?? 0,
+            declared_social_fund: declarationData.declared_social_fund ?? 0,
+            declared_admin_fund: declarationData.declared_admin_fund ?? 0,
+            declared_penalties: declarationData.declared_penalties ?? 0,
+            declared_interest_on_loan: declarationData.declared_interest_on_loan ?? 0,
+            declared_loan_repayment: declarationData.declared_loan_repayment ?? 0,
           });
-          setSelectedCycle(response.data.cycle_id);
-          setEffectiveMonth(response.data.effective_month);
+          setSelectedCycle(cycleId);
+          setEffectiveMonth(effectiveMonth);
         }
       } else {
         setCurrentMonthDeclaration(null);

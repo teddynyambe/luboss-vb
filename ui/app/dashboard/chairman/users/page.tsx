@@ -236,8 +236,9 @@ export default function UserManagementPage() {
       const response = await api.get<CreditRatingTier[]>(`/api/chairman/credit-rating-tiers/${cycleId}`);
       if (response.data) {
         setTiers(response.data);
-        if (response.data.length > 0) {
-          setSelectedTier(response.data[0].id);
+        const tiers = Array.isArray(response.data) ? response.data : [];
+        if (tiers.length > 0) {
+          setSelectedTier(tiers[0].id);
         }
       }
     } catch (err) {
