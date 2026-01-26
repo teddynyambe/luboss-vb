@@ -11,7 +11,7 @@ WorkingDirectory=/var/www/luboss-vb/ui
 Environment="NODE_ENV=production"
 Environment="PORT=3000"
 Environment="NEXT_PUBLIC_BASE_PATH=/test"
-Environment="NEXT_PUBLIC_API_URL=https://lubossvb.com/test/api"
+Environment="NEXT_PUBLIC_API_URL=https://lubossvb.com/test"
 ExecStart=/usr/bin/npm run start
 Restart=always
 RestartSec=10

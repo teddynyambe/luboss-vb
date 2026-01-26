@@ -349,11 +349,11 @@ EOF
     
     # Backup old log (keep last 5)
     remote_exec "cd ${DEPLOY_DIR} && \
-        if [ -f .deployment.log.4 ]; then rm -f .deployment.log.5; fi && \
-        if [ -f .deployment.log.3 ]; then mv .deployment.log.4 .deployment.log.5; fi && \
-        if [ -f .deployment.log.2 ]; then mv .deployment.log.3 .deployment.log.4; fi && \
-        if [ -f .deployment.log.1 ]; then mv .deployment.log.2 .deployment.log.3; fi && \
-        if [ -f .deployment.log ]; then mv .deployment.log .deployment.log.1; fi"
+        [ -f .deployment.log.4 ] && rm -f .deployment.log.5 || true && \
+        [ -f .deployment.log.3 ] && mv .deployment.log.4 .deployment.log.5 || true && \
+        [ -f .deployment.log.2 ] && mv .deployment.log.3 .deployment.log.4 || true && \
+        [ -f .deployment.log.1 ] && mv .deployment.log.2 .deployment.log.3 || true && \
+        [ -f .deployment.log ] && mv .deployment.log .deployment.log.1 || true"
     
     # Write new log
     echo "$log_json" | remote_exec "cat > ${DEPLOY_DIR}/.deployment.log"
@@ -733,7 +733,7 @@ deploy() {
     print_info "Updating frontend environment..."
     remote_exec "cd ${DEPLOY_DIR}/ui && cat > .env.production << EOF
 NEXT_PUBLIC_BASE_PATH=${DEPLOY_PATH}
-NEXT_PUBLIC_API_URL=https://${DOMAIN}${DEPLOY_PATH}/api
+NEXT_PUBLIC_API_URL=https://${DOMAIN}${DEPLOY_PATH}
 EOF"
     print_success "Frontend environment updated"
     
@@ -983,7 +983,7 @@ EOF"
         
         # Update frontend environment variables
         remote_exec "sed -i 's|NEXT_PUBLIC_BASE_PATH=.*|NEXT_PUBLIC_BASE_PATH=${DEPLOY_PATH}|g' /tmp/luboss-frontend.service"
-        remote_exec "sed -i 's|NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=https://${SERVER_HOST}${DEPLOY_PATH}/api|g' /tmp/luboss-frontend.service"
+        remote_exec "sed -i 's|NEXT_PUBLIC_API_URL=.*|NEXT_PUBLIC_API_URL=https://${SERVER_HOST}${DEPLOY_PATH}|g' /tmp/luboss-frontend.service"
         
         # Copy to systemd directory
         remote_exec_sudo "cp /tmp/luboss-backend.service /etc/systemd/system/${BACKEND_SERVICE_NAME}.service" "install backend service"
