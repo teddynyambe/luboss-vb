@@ -50,6 +50,20 @@ export default function ChairmanDashboard() {
                 <h3 className="font-bold text-lg md:text-xl mb-2">Manage Cycles</h3>
                 <p className="text-sm md:text-base text-blue-100">Configure cycle phases and dates</p>
               </Link>
+              <Link
+                href="/dashboard/reconcile"
+                className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
+              >
+                <h3 className="font-bold text-lg md:text-xl mb-2">Reconciliation</h3>
+                <p className="text-sm md:text-base text-blue-100">Enter backlog data for members</p>
+              </Link>
+              <Link
+                href="/dashboard/chairman/audit"
+                className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
+              >
+                <h3 className="font-bold text-lg md:text-xl mb-2">Activity Log</h3>
+                <p className="text-sm md:text-base text-blue-100">View monthly activity audit trail</p>
+              </Link>
             </div>
           </div>
         </div>

@@ -4,7 +4,7 @@ from app.db.base import get_db
 from app.core.dependencies import require_member, get_current_user, require_not_admin
 from app.models.user import User
 from app.models.member import MemberProfile, MemberStatus
-from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositProofStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus, DepositApproval
+from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositProofStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus, DepositApproval, BankStatement, Repayment, PenaltyRecord, PenaltyRecordStatus, PenaltyType
 from app.services.member import get_member_profile_by_user_id
 from app.services.transaction import create_declaration, update_declaration
 from app.services.accounting import (
@@ -180,6 +180,13 @@ def create_declaration_endpoint(
             declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties else None,
             declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan else None,
             declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment else None
+        )
+        from app.core.audit import write_audit_log
+        write_audit_log(
+            user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+            user_role=current_user.role.value if current_user.role else "member",
+            action="Declaration submitted",
+            details=f"month={declaration_data.effective_month.strftime('%Y-%m')}"
         )
         return {"message": "Declaration created successfully", "declaration_id": str(declaration.id)}
     except ValueError as e:
@@ -358,27 +365,16 @@ def get_applicable_penalties(
                         system_user_id = get_system_user_id(db)
                         if system_user_id:
                             # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
-                            # Use raw SQL to insert with proper enum casting to avoid SQLAlchemy enum name conversion
-                            from sqlalchemy import text
-                            status_value = PenaltyRecordStatus.APPROVED.value  # "approved" - lowercase string
-                            
-                            # Insert using raw SQL to ensure lowercase enum value is used
-                            # Cast the string to the PostgreSQL enum type using CAST() function
-                            penalty_id = uuid.uuid4()
-                            db.execute(text("""
-                                INSERT INTO penalty_record 
-                                (id, member_id, penalty_type_id, status, created_by, notes, date_issued)
-                                VALUES 
-                                (CAST(:id AS uuid), CAST(:member_id AS uuid), CAST(:penalty_type_id AS uuid), 
-                                 CAST(:status AS penaltyrecordstatus), CAST(:created_by AS uuid), :notes, NOW())
-                            """), {
-                                'id': str(penalty_id),
-                                'member_id': str(member_profile.id),
-                                'penalty_type_id': str(penalty_type_id),
-                                'status': status_value,  # "approved" - lowercase string
-                                'created_by': str(system_user_id),
-                                'notes': f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
-                            })
+                            penalty_obj = PenaltyRecord(
+                                id=uuid.uuid4(),
+                                member_id=member_profile.id,
+                                penalty_type_id=penalty_type_id,
+                                status=PenaltyRecordStatus.APPROVED,
+                                created_by=system_user_id,
+                                notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})",
+                                date_issued=datetime.utcnow(),
+                            )
+                            db.add(penalty_obj)
                             db.commit()
     
     # Get all cycle phases to check auto_apply_penalty flags
@@ -704,19 +700,89 @@ def get_current_month_declaration(
 
 def _can_edit_declaration(effective_month: date) -> bool:
     """Check if a declaration can still be edited.
-    
+
     Members can now edit declarations anytime for the current month (removed 20th day restriction).
     The one-declaration-per-month rule still applies.
     """
     from datetime import date
     today = date.today()
-    
+
     # Cannot edit declarations from previous months (only current month can be edited)
     if today.year > effective_month.year or (today.year == effective_month.year and today.month > effective_month.month):
         return False
-    
+
     # Allow editing current month declarations anytime (removed 20th day restriction)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Bank Statement endpoints (member – read-only)
+# ---------------------------------------------------------------------------
+
+@router.get("/bank-statements")
+def list_member_bank_statements(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List bank statements for the active cycle (read-only for any authenticated user)."""
+    from pathlib import Path
+    from app.models.cycle import Cycle, CycleStatus
+
+    cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+    if not cycle:
+        return {"statements": []}
+
+    stmts = (
+        db.query(BankStatement)
+        .filter(BankStatement.cycle_id == cycle.id)
+        .order_by(BankStatement.statement_month.desc())
+        .all()
+    )
+
+    return {
+        "statements": [
+            {
+                "id": str(s.id),
+                "cycle_id": str(s.cycle_id),
+                "statement_month": s.statement_month.isoformat(),
+                "description": s.description,
+                "filename": Path(s.upload_path).name,
+                "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None
+            }
+            for s in stmts
+        ]
+    }
+
+
+@router.get("/bank-statements/file/{filename:path}")
+def get_member_bank_statement_file(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Serve a bank statement file to any authenticated user."""
+    from pathlib import Path
+    from urllib.parse import unquote
+    from fastapi.responses import FileResponse
+    from app.core.config import BANK_STATEMENTS_DIR
+
+    filename = unquote(filename)
+    safe_filename = Path(filename).name
+    file_path = BANK_STATEMENTS_DIR / safe_filename
+
+    if not file_path.exists() or not str(file_path.resolve()).startswith(str(BANK_STATEMENTS_DIR.resolve())):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = Path(safe_filename).suffix.lower()
+    media_types = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    return FileResponse(path=str(file_path), filename=safe_filename, media_type=media_type)
 
 
 @router.put("/declarations/{declaration_id}")
@@ -1074,6 +1140,13 @@ def apply_for_loan(
     
     db.commit()
     db.refresh(loan_application)
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Loan application submitted",
+        details=f"amount=K {loan_data.amount}"
+    )
     return {
         "message": "Loan application submitted successfully",
         "application_id": str(loan_application.id),
@@ -1412,6 +1485,13 @@ def upload_deposit_proof(
     db.add(deposit_proof)
     db.commit()
     db.refresh(deposit_proof)
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Deposit proof submitted",
+        details=f"amount=K {amount or 0}"
+    )
     return {"message": "Deposit proof uploaded successfully", "deposit_id": str(deposit_proof.id)}
 
 
@@ -1480,42 +1560,36 @@ def get_account_transactions(
         if type == "savings":
             from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositApproval
             
-            # Get member's savings account
-            savings_account = db.query(LedgerAccount).filter(
-                LedgerAccount.member_id == member_profile.id,
-                LedgerAccount.account_name.ilike("%savings%")
-            ).first()
-            
-            if savings_account:
-                # Get journal lines for this account, but EXCLUDE penalty-related entries
-                # Only include credits from deposit approvals (actual savings deposits)
-                journal_lines = db.query(JournalLine).join(JournalEntry).filter(
-                    JournalLine.ledger_account_id == savings_account.id,
-                    JournalEntry.reversed_by.is_(None),  # Exclude reversed entries
-                    JournalEntry.source_type == "deposit_approval",  # Only deposit approvals
-                    JournalLine.credit_amount > 0  # Only credits (deposits)
-                ).order_by(JournalEntry.entry_date.desc()).all()
-                
-                for line in journal_lines:
-                    # Get the deposit proof to show more details
-                    deposit_approval = db.query(DepositApproval).filter(
-                        DepositApproval.journal_entry_id == line.journal_entry.id
-                    ).first()
-                    
-                    description = "Member savings deposit"
-                    if deposit_approval and deposit_approval.deposit_proof:
-                        declaration = deposit_approval.deposit_proof.declaration
-                        if declaration:
-                            description = f"Deposit approved for {declaration.effective_month.strftime('%B %Y')} declaration"
-                    
-                    transactions.append({
-                        "id": str(line.id),
-                        "date": line.journal_entry.entry_date.isoformat(),
-                        "description": description,
-                        "debit": 0.0,
-                        "credit": float(line.credit_amount),
-                        "amount": float(line.credit_amount)
-                    })
+            # Query approved deposits via DepositApproval → DepositProof
+            # deposit_proof.amount is the full total (all components)
+            deposit_approvals = db.query(DepositApproval).join(
+                DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
+            ).join(
+                JournalEntry, DepositApproval.journal_entry_id == JournalEntry.id
+            ).filter(
+                DepositProof.member_id == member_profile.id,
+                JournalEntry.reversed_by.is_(None)
+            ).order_by(JournalEntry.entry_date.desc()).all()
+
+            for da in deposit_approvals:
+                deposit = da.deposit_proof
+                declaration = deposit.declaration if deposit else None
+
+                if declaration:
+                    date_str = declaration.effective_month.isoformat()
+                    description = f"Deposit approved for {declaration.effective_month.strftime('%B %Y')} declaration"
+                else:
+                    date_str = da.journal_entry.entry_date.isoformat()
+                    description = "Approved deposit"
+
+                transactions.append({
+                    "id": str(da.id),
+                    "date": date_str,
+                    "description": description,
+                    "debit": 0.0,
+                    "credit": float(deposit.amount),
+                    "amount": float(deposit.amount)
+                })
             
             # Add declarations as debit entries (informational - shows when member declared savings)
             declarations = db.query(Declaration).filter(
@@ -1527,12 +1601,20 @@ def get_account_transactions(
             for declaration in declarations:
                 transactions.append({
                     "id": f"declaration_{declaration.id}",
-                    "date": declaration.created_at.isoformat() if declaration.created_at else declaration.effective_month.isoformat(),
+                    "date": declaration.effective_month.isoformat(),
                     "description": f"Declaration for {declaration.effective_month.strftime('%B %Y')}",
-                    "debit": float(declaration.declared_savings_amount),
+                    "debit": float(declaration.declared_savings_amount or 0),
                     "credit": 0.0,
-                    "amount": float(declaration.declared_savings_amount),
-                    "is_declaration": True
+                    "amount": float(declaration.declared_savings_amount or 0),
+                    "is_declaration": True,
+                    "declaration_items": {
+                        "savings_amount":   float(declaration.declared_savings_amount or 0),
+                        "social_fund":      float(declaration.declared_social_fund or 0),
+                        "admin_fund":       float(declaration.declared_admin_fund or 0),
+                        "penalties":        float(declaration.declared_penalties or 0),
+                        "loan_repayment":   float(declaration.declared_loan_repayment or 0),
+                        "interest_on_loan": float(declaration.declared_interest_on_loan or 0),
+                    }
                 })
             
             # Sort all transactions by date (most recent first)
@@ -1624,27 +1706,9 @@ def get_account_transactions(
             # PAID penalties are excluded; they appear as journal lines from deposit approvals above.
             # Use text() with explicit enum casting - handle both uppercase (old) and lowercase (new) enum values
             # SQLAlchemy's SQLEnum uses enum names (PENDING) instead of values (pending), so we work around it
-            from sqlalchemy import text
-            # Check database enum values and use appropriate case
-            # Production uses lowercase, but local might still have uppercase
-            enum_check = db.execute(text("""
-                SELECT enumlabel 
-                FROM pg_enum 
-                WHERE enumtypid = (SELECT oid FROM pg_type WHERE typname = 'penaltyrecordstatus')
-                AND enumlabel IN ('pending', 'PENDING')
-                LIMIT 1;
-            """)).scalar()
-            
-            if enum_check and enum_check == 'pending':
-                # Production database with lowercase enum
-                status_filter = text("penalty_record.status IN ('pending', 'approved')")
-            else:
-                # Local database with uppercase enum (legacy)
-                status_filter = text("penalty_record.status IN ('PENDING', 'APPROVED')")
-            
             penalty_records = db.query(PenaltyRecord).filter(
                 PenaltyRecord.member_id == member_profile.id,
-                status_filter
+                PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING, PenaltyRecordStatus.APPROVED])
             ).order_by(PenaltyRecord.date_issued.desc()).all()
             
             # Track which penalties already appear in journal lines (to avoid duplicates in penalty records section)
@@ -2304,3 +2368,248 @@ def resubmit_deposit_proof(
         "deposit_proof_id": str(deposit.id),
         "declaration_status": declaration.status.value
     }
+
+
+# ---------------------------------------------------------------------------
+# Group Summary Report
+# ---------------------------------------------------------------------------
+
+@router.get("/reports/group-summary")
+def get_group_summary_report(
+    month: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Monthly group financial summary: savings, loans, deposits and proportional profit share."""
+    from sqlalchemy import extract, func as sqlfunc
+    from app.models.ledger import LedgerAccount, JournalEntry, JournalLine
+    from app.models.user import UserRoleEnum
+    from app.models.cycle import Cycle, CycleStatus
+
+    # ── parse month ──────────────────────────────────────────────────────────
+    if month:
+        try:
+            target_date = datetime.strptime(month, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+    else:
+        today = date.today()
+        target_date = date(today.year, today.month, 1)
+
+    month_start = datetime.combine(target_date, datetime.min.time())
+    if target_date.month == 12:
+        next_month_date = date(target_date.year + 1, 1, 1)
+    else:
+        next_month_date = date(target_date.year, target_date.month + 1, 1)
+    month_end = datetime.combine(next_month_date, datetime.min.time())
+
+    # ── members ──────────────────────────────────────────────────────────────
+    members_users = (
+        db.query(MemberProfile, User)
+        .join(User, MemberProfile.user_id == User.id)
+        .filter(MemberProfile.status == MemberStatus.ACTIVE)
+        .all()
+    )
+    members_users = [
+        (m, u) for m, u in members_users
+        if u.role not in (UserRoleEnum.ADMIN,) and (u.first_name or u.last_name)
+    ]
+    member_ids = [m.id for m, _ in members_users]
+
+    # ── batch-fetch ledger accounts ───────────────────────────────────────────
+    def _accounts_by_member(keyword: str) -> dict:
+        return {
+            a.member_id: a
+            for a in db.query(LedgerAccount).filter(
+                LedgerAccount.member_id.in_(member_ids),
+                LedgerAccount.account_name.ilike(f"%{keyword}%")
+            ).all()
+        }
+
+    savings_accs = _accounts_by_member("savings")
+    social_accs  = _accounts_by_member("social fund")
+    admin_accs   = _accounts_by_member("admin fund")
+
+    # ── helper: aggregate journal credits per account_id ─────────────────────
+    def _credit_sum(acc_ids: list, before: datetime = None, since: datetime = None,
+                    source_type: str = None) -> dict:
+        if not acc_ids:
+            return {}
+        q = (
+            db.query(JournalLine.ledger_account_id, sqlfunc.sum(JournalLine.credit_amount))
+            .join(JournalEntry)
+            .filter(
+                JournalLine.ledger_account_id.in_(acc_ids),
+                JournalLine.credit_amount > 0,
+                JournalEntry.reversed_by.is_(None)
+            )
+        )
+        if source_type:
+            q = q.filter(JournalEntry.source_type == source_type)
+        if before is not None:
+            q = q.filter(JournalEntry.entry_date < before)
+        if since is not None:
+            q = q.filter(JournalEntry.entry_date >= since)
+        return {str(acc_id): float(v or 0) for acc_id, v in q.group_by(JournalLine.ledger_account_id).all()}
+
+    def _member_val(accs: dict, amounts: dict, member_id) -> float:
+        acc = accs.get(member_id)
+        return amounts.get(str(acc.id), 0.0) if acc else 0.0
+
+    sav_ids    = [a.id for a in savings_accs.values()]
+    social_ids = [a.id for a in social_accs.values()]
+    admin_ids  = [a.id for a in admin_accs.values()]
+
+    sav_bf_map    = _credit_sum(sav_ids,    before=month_start, source_type="deposit_approval")
+    sav_month_map = _credit_sum(sav_ids,    since=month_start, before=month_end, source_type="deposit_approval")
+    social_bf_map = _credit_sum(social_ids, before=month_start, source_type="deposit_approval")
+    admin_bf_map  = _credit_sum(admin_ids,  before=month_start, source_type="deposit_approval")
+
+    total_savings_bf = sum(_member_val(savings_accs, sav_bf_map, m.id) for m, _ in members_users)
+
+    # ── declarations for this month (any status → savings_declared display) ──
+    declarations = {
+        str(d.member_id): d
+        for d in db.query(Declaration).filter(
+            Declaration.member_id.in_(member_ids),
+            extract('year',  Declaration.effective_month) == target_date.year,
+            extract('month', Declaration.effective_month) == target_date.month
+        ).all()
+    }
+
+    # ── approved declarations this month (for per-member repayment amounts) ──
+    approved_decls_month = db.query(Declaration).filter(
+        Declaration.member_id.in_(member_ids),
+        Declaration.status == DeclarationStatus.APPROVED,
+        extract('year',  Declaration.effective_month) == target_date.year,
+        extract('month', Declaration.effective_month) == target_date.month
+    ).all()
+    approved_decl_month_by_member = {str(d.member_id): d for d in approved_decls_month}
+
+    # ── approved declarations before this month (for loan_bf) ────────────────
+    approved_decls_prior = db.query(Declaration).filter(
+        Declaration.member_id.in_(member_ids),
+        Declaration.status == DeclarationStatus.APPROVED,
+        Declaration.effective_month < target_date
+    ).all()
+    prior_repayments_by_member: dict = {}
+    for d in approved_decls_prior:
+        mid_str = str(d.member_id)
+        prior_repayments_by_member[mid_str] = (
+            prior_repayments_by_member.get(mid_str, 0.0) + float(d.declared_loan_repayment or 0)
+        )
+
+    # ── loans ─────────────────────────────────────────────────────────────────
+    all_loans: dict = {}
+    for loan in db.query(Loan).filter(Loan.member_id.in_(member_ids)).all():
+        all_loans.setdefault(str(loan.member_id), []).append(loan)
+
+    # ── interest income: accrues monthly from all active outstanding loans ────
+    # When a loan is issued the monthly interest (amount × rate%) is the group's
+    # income pool. It accrues every month the loan remains outstanding.
+    total_interest_month = float(
+        db.query(sqlfunc.sum(Loan.loan_amount * Loan.percentage_interest / 100))
+        .filter(
+            Loan.disbursement_date < next_month_date,
+            Loan.disbursement_date.isnot(None),
+            Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
+        )
+        .scalar() or 0
+    )
+    # BF = monthly interest from all loans that were disbursed before this month
+    # (regardless of current status — they generated income while active)
+    total_interest_bf = float(
+        db.query(sqlfunc.sum(Loan.loan_amount * Loan.percentage_interest / 100))
+        .filter(
+            Loan.disbursement_date < target_date,
+            Loan.disbursement_date.isnot(None)
+        )
+        .scalar() or 0
+    )
+    # Total approved deposits this month — the distribution denominator
+    total_group_deposited = sum(_member_val(savings_accs, sav_month_map, m.id) for m, _ in members_users)
+
+    # ── penalties approved this month ─────────────────────────────────────────
+    penalty_types_map = {str(pt.id): pt for pt in db.query(PenaltyType).all()}
+    penalties_month: dict = {}
+    for p in db.query(PenaltyRecord).filter(
+        PenaltyRecord.member_id.in_(member_ids),
+        PenaltyRecord.status == PenaltyRecordStatus.APPROVED,
+        PenaltyRecord.approved_at >= month_start,
+        PenaltyRecord.approved_at < month_end
+    ).all():
+        penalties_month.setdefault(str(p.member_id), []).append(p)
+
+    # ── build rows ────────────────────────────────────────────────────────────
+    rows = []
+    for member, user in members_users:
+        mid  = str(member.id)
+        name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
+        savings_bf      = _member_val(savings_accs, sav_bf_map,    member.id)
+        social_admin_bf = (_member_val(social_accs, social_bf_map, member.id) +
+                           _member_val(admin_accs,  admin_bf_map,  member.id))
+
+        interest_bf = round((savings_bf / total_savings_bf) * total_interest_bf, 2) \
+            if total_savings_bf > 0 else 0.0
+
+        loan_amount_total = sum(float(l.loan_amount) for l in all_loans.get(mid, []))
+        loan_bf = max(0.0, loan_amount_total - prior_repayments_by_member.get(mid, 0.0))
+
+        decl = declarations.get(mid)
+        savings_declared      = float(decl.declared_savings_amount or 0) if decl else 0.0
+        social_admin_declared = (float(decl.declared_social_fund or 0) +
+                                 float(decl.declared_admin_fund   or 0)) if decl else 0.0
+
+        penalty_total = sum(
+            float(penalty_types_map[str(p.penalty_type_id)].fee_amount)
+            for p in penalties_month.get(mid, [])
+            if str(p.penalty_type_id) in penalty_types_map
+        )
+
+        approved_decl = approved_decl_month_by_member.get(mid)
+        repayment_principal = float(approved_decl.declared_loan_repayment or 0) if approved_decl else 0.0
+        repayment_interest  = float(approved_decl.declared_interest_on_loan or 0) if approved_decl else 0.0
+
+        total_deposited = _member_val(savings_accs, sav_month_map, member.id)
+
+        # Interest earned = member's share of this month's loan interest income,
+        # weighted by their approved deposit (not savings B/F)
+        interest_earned = round((total_deposited / total_group_deposited) * total_interest_month, 2) \
+            if total_group_deposited > 0 else 0.0
+
+        loan_applied = interest_on_loan_applied = 0.0
+        for loan in all_loans.get(mid, []):
+            if loan.disbursement_date and target_date <= loan.disbursement_date < next_month_date:
+                loan_applied             += float(loan.loan_amount)
+                interest_on_loan_applied += float(loan.loan_amount) * float(loan.percentage_interest) / 100
+
+        rows.append({
+            "name":                     name,
+            "savings_bf":               round(savings_bf, 2),
+            "social_admin_bf":          round(social_admin_bf, 2),
+            "interest_bf":              round(interest_bf, 2),
+            "loan_bf":                  round(loan_bf, 2),
+            "savings_declared":         round(savings_declared, 2),
+            "social_admin_declared":    round(social_admin_declared, 2),
+            "penalty":                  round(penalty_total, 2),
+            "loan_repayment":           round(repayment_principal, 2),
+            "interest_on_loan_paid":    round(repayment_interest, 2),
+            "total_deposited":          round(total_deposited, 2),
+            "interest_earned":          round(interest_earned, 2),
+            "loan_applied":             round(loan_applied, 2),
+            "interest_on_loan_applied": round(interest_on_loan_applied, 2),
+        })
+
+    rows.sort(key=lambda x: x["name"])
+
+    num_keys = [
+        "savings_bf", "social_admin_bf", "interest_bf", "loan_bf",
+        "savings_declared", "social_admin_declared", "penalty",
+        "loan_repayment", "interest_on_loan_paid", "total_deposited",
+        "interest_earned", "loan_applied", "interest_on_loan_applied",
+    ]
+    totals = {k: round(sum(r[k] for r in rows), 2) for k in num_keys}
+    totals["name"] = "TOTAL"
+
+    return {"month": target_date.isoformat(), "members": rows, "totals": totals}

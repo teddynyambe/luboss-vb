@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8002';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export interface ApiResponse<T> {
   data?: T;
@@ -111,7 +111,7 @@ class ApiClient {
   }
 
   async get<T>(endpoint: string): Promise<ApiResponse<T>> {
-    return this.request<T>(endpoint, { method: 'GET' });
+    return this.request<T>(endpoint, { method: 'GET', cache: 'no-store' });
   }
 
   async post<T>(endpoint: string, body?: any): Promise<ApiResponse<T>> {

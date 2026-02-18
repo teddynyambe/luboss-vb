@@ -14,19 +14,55 @@ def get_my_account_summary(
 ) -> Dict:
     """Get member's account summary (user-scoped)."""
     from app.services.member import get_member_profile_by_user_id
-    
+    from app.services.cycle import get_current_cycle
+    from app.models.policy import MemberCreditRating, CreditRatingTier
+    from app.models.transaction import PenaltyRecordStatus
+
     member_profile = get_member_profile_by_user_id(db, user_id)
     if not member_profile:
         return {"error": "Member profile not found"}
-    
+
     savings_balance = get_member_savings_balance(db, member_profile.id)
     loan_balance = get_member_loan_balance(db, member_profile.id)
-    
+
+    # Count active penalties (PENDING or APPROVED)
+    active_penalties_count = db.query(PenaltyRecord).filter(
+        PenaltyRecord.member_id == member_profile.id,
+        PenaltyRecord.status.in_([PenaltyRecordStatus.PENDING.value, PenaltyRecordStatus.APPROVED.value])
+    ).count()
+
+    # Last declaration month
+    last_declaration = db.query(Declaration).filter(
+        Declaration.member_id == member_profile.id
+    ).order_by(Declaration.effective_month.desc()).first()
+    last_declaration_month = last_declaration.effective_month.isoformat() if last_declaration else None
+
+    # Credit tier name for current cycle
+    credit_tier = None
+    try:
+        current_cycle = get_current_cycle(db)
+        if current_cycle:
+            credit_rating = db.query(MemberCreditRating).filter(
+                MemberCreditRating.member_id == member_profile.id,
+                MemberCreditRating.cycle_id == current_cycle.id
+            ).first()
+            if credit_rating:
+                tier = db.query(CreditRatingTier).filter(
+                    CreditRatingTier.id == credit_rating.tier_id
+                ).first()
+                if tier:
+                    credit_tier = tier.tier_name
+    except Exception:
+        pass
+
     return {
         "member_id": str(member_profile.id),
         "savings_balance": float(savings_balance),
         "loan_balance": float(loan_balance),
-        "status": member_profile.status.value
+        "status": member_profile.status.value,
+        "active_penalties_count": active_penalties_count,
+        "last_declaration_month": last_declaration_month,
+        "credit_tier": credit_tier
     }
 
 
@@ -343,14 +379,17 @@ def get_member_info(
     """
     from app.models.member import MemberProfile, MemberStatus
     from app.models.user import User
-    
+    from app.models.role import UserRole, Role
+    from app.models.policy import MemberCreditRating, CreditRatingTier
+    from app.models.transaction import Loan, LoanStatus
+    from app.services.cycle import get_current_cycle
+    from datetime import datetime
+
     # Build query
     query = db.query(MemberProfile).join(User, MemberProfile.user_id == User.id)
-    
+
     # Apply filters
     if search_term:
-        search_lower = search_term.lower()
-        # Search by name or email
         from sqlalchemy import or_, func
         query = query.filter(
             or_(
@@ -360,29 +399,75 @@ def get_member_info(
                 func.concat(User.first_name, " ", User.last_name).ilike(f"%{search_term}%")
             )
         )
-    
+
     if status:
         try:
             status_enum = MemberStatus(status.lower())
             query = query.filter(MemberProfile.status == status_enum)
         except ValueError:
-            # Invalid status, ignore filter
             pass
-    
-    # Get results
+
     members = query.all()
-    
+
     if not members:
         return {
             "members": [],
             "count": 0,
-            "message": f"No members found matching the search criteria."
+            "message": "No members found matching the search criteria."
         }
-    
-    # Format results (exclude financial data)
+
+    # Get current cycle once for credit tier lookups
+    try:
+        current_cycle = get_current_cycle(db)
+    except Exception:
+        current_cycle = None
+
+    now = datetime.utcnow()
+
     member_list = []
     for member in members:
         user = member.user
+
+        # Active roles
+        roles = []
+        try:
+            user_roles = db.query(UserRole).join(Role).filter(
+                UserRole.user_id == user.id,
+                (UserRole.start_date.is_(None) | (UserRole.start_date <= now)),
+                (UserRole.end_date.is_(None) | (UserRole.end_date >= now))
+            ).all()
+            roles = [ur.role.name for ur in user_roles if ur.role]
+        except Exception:
+            pass
+
+        # Credit tier name for current cycle
+        credit_tier = None
+        try:
+            if current_cycle:
+                credit_rating = db.query(MemberCreditRating).filter(
+                    MemberCreditRating.member_id == member.id,
+                    MemberCreditRating.cycle_id == current_cycle.id
+                ).first()
+                if credit_rating:
+                    tier = db.query(CreditRatingTier).filter(
+                        CreditRatingTier.id == credit_rating.tier_id
+                    ).first()
+                    if tier:
+                        credit_tier = tier.tier_name
+        except Exception:
+            pass
+
+        # Has active loan
+        has_active_loan = False
+        try:
+            active_loan = db.query(Loan).filter(
+                Loan.member_id == member.id,
+                Loan.loan_status.in_([LoanStatus.DISBURSED.value, LoanStatus.OPEN.value])
+            ).first()
+            has_active_loan = active_loan is not None
+        except Exception:
+            pass
+
         member_info = {
             "member_id": str(member.id),
             "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
@@ -393,11 +478,80 @@ def get_member_info(
             "status": member.status.value,
             "date_joined": user.date_joined.isoformat() if user.date_joined else None,
             "activated_at": member.activated_at.isoformat() if member.activated_at else None,
+            "roles": roles,
+            "credit_tier": credit_tier,
+            "has_active_loan": has_active_loan
         }
         member_list.append(member_info)
-    
+
     return {
         "members": member_list,
         "count": len(member_list),
         "message": f"Found {len(member_list)} member(s)."
+    }
+
+
+def get_group_info(db: Session) -> Dict:
+    """
+    Get group-level information: total members, active member count, committee members
+    and their roles, and current cycle. Use when users ask about the group, how many
+    members, who leads the group, or who holds specific roles.
+    """
+    from app.models.member import MemberProfile, MemberStatus
+    from app.models.user import User
+    from app.models.role import UserRole, Role
+    from app.services.cycle import get_current_cycle
+    from datetime import datetime
+
+    # Member counts
+    total_members = db.query(MemberProfile).count()
+    active_members = db.query(MemberProfile).filter(
+        MemberProfile.status == MemberStatus.ACTIVE
+    ).count()
+    inactive_members = db.query(MemberProfile).filter(
+        MemberProfile.status == MemberStatus.INACTIVE
+    ).count()
+
+    # Current cycle
+    current_cycle_info = None
+    try:
+        current_cycle = get_current_cycle(db)
+        if current_cycle:
+            current_cycle_info = {
+                "year": str(current_cycle.year),
+                "status": current_cycle.status.value if hasattr(current_cycle.status, 'value') else str(current_cycle.status)
+            }
+    except Exception:
+        pass
+
+    # Committee members (users with active role assignments)
+    committee = []
+    try:
+        now = datetime.utcnow()
+        committee_roles = ["Chairman", "Treasurer", "Compliance", "Vice-Chairman", "Secretary"]
+        user_roles = db.query(UserRole).join(Role).join(
+            User, UserRole.user_id == User.id
+        ).filter(
+            Role.name.in_(committee_roles),
+            (UserRole.start_date.is_(None) | (UserRole.start_date <= now)),
+            (UserRole.end_date.is_(None) | (UserRole.end_date >= now))
+        ).all()
+
+        for ur in user_roles:
+            user = ur.user
+            name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+            committee.append({
+                "name": name,
+                "role": ur.role.name
+            })
+    except Exception:
+        pass
+
+    return {
+        "group_name": "Luboss VB",
+        "total_members": total_members,
+        "active_members": active_members,
+        "inactive_members": inactive_members,
+        "current_cycle": current_cycle_info,
+        "committee": committee
     }

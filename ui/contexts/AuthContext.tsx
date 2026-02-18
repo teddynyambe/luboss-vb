@@ -108,6 +108,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = () => {
+    // Fire-and-forget audit log before clearing token
+    api.post('/api/auth/logout', {}).catch(() => {});
     api.setToken(null);
     setUser(null);
   };

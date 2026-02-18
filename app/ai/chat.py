@@ -59,10 +59,15 @@ Your role is to assist members with:
 5. **Member Information** (Non-Financial):
    - Help members find information about other members (name, email, phone, status)
    - Answer questions like "Who is [name]?", "What is [name]'s email?", "Is [name] an active member?"
-   - List members by status (active, pending, suspended)
-   - Show member contact information and join dates
-   - **IMPORTANT**: Do NOT provide financial information about other members (savings, loans, penalties, credit ratings)
-   - Only provide basic member profile information: name, email, phone, status, and dates
+   - Answer questions like "Who is the chairman?", "Who is the treasurer?", "Who is the compliance officer?"
+   - Answer questions like "How many active members are in the group?", "How many members do we have?"
+   - Answer questions like "What credit tier is [name] in?" — return tier name only, never financial amounts
+   - List members by status (active, inactive)
+   - Show member contact information, join dates, roles, and credit tier names
+   - Use `get_group_info` for group-level questions (total members, committee, current cycle)
+   - Use `get_member_info` for individual member lookups
+   - **IMPORTANT**: NEVER provide savings, loan amounts, penalties, or financial transaction data about other members
+   - Only provide: name, email, phone, status, join date, role/committee position, credit tier name (not multiplier/limit), and whether they have an active loan (yes/no)
 
 6. **Penalty Information**:
    - Explain penalty types and their fee amounts
@@ -83,7 +88,8 @@ Your role is to assist members with:
 - For account queries, provide clear and accurate information based on the member's actual data
 - For credit rating queries, explain the tier name, borrowing limits, and available loan terms clearly
 - For penalty queries, use get_penalty_information to get current penalty types and rules, then explain clearly when penalties apply and whether they are automatic
-- For member information queries, you can provide basic member details (name, email, phone, status, join date) but NEVER provide financial information about other members
+- For member information queries, you can provide basic member details (name, email, phone, status, join date, roles, credit tier name, has_active_loan) but NEVER provide financial information about other members (savings, loan amounts, penalty amounts)
+- For group-level questions (total members, committee roles, current cycle), use `get_group_info`
 - If you don't have enough information, use the available tools to get it
 - Never access or discuss other members' financial accounts, savings, loans, penalties, or credit ratings
 - You can help members find contact information and basic profile details of other members
@@ -126,14 +132,9 @@ Your role is to assist members with:
         {"role": "user", "content": query}
     ]
     
-    # Check if model supports function calling
-    # Groq's tool-use models: llama-3-groq-70b-tool-use supports it
-    # llama-3.1-70b-versatile does NOT support function calling
-    # For now, use keyword-based approach (can enable function calling when using tool-use model)
-    use_function_calling = False
-    # Uncomment below to enable function calling when using a tool-use model:
-    # if "tool-use" in settings.LLM_MODEL.lower():
-    #     use_function_calling = True
+    # Enable function calling for models that support it
+    tool_use_models = ["tool-use", "3.3", "3-groq"]
+    use_function_calling = any(m in settings.LLM_MODEL.lower() for m in tool_use_models)
     
     # Update system prompt to explicitly disable tool usage when function calling is disabled
     if not use_function_calling:
@@ -168,10 +169,23 @@ Your role is to assist members with:
                     raise
                 
                 message = response.choices[0].message
-                messages.append({
+                assistant_msg = {
                     "role": message.role,
                     "content": message.content
-                })
+                }
+                if hasattr(message, 'tool_calls') and message.tool_calls:
+                    assistant_msg["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in message.tool_calls
+                    ]
+                messages.append(assistant_msg)
                 
                 # Check if LLM wants to call a tool
                 if hasattr(message, 'tool_calls') and message.tool_calls:

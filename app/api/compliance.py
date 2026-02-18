@@ -33,31 +33,32 @@ def create_penalty(
     from uuid import UUID
     
     try:
+        # Validate and convert IDs
+        try:
+            penalty_type_uuid = UUID(penalty_data.penalty_type_id)
+            member_uuid = UUID(penalty_data.member_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid ID format")
+
         # Verify penalty type exists
-        penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_data.penalty_type_id).first()
+        penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_uuid).first()
         if not penalty_type:
             raise HTTPException(status_code=404, detail="Penalty type not found")
-        
+
         # Prevent manual creation of cycle-defined penalties
         if is_cycle_defined_penalty_type(penalty_type.name):
             raise HTTPException(
                 status_code=400,
                 detail=f"Cannot manually create cycle-defined penalty '{penalty_type.name}'. These penalties are automatically created by the system."
             )
-        
-        # Validate member_id
-        try:
-            member_uuid = UUID(penalty_data.member_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid member ID format")
-        
+
         member = db.query(MemberProfile).filter(MemberProfile.id == member_uuid).first()
         if not member:
             raise HTTPException(status_code=404, detail="Member not found")
-        
+
         penalty = PenaltyRecord(
             member_id=member_uuid,
-            penalty_type_id=penalty_data.penalty_type_id,
+            penalty_type_id=penalty_type_uuid,
             status=PenaltyRecordStatus.PENDING.value,  # Use .value to ensure lowercase string is sent
             created_by=current_user.id,
             notes=penalty_data.notes
@@ -128,7 +129,11 @@ def update_penalty_type(
     from decimal import Decimal
     
     try:
-        penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+        try:
+            penalty_type_uuid = UUID(penalty_type_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid penalty type ID format")
+        penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_uuid).first()
         if not penalty_type:
             raise HTTPException(status_code=404, detail="Penalty type not found")
         

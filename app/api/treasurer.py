@@ -1,18 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, Response, Form, status
+from fastapi import APIRouter, Depends, HTTPException, Response, Form, UploadFile, File, status, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from app.db.base import get_db
 from app.core.dependencies import require_treasurer, require_any_role, get_current_user
 from app.models.user import User
-from app.models.transaction import DepositProof, DepositProofStatus, DepositApproval, PenaltyRecord, PenaltyType, Declaration, DeclarationStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus
+from app.models.transaction import DepositProof, DepositProofStatus, DepositApproval, PenaltyRecord, PenaltyType, Declaration, DeclarationStatus, LoanApplication, LoanApplicationStatus, Loan, LoanStatus, BankStatement
 from app.models.member import MemberProfile, MemberStatus
 from app.models.user import User as UserModel
 from app.services.transaction import approve_deposit, approve_penalty
 from pydantic import BaseModel
 from typing import List, Optional
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, date as date_type
 from decimal import Decimal
+from app.core.config import BANK_STATEMENTS_DIR
 
 router = APIRouter(prefix="/api/treasurer", tags=["treasurer"])
 
@@ -256,6 +257,16 @@ def approve_deposit_proof(
         )
         logger.info(f"Deposit approved successfully. Approval ID: {approval.id}")
         logger.info(f"=== DEPOSIT APPROVAL REQUEST SUCCESS ===")
+        # Get member name for audit
+        _member_user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+        _member_name = f"{_member_user.first_name or ''} {_member_user.last_name or ''}".strip() if _member_user else str(member.id)
+        from app.core.audit import write_audit_log
+        write_audit_log(
+            user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+            user_role=current_user.role.value if current_user.role else "treasurer",
+            action="Deposit approved",
+            details=f"member={_member_name}, amount=K {deposit.amount}"
+        )
         return {"message": "Deposit approved and posted to ledger successfully", "approval_id": str(approval.id)}
     except Exception as e:
         import traceback
@@ -319,7 +330,18 @@ def reject_deposit_proof(
     
     db.commit()
     db.refresh(deposit)
-    
+
+    # Get member name for audit
+    _rej_member = db.query(MemberProfile).filter(MemberProfile.id == deposit.member_id).first()
+    _rej_user = db.query(UserModel).filter(UserModel.id == _rej_member.user_id).first() if _rej_member else None
+    _rej_name = f"{_rej_user.first_name or ''} {_rej_user.last_name or ''}".strip() if _rej_user else str(deposit.member_id)
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Deposit rejected",
+        details=f"member={_rej_name}"
+    )
     return {
         "message": "Deposit proof rejected. Member can now respond and update their declaration.",
         "deposit_id": str(deposit.id)
@@ -539,6 +561,15 @@ def approve_penalty_record(
             member_savings_account_id=member_savings.id,
             penalty_income_account_id=penalty_income.id
         )
+        _pen_user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+        _pen_name = f"{_pen_user.first_name or ''} {_pen_user.last_name or ''}".strip() if _pen_user else str(member.id)
+        from app.core.audit import write_audit_log
+        write_audit_log(
+            user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+            user_role=current_user.role.value if current_user.role else "treasurer",
+            action="Penalty approved",
+            details=f"member={_pen_name}"
+        )
         return {"message": "Penalty approved and charged to member account successfully", "penalty_id": str(penalty.id)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -570,14 +601,22 @@ def assign_credit_rating(
 ):
     """Assign credit rating to a member."""
     from app.models.policy import MemberCreditRating, CreditRatingTier
-    tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == tier_id).first()
+
+    try:
+        member_uuid = UUID(member_id)
+        tier_uuid = UUID(tier_id)
+        cycle_uuid = UUID(cycle_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid ID format")
+
+    tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == tier_uuid).first()
     if not tier:
         raise HTTPException(status_code=404, detail="Credit rating tier not found")
-    
+
     rating = MemberCreditRating(
-        member_id=member_id,
-        cycle_id=cycle_id,
-        tier_id=tier_id,
+        member_id=member_uuid,
+        cycle_id=cycle_uuid,
+        tier_id=tier_uuid,
         scheme_id=tier.scheme_id,
         assigned_by=current_user.id
     )
@@ -872,6 +911,16 @@ def approve_loan_application(
             detail=f"Failed to disburse loan: {str(e)}"
         )
     
+    _loan_member = db.query(MemberProfile).filter(MemberProfile.id == application.member_id).first()
+    _loan_user = db.query(UserModel).filter(UserModel.id == _loan_member.user_id).first() if _loan_member else None
+    _loan_name = f"{_loan_user.first_name or ''} {_loan_user.last_name or ''}".strip() if _loan_user else str(application.member_id)
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Loan approved & disbursed",
+        details=f"member={_loan_name}, amount=K {application.amount}"
+    )
     return {
         "message": "Loan approved, disbursed, and posted to member's account successfully",
         "loan_id": str(loan.id),
@@ -880,7 +929,7 @@ def approve_loan_application(
 
 
 @router.post("/loans/{loan_id}/disburse")
-def disburse_loan(
+def disburse_loan_endpoint(
     loan_id: str,
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
@@ -888,17 +937,22 @@ def disburse_loan(
     """Disburse an approved loan, post to ledger, and change status to OPEN (active)."""
     from app.models.ledger import LedgerAccount
     from app.services.transaction import disburse_loan
-    
+
+    try:
+        loan_uuid = UUID(loan_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid loan ID format")
+
     # Get account IDs
     bank_cash = db.query(LedgerAccount).filter(LedgerAccount.account_code == "BANK_CASH").first()
     loans_receivable = db.query(LedgerAccount).filter(LedgerAccount.account_code.like("LOANS_RECEIVABLE%")).first()
-    
+
     if not all([bank_cash, loans_receivable]):
         raise HTTPException(status_code=500, detail="Required ledger accounts not found")
-    
+
     loan = disburse_loan(
         db=db,
-        loan_id=loan_id,
+        loan_id=loan_uuid,
         disbursed_by=current_user.id,
         bank_cash_account_id=bank_cash.id,
         loans_receivable_account_id=loans_receivable.id
@@ -910,7 +964,7 @@ def disburse_loan(
 @router.get("/reports/declarations")
 def get_declarations_report(
     month: Optional[str] = None,  # Format: YYYY-MM-DD (first day of month)
-    current_user: User = Depends(require_treasurer),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
     """Get all members with their declarations for a specific month. Returns all members, showing declaration amount if exists, and payment status."""
@@ -927,21 +981,27 @@ def get_declarations_report(
         today = date.today()
         target_date = date(today.year, today.month, 1)
     
+    from app.models.user import UserRoleEnum
+
     # Get all active members
     members = db.query(MemberProfile).filter(
         MemberProfile.status == MemberStatus.ACTIVE
     ).all()
-    
+
     result = []
     for member in members:
         user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
         if not user:
             continue
-        
+
+        # Exclude admin users from the report
+        if user.role == UserRoleEnum.ADMIN:
+            continue
+
         member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
         if not member_name:
             continue
-        
+
         # Find declaration for this month (include all statuses: PENDING, PROOF, APPROVED, etc.)
         declaration = db.query(Declaration).filter(
             and_(
@@ -950,8 +1010,8 @@ def get_declarations_report(
                 extract('month', Declaration.effective_month) == target_date.month
             )
         ).first()
-        
-        # Calculate total declaration amount
+
+        # Calculate total declaration amount (None if no declaration)
         declaration_amount = None
         if declaration:
             total = Decimal("0.00")
@@ -968,7 +1028,7 @@ def get_declarations_report(
             if declaration.declared_loan_repayment:
                 total += declaration.declared_loan_repayment
             declaration_amount = float(total) if total > 0 else None
-        
+
         # Check if deposit proof is approved (paid)
         is_paid = False
         if declaration:
@@ -977,15 +1037,14 @@ def get_declarations_report(
                 DepositProof.status == DepositProofStatus.APPROVED.value
             ).first()
             is_paid = deposit_proof is not None
-        
-        # Only include members who have declarations (filter out members without declarations)
-        if declaration:
-            result.append({
-                "member_id": str(member.id),
-                "member_name": member_name,
-                "declaration_amount": declaration_amount,
-                "is_paid": is_paid
-            })
+
+        # Include ALL members (with or without declarations)
+        result.append({
+            "member_id": str(member.id),
+            "member_name": member_name,
+            "declaration_amount": declaration_amount,
+            "is_paid": is_paid
+        })
     
     # Sort by member name
     result.sort(key=lambda x: x["member_name"])
@@ -1000,7 +1059,7 @@ def get_declarations_report(
 def get_declaration_details_report(
     member_id: Optional[str] = None,
     month: Optional[str] = None,
-    current_user: User = Depends(require_treasurer),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
     """Get declaration details for a member and month (view-only, for Reports modal)."""
@@ -1084,49 +1143,260 @@ def get_declaration_details_report(
 
 @router.get("/reports/loans")
 def get_loans_report(
-    current_user: User = Depends(require_treasurer),
+    month: Optional[str] = Query(None, description="YYYY-MM-DD — filter by disbursement month"),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Get all active loans with their status (disbursed/paid)."""
-    # Get all active loans (OPEN status)
+    """Get loans disbursed in the given month (defaults to current month)."""
+    from sqlalchemy import extract, and_
+
+    # Determine target year/month
+    if month:
+        try:
+            target_date = datetime.strptime(month[:10], "%Y-%m-%d")
+        except ValueError:
+            target_date = datetime.now()
+    else:
+        target_date = datetime.now()
+
+    target_year = target_date.year
+    target_month = target_date.month
+
+    # Query all loans disbursed in the target month (both normal OPEN and reconciliation DISBURSED)
     loans = db.query(Loan).filter(
-        Loan.loan_status == LoanStatus.OPEN
-    ).order_by(Loan.created_at.desc()).all()
-    
+        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
+        extract("year", Loan.disbursement_date) == target_year,
+        extract("month", Loan.disbursement_date) == target_month,
+    ).order_by(Loan.disbursement_date.asc()).all()
+
     result = []
     for loan in loans:
         member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
-        user = None
-        if member:
-            user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
-        
+        user = db.query(UserModel).filter(UserModel.id == member.user_id).first() if member else None
         if not user:
             continue
-        
+
         member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
         if not member_name:
             continue
-        
-        # Check if loan is disbursed (has disbursement_date)
-        is_disbursed = loan.disbursement_date is not None
-        
-        # Check if loan is fully paid (outstanding balance is 0 or very small)
-        total_principal_paid = sum(repayment.principal_amount for repayment in loan.repayments)
-        outstanding_balance = loan.loan_amount - total_principal_paid
-        is_paid = outstanding_balance <= Decimal("0.01")  # Consider paid if balance is <= 1 cent
-        
+
         result.append({
             "loan_id": str(loan.id),
             "member_id": str(loan.member_id),
             "member_name": member_name,
             "loan_amount": float(loan.loan_amount),
-            "is_disbursed": is_disbursed,
-            "is_paid": is_paid
+            "is_approved": True,
+            "is_disbursed": True,
+            "is_paid": True,
         })
-    
-    # Sort by member name
+
     result.sort(key=lambda x: x["member_name"])
-    
+
+    return {"loans": result}
+
+
+# ---------------------------------------------------------------------------
+# Bank Statement endpoints
+# ---------------------------------------------------------------------------
+
+ALLOWED_STMT_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png"}
+
+
+@router.post("/bank-statements")
+async def upload_bank_statement(
+    file: UploadFile = File(...),
+    month: str = Form(...),  # YYYY-MM-DD
+    description: Optional[str] = Form(None),
+    cycle_id: Optional[str] = Form(None),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Upload a bank statement PDF/image for the active (or specified) cycle."""
+    from pathlib import Path
+    from app.models.cycle import Cycle, CycleStatus
+
+    # Validate month
+    try:
+        stmt_month = datetime.strptime(month, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+
+    # Resolve cycle
+    if cycle_id:
+        try:
+            cycle_uuid = UUID(cycle_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid cycle_id format")
+        cycle = db.query(Cycle).filter(Cycle.id == cycle_uuid).first()
+        if not cycle:
+            raise HTTPException(status_code=404, detail="Cycle not found")
+    else:
+        cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+        if not cycle:
+            raise HTTPException(status_code=404, detail="No active cycle found")
+
+    # Validate file extension
+    original_name = file.filename or "upload"
+    ext = Path(original_name).suffix.lower()
+    if ext not in ALLOWED_STMT_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_STMT_EXTENSIONS)}")
+
+    # Build safe filename
+    short_cycle_id = str(cycle.id).replace("-", "")[:8]
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_original = "".join(c if c.isalnum() or c in "._-" else "_" for c in original_name)
+    filename = f"stmt_{short_cycle_id}_{timestamp}_{safe_original}"
+
+    # Ensure directory exists
+    BANK_STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+    file_path = BANK_STATEMENTS_DIR / filename
+
+    # Save file
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Persist record
+    stmt = BankStatement(
+        cycle_id=cycle.id,
+        statement_month=stmt_month,
+        description=description,
+        upload_path=str(file_path),
+        uploaded_by=current_user.id
+    )
+    db.add(stmt)
+    db.commit()
+    db.refresh(stmt)
+
     return {
-        "loans": result
+        "message": "Bank statement uploaded successfully",
+        "id": str(stmt.id),
+        "filename": filename
     }
+
+
+@router.get("/bank-statements")
+def list_bank_statements(
+    cycle_id: Optional[str] = None,
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """List bank statements for the active (or specified) cycle."""
+    from pathlib import Path
+    from app.models.cycle import Cycle, CycleStatus
+
+    if cycle_id:
+        try:
+            cycle_uuid = UUID(cycle_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid cycle_id format")
+    else:
+        cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+        if not cycle:
+            return {"statements": []}
+        cycle_uuid = cycle.id
+
+    stmts = (
+        db.query(BankStatement)
+        .filter(BankStatement.cycle_id == cycle_uuid)
+        .order_by(BankStatement.statement_month.desc())
+        .all()
+    )
+
+    return {
+        "statements": [
+            {
+                "id": str(s.id),
+                "cycle_id": str(s.cycle_id),
+                "statement_month": s.statement_month.isoformat(),
+                "description": s.description,
+                "filename": Path(s.upload_path).name,
+                "uploaded_at": s.uploaded_at.isoformat() if s.uploaded_at else None
+            }
+            for s in stmts
+        ]
+    }
+
+
+@router.put("/bank-statements/{statement_id}")
+async def update_bank_statement(
+    statement_id: str,
+    description: Optional[str] = Form(None),
+    month: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Edit description/month and optionally replace the file for a bank statement."""
+    from pathlib import Path
+
+    try:
+        stmt_uuid = UUID(statement_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid statement ID format")
+
+    stmt = db.query(BankStatement).filter(BankStatement.id == stmt_uuid).first()
+    if not stmt:
+        raise HTTPException(status_code=404, detail="Bank statement not found")
+
+    if month is not None:
+        try:
+            stmt.statement_month = datetime.strptime(month, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+
+    if description is not None:
+        stmt.description = description
+
+    if file and file.filename:
+        original_name = file.filename
+        ext = Path(original_name).suffix.lower()
+        if ext not in ALLOWED_STMT_EXTENSIONS:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_STMT_EXTENSIONS)}")
+
+        short_cycle_id = str(stmt.cycle_id).replace("-", "")[:8]
+        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        safe_original = "".join(c if c.isalnum() or c in "._-" else "_" for c in original_name)
+        filename = f"stmt_{short_cycle_id}_{timestamp}_{safe_original}"
+
+        BANK_STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        file_path = BANK_STATEMENTS_DIR / filename
+
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        stmt.upload_path = str(file_path)
+
+    db.commit()
+    db.refresh(stmt)
+    return {"message": "Bank statement updated successfully", "id": str(stmt.id)}
+
+
+@router.get("/bank-statements/file/{filename:path}")
+def get_bank_statement_file(
+    filename: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Serve a bank statement file (accessible by Treasurer, Chairman, Admin, and Member)."""
+    from pathlib import Path
+    from urllib.parse import unquote
+
+    filename = unquote(filename)
+    safe_filename = Path(filename).name
+    file_path = BANK_STATEMENTS_DIR / safe_filename
+
+    if not file_path.exists() or not str(file_path.resolve()).startswith(str(BANK_STATEMENTS_DIR.resolve())):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    ext = Path(safe_filename).suffix.lower()
+    media_types = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+    }
+    media_type = media_types.get(ext, "application/octet-stream")
+
+    return FileResponse(path=str(file_path), filename=safe_filename, media_type=media_type)

@@ -90,7 +90,8 @@ def initialize_tools():
         get_my_credit_rating,
         get_policy_answer,
         get_member_info,
-        get_penalty_information
+        get_penalty_information,
+        get_group_info
     )
     
     register_tool(
@@ -194,6 +195,17 @@ def initialize_tools():
             "required": []
         },
         function=get_penalty_information
+    )
+
+    register_tool(
+        name="get_group_info",
+        description="Get group-level information: total members, active member count, committee members and their roles, and current cycle. Use when users ask about the group, how many members, who leads the group, or who holds specific roles.",
+        parameters={
+            "type": "object",
+            "properties": {},
+            "required": []
+        },
+        function=get_group_info
     )
 
 

@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     EMBEDDING_MODEL: str = "text-embedding-3-small"
-    LLM_MODEL: str = "llama-3.1-70b-versatile"
+    LLM_MODEL: str = "llama3-groq-70b-8192-tool-use"
     
     # Feature Flags
     ENABLE_AI_CHAT: bool = True
@@ -53,5 +53,5 @@ settings = Settings()
 # Derived paths
 UPLOADS_DIR = BASE_DIR / "uploads"
 DEPOSIT_PROOFS_DIR = UPLOADS_DIR / "deposit_proofs"
-CONSTITUTION_UPLOADS_DIR = UPLOADS_DIR / "constitution"
+BANK_STATEMENTS_DIR = UPLOADS_DIR / "bank_statements"
 CONSTITUTION_UPLOADS_DIR = UPLOADS_DIR / "constitution"

@@ -92,6 +92,15 @@ interface LoanDetail {
   }>;
 }
 
+interface BankStatementItem {
+  id: string;
+  cycle_id: string;
+  statement_month: string;   // "YYYY-MM-DD"
+  description: string | null;
+  filename: string;          // basename only
+  uploaded_at: string | null;
+}
+
 
 export default function TreasurerDashboard() {
   const { user } = useAuth();
@@ -121,7 +130,16 @@ export default function TreasurerDashboard() {
   const [proofError, setProofError] = useState<string | null>(null);
   const [penaltyNotification, setPenaltyNotification] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [approvingPenalty, setApprovingPenalty] = useState<string | null>(null);
-  
+
+  // Bank Statements state
+  const [bankStatements, setBankStatements] = useState<BankStatementItem[]>([]);
+  const [showBankStmtModal, setShowBankStmtModal] = useState(false);
+  const [editingStmt, setEditingStmt] = useState<BankStatementItem | null>(null);
+  const [bankStmtFile, setBankStmtFile] = useState<File | null>(null);
+  const [bankStmtMonth, setBankStmtMonth] = useState('');
+  const [bankStmtDesc, setBankStmtDesc] = useState('');
+  const [uploadingStmt, setUploadingStmt] = useState(false);
+
   // Reports state
   interface DeclarationReportMember {
     member_id: string;
@@ -135,6 +153,7 @@ export default function TreasurerDashboard() {
     member_id: string;
     member_name: string;
     loan_amount: number;
+    is_approved: boolean;
     is_disbursed: boolean;
     is_paid: boolean;
   }
@@ -206,16 +225,20 @@ export default function TreasurerDashboard() {
   const loadReports = async () => {
     setLoadingReports(true);
     try {
-      const [declarationsRes, loansRes] = await Promise.all([
+      const [declarationsRes, loansRes, stmtsRes] = await Promise.all([
         api.get<{ month: string; members: DeclarationReportMember[] }>(`/api/treasurer/reports/declarations?month=${selectedReportMonth}`),
-        api.get<{ loans: LoanReportItem[] }>('/api/treasurer/reports/loans'),
+        api.get<{ loans: LoanReportItem[] }>(`/api/treasurer/reports/loans?month=${selectedReportMonth}`),
+        api.get<{ statements: BankStatementItem[] }>('/api/treasurer/bank-statements'),
       ]);
-      
+
       if (declarationsRes.data) {
         setDeclarationsReport(declarationsRes.data.members);
       }
       if (loansRes.data) {
         setLoansReport(loansRes.data.loans);
+      }
+      if (stmtsRes.data) {
+        setBankStatements(stmtsRes.data.statements);
       }
     } catch (err: any) {
       console.error('Error loading reports:', err);
@@ -248,12 +271,12 @@ export default function TreasurerDashboard() {
   const copyDeclarationsReport = () => {
     const monthFormatted = formatMonth(selectedReportMonth);
     let text = `${monthFormatted} Declarations\n\n`;
-    
+
     declarationsReport.forEach((member, index) => {
-      const amount = member.declaration_amount 
+      const amount = member.declaration_amount != null
         ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
-        : 'K';
-      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name} ${amount}\n`;
+        : '';
+      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name}${amount ? ' ' + amount : ''}\n`;
     });
     
     navigator.clipboard.writeText(text).then(() => {
@@ -266,9 +289,9 @@ export default function TreasurerDashboard() {
 
   const copyLoansReport = () => {
     let text = `Loans\n`;
-    
+
     loansReport.forEach((loan, index) => {
-      const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
+      const status = loan.is_approved ? ' ✅' : '';
       text += `${String(index + 1).padStart(2, ' ')}. ${loan.member_name} K${loan.loan_amount.toLocaleString()}${status}\n`;
     });
     
@@ -283,17 +306,17 @@ export default function TreasurerDashboard() {
   const copyFullReport = () => {
     const monthFormatted = formatMonth(selectedReportMonth);
     let text = `${monthFormatted} Declarations\n\n`;
-    
+
     declarationsReport.forEach((member, index) => {
-      const amount = member.declaration_amount 
+      const amount = member.declaration_amount != null
         ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
-        : 'K';
-      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name} ${amount}\n`;
+        : '';
+      text += `${String(index + 1).padStart(2, ' ')}. ${member.member_name}${amount ? ' ' + amount : ''}\n`;
     });
     
     text += `\nLoans\n`;
     loansReport.forEach((loan, index) => {
-      const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
+      const status = loan.is_approved ? ' ✅' : '';
       text += `${String(index + 1).padStart(2, ' ')}. ${loan.member_name} K${loan.loan_amount.toLocaleString()}${status}\n`;
     });
     
@@ -504,6 +527,84 @@ export default function TreasurerDashboard() {
     return ['jpg', 'jpeg', 'png', 'gif'].includes(ext);
   };
 
+  const openUploadStmtModal = () => {
+    setEditingStmt(null);
+    setBankStmtFile(null);
+    setBankStmtMonth('');
+    setBankStmtDesc('');
+    setShowBankStmtModal(true);
+  };
+
+  const openEditStmtModal = (stmt: BankStatementItem) => {
+    setEditingStmt(stmt);
+    setBankStmtFile(null);
+    setBankStmtMonth(stmt.statement_month.substring(0, 7)); // YYYY-MM
+    setBankStmtDesc(stmt.description || '');
+    setShowBankStmtModal(true);
+  };
+
+  const closeBankStmtModal = () => {
+    setShowBankStmtModal(false);
+    setEditingStmt(null);
+    setBankStmtFile(null);
+  };
+
+  const handleViewStatement = async (stmt: BankStatementItem) => {
+    setProofLoading(true);
+    setProofError(null);
+    setShowProofModal(true);
+    setSelectedDepositForProof({ upload_path: stmt.filename } as any);
+    try {
+      const blobUrl = await api.getFileBlob(`/api/treasurer/bank-statements/file/${encodeURIComponent(stmt.filename)}`);
+      setProofBlobUrl(blobUrl);
+    } catch (error) {
+      setProofError(error instanceof Error ? error.message : 'Failed to load file');
+      setProofBlobUrl(null);
+    } finally {
+      setProofLoading(false);
+    }
+  };
+
+  const handleSubmitBankStmt = async () => {
+    if (!editingStmt && !bankStmtFile) {
+      setMessage({ type: 'error', text: 'Please select a file to upload.' });
+      return;
+    }
+    if (!bankStmtMonth) {
+      setMessage({ type: 'error', text: 'Please select a month.' });
+      return;
+    }
+
+    setUploadingStmt(true);
+    try {
+      const formData = new FormData();
+      const monthDate = `${bankStmtMonth}-01`;
+      formData.append('month', monthDate);
+      if (bankStmtDesc) formData.append('description', bankStmtDesc);
+      if (bankStmtFile) formData.append('file', bankStmtFile);
+
+      let response;
+      if (editingStmt) {
+        response = await api.putFormData(`/api/treasurer/bank-statements/${editingStmt.id}`, formData);
+      } else {
+        response = await api.postFormData('/api/treasurer/bank-statements', formData);
+      }
+
+      if (!response.error) {
+        setMessage({ type: 'success', text: editingStmt ? 'Bank statement updated.' : 'Bank statement uploaded.' });
+        closeBankStmtModal();
+        await loadReports();
+      } else {
+        setMessage({ type: 'error', text: response.error });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Error saving bank statement' });
+    } finally {
+      setUploadingStmt(false);
+      setTimeout(() => setMessage(null), 5000);
+    }
+  };
+
   const handleApprovePenalty = async (penaltyId: string) => {
     setApprovingPenalty(penaltyId);
     setPenaltyNotification(null);
@@ -564,6 +665,16 @@ export default function TreasurerDashboard() {
             {penaltyNotification.text}
           </div>
         )}
+
+        {/* Quick Actions */}
+        <div className="mb-4 flex gap-3">
+          <Link
+            href="/dashboard/reconcile"
+            className="inline-flex items-center px-4 py-2 bg-gradient-to-br from-blue-500 to-blue-600 border-2 border-blue-600 text-white rounded-lg font-semibold text-sm hover:from-blue-600 hover:to-blue-700 transition-all"
+          >
+            Reconciliation
+          </Link>
+        </div>
 
         {loading ? (
           <div className="text-center py-12">
@@ -837,28 +948,30 @@ export default function TreasurerDashboard() {
                       </div>
                       <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
                         {declarationsReport.length === 0 ? (
-                          <p className="text-blue-700 text-center py-4">No declarations for this month</p>
+                          <p className="text-blue-700 text-center py-4">No members for this month</p>
                         ) : (
-                          declarationsReport.map((member, index) => {
-                            const amount = member.declaration_amount 
-                              ? `K${member.declaration_amount.toLocaleString()}${member.is_paid ? ' ✅' : ''}`
-                              : 'K';
-                            return (
-                              <div key={member.member_id} className="flex items-center gap-2 py-1">
-                                <span className="text-blue-600 w-6 text-right">
-                                  {String(index + 1).padStart(2, ' ')}.
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleViewDeclarationDetails(member.member_id)}
-                                  className="flex-1 text-left text-blue-900 hover:text-blue-600 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-400 rounded px-1 -mx-1"
-                                >
-                                  {member.member_name}
-                                </button>
-                                <span className="text-blue-700 font-semibold">{amount}</span>
-                              </div>
-                            );
-                          })
+                          declarationsReport.map((member, index) => (
+                            <div key={member.member_id} className="flex items-center gap-2 py-1">
+                              <span className="text-blue-600 w-6 text-right">
+                                {String(index + 1).padStart(2, ' ')}.
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleViewDeclarationDetails(member.member_id)}
+                                className="flex-1 text-left text-blue-900 hover:text-blue-600 hover:underline focus:outline-none focus:ring-2 focus:ring-blue-400 rounded px-1 -mx-1"
+                              >
+                                {member.member_name}
+                              </button>
+                              <span className="flex items-center gap-1 text-blue-700 font-semibold">
+                                {member.declaration_amount != null
+                                  ? `K${member.declaration_amount.toLocaleString()}`
+                                  : ''}
+                                {member.declaration_amount != null && member.is_paid && (
+                                  <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
+                                )}
+                              </span>
+                            </div>
+                          ))
                         )}
                       </div>
                     </div>
@@ -876,15 +989,14 @@ export default function TreasurerDashboard() {
                       </div>
                       <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
                         {loansReport.length === 0 ? (
-                          <p className="text-green-700 text-center py-4">No active loans</p>
+                          <p className="text-green-700 text-center py-4">No loan applications</p>
                         ) : (
-                          loansReport.map((loan, index) => {
-                            const status = loan.is_paid ? ' ✅' : loan.is_disbursed ? '' : '';
-                            return (
-                              <div key={loan.loan_id} className="flex items-center gap-2 py-1">
-                                <span className="text-green-600 w-6 text-right">
-                                  {String(index + 1).padStart(2, ' ')}.
-                                </span>
+                          loansReport.map((loan, index) => (
+                            <div key={loan.loan_id} className="flex items-center gap-2 py-1">
+                              <span className="text-green-600 w-6 text-right">
+                                {String(index + 1).padStart(2, ' ')}.
+                              </span>
+                              {loan.is_approved ? (
                                 <button
                                   type="button"
                                   onClick={() => handleViewLoanDetails(loan.loan_id)}
@@ -892,17 +1004,64 @@ export default function TreasurerDashboard() {
                                 >
                                   {loan.member_name}
                                 </button>
-                                <span className="text-green-700 font-semibold">
-                                  K{loan.loan_amount.toLocaleString()}{status}
+                              ) : (
+                                <span className="flex-1 text-green-900">
+                                  {loan.member_name}
                                 </span>
-                              </div>
-                            );
-                          })
+                              )}
+                              <span className="flex items-center gap-1 text-green-700 font-semibold">
+                                K{loan.loan_amount.toLocaleString()}
+                                {loan.is_approved && (
+                                  <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
+                                )}
+                              </span>
+                            </div>
+                          ))
                         )}
                       </div>
                     </div>
                   </div>
                 )}
+
+                {/* Bank Statements Panel */}
+                <div className="bg-white border-2 border-purple-200 rounded-lg p-4">
+                  <div className="flex justify-between items-center mb-3">
+                    <h3 className="text-base font-bold text-purple-900">Bank Statements</h3>
+                    <button
+                      onClick={openUploadStmtModal}
+                      className="px-3 py-1 bg-purple-600 text-white rounded text-xs font-semibold hover:bg-purple-700 transition-colors"
+                    >
+                      + Upload
+                    </button>
+                  </div>
+                  {bankStatements.length === 0 ? (
+                    <p className="text-purple-700 text-sm text-center py-4">No bank statements for this cycle</p>
+                  ) : (
+                    <div className="space-y-2 max-h-[300px] overflow-y-auto">
+                      {bankStatements.map((stmt, index) => (
+                        <div key={stmt.id} className="flex items-center gap-2 py-1 text-sm font-mono">
+                          <span className="text-purple-600 w-6 text-right">{String(index + 1).padStart(2, ' ')}.</span>
+                          <span className="flex-1 text-purple-900 font-semibold">{formatMonth(stmt.statement_month)}</span>
+                          {stmt.description && (
+                            <span className="text-purple-700 text-xs truncate max-w-[180px]">{stmt.description}</span>
+                          )}
+                          <button
+                            onClick={() => handleViewStatement(stmt)}
+                            className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-semibold hover:bg-purple-200 transition-colors flex-shrink-0"
+                          >
+                            View
+                          </button>
+                          <button
+                            onClick={() => openEditStmtModal(stmt)}
+                            className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-semibold hover:bg-gray-200 transition-colors flex-shrink-0"
+                          >
+                            Edit
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -1588,6 +1747,63 @@ export default function TreasurerDashboard() {
                   className="px-4 py-2 md:px-6 md:py-3 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200"
                 >
                   {approvingLoan === loanToApprove.id ? 'Approving...' : 'Approve & Disburse Loan'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bank Statement Upload/Edit Modal */}
+      {showBankStmtModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50" onClick={closeBankStmtModal}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-purple-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-center">
+              <h2 className="text-xl font-bold">{editingStmt ? 'Edit Bank Statement' : 'Upload Bank Statement'}</h2>
+              <button onClick={closeBankStmtModal} className="text-white hover:text-purple-200 text-2xl font-bold">×</button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-blue-900 mb-1">Statement Month *</label>
+                <input
+                  type="month"
+                  value={bankStmtMonth}
+                  onChange={(e) => setBankStmtMonth(e.target.value)}
+                  className="w-full px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-blue-900 mb-1">Description / Narration</label>
+                <textarea
+                  value={bankStmtDesc}
+                  onChange={(e) => setBankStmtDesc(e.target.value)}
+                  rows={3}
+                  className="w-full px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="e.g. Monthly reconciliation"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-blue-900 mb-1">
+                  {editingStmt ? 'Replace File (optional)' : 'File *'} <span className="text-xs font-normal text-blue-600">PDF, JPG, PNG</span>
+                </label>
+                {editingStmt && (
+                  <p className="text-xs text-blue-600 mb-1">Current: {editingStmt.filename}</p>
+                )}
+                <input
+                  type="file"
+                  accept=".pdf,.jpg,.jpeg,.png"
+                  onChange={(e) => setBankStmtFile(e.target.files?.[0] || null)}
+                  className="w-full text-sm text-blue-900 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-sm file:font-semibold file:bg-purple-100 file:text-purple-700 hover:file:bg-purple-200"
+                />
+              </div>
+              <div className="flex justify-end gap-3 pt-2">
+                <button onClick={closeBankStmtModal} className="btn-secondary">Cancel</button>
+                <button
+                  onClick={handleSubmitBankStmt}
+                  disabled={uploadingStmt}
+                  className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50 text-sm font-semibold transition-colors"
+                >
+                  {uploadingStmt ? 'Saving...' : (editingStmt ? 'Save Changes' : 'Upload')}
                 </button>
               </div>
             </div>

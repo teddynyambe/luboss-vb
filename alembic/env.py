@@ -1,5 +1,4 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 from alembic import context
 import os
@@ -29,8 +28,9 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Set the SQLAlchemy URL from settings
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# NOTE: do NOT call config.set_main_option here — configparser treats '%'
+# as an interpolation character, which breaks any percent-encoded passwords.
+# The URL is consumed directly from `settings.DATABASE_URL` in each run function.
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -54,12 +54,12 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=settings.DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        render_as_batch=True,
     )
 
     with context.begin_transaction():
@@ -73,15 +73,12 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    from sqlalchemy import create_engine as _create_engine
+    connectable = _create_engine(settings.DATABASE_URL, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, target_metadata=target_metadata, render_as_batch=True
         )
 
         with context.begin_transaction():

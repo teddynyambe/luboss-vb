@@ -70,9 +70,14 @@ def create_declaration(
 ) -> Declaration:
     """
     Create a member declaration.
-    
+
     Validates that no declaration exists for the same member, cycle, and month.
     """
+    # Ensure UUID objects — callers may pass strings
+    if isinstance(member_id, str):
+        member_id = UUID(member_id)
+    if isinstance(cycle_id, str):
+        cycle_id = UUID(cycle_id)
     from sqlalchemy import and_, extract
     
     # Check if declaration already exists for this member, cycle, and month
@@ -414,11 +419,18 @@ def update_declaration(
 ) -> Declaration:
     """
     Update a declaration.
-    
+
     Only allows updates if:
     1. Current date is before the 20th of the declaration's effective month (unless allow_rejected_edit=True)
     2. Declaration status is PENDING (or APPROVED if allow_rejected_edit=True)
     """
+    # Ensure UUID objects — callers may pass strings
+    if isinstance(declaration_id, str):
+        declaration_id = UUID(declaration_id)
+    if isinstance(member_id, str):
+        member_id = UUID(member_id)
+    if isinstance(cycle_id, str):
+        cycle_id = UUID(cycle_id)
     from datetime import date
     
     declaration = db.query(Declaration).filter(
@@ -768,10 +780,12 @@ def disburse_loan(
     
     The loan is posted to the member's account (visible in loan balance).
     """
+    if isinstance(loan_id, str):
+        loan_id = UUID(loan_id)
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise ValueError("Loan not found")
-    
+
     if loan.loan_status not in [LoanStatus.APPROVED]:
         raise ValueError("Loan must be approved before disbursement")
     

@@ -76,15 +76,29 @@ def register(user_data: UserRegister, db: Session = Depends(get_db)):
 @router.post("/login", response_model=Token)
 def login(credentials: UserLogin, db: Session = Depends(get_db)):
     """Login and get JWT token."""
+    from app.core.audit import write_audit_log
     user = authenticate_user(db, credentials.email, credentials.password)
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password"
         )
-    
+
     access_token = create_access_token_for_user(user)
+    user_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or user.email
+    user_role = user.role.value if user.role else "member"
+    write_audit_log(user_name=user_name, user_role=user_role, action="Login", details=f"email={user.email}")
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/logout")
+def logout(current_user: User = Depends(get_current_user)):
+    """Record logout in audit log (token invalidation is handled client-side)."""
+    from app.core.audit import write_audit_log
+    user_name = f"{current_user.first_name or ''} {current_user.last_name or ''}".strip() or current_user.email
+    user_role = current_user.role.value if current_user.role else "member"
+    write_audit_log(user_name=user_name, user_role=user_role, action="Logout", details=f"email={current_user.email}")
+    return {"message": "Logged out"}
 
 
 @router.get("/me", response_model=UserResponse)

@@ -1,4 +1,5 @@
 """RAG retrieval service."""
+import json
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.models.ai import DocumentChunk, DocumentEmbedding
@@ -14,7 +15,7 @@ def retrieve_relevant_chunks(
     document_name: str = None
 ) -> List[Dict[str, Any]]:
     """
-    Retrieve relevant document chunks using pgvector cosine similarity.
+    Retrieve relevant document chunks using MySQL VEC_DISTANCE_COSINE similarity.
     """
     if not settings.OPENAI_API_KEY:
         return []
@@ -27,20 +28,20 @@ def retrieve_relevant_chunks(
     query_embedding = query_response.data[0].embedding
 
     query_sql = """
-        SELECT 
+        SELECT
             dc.id,
             dc.document_name,
             dc.version,
             dc.chunk_text,
             dc.page_number,
             dc.metadata,
-            1 - (de.embedding <=> :query_embedding::vector) as similarity
+            1 - VEC_DISTANCE_COSINE(de.embedding, VEC_FROM_TEXT(:query_embedding)) AS similarity
         FROM document_chunk dc
         JOIN document_embedding de ON dc.id = de.chunk_id
         WHERE de.model_name = :model_name
     """
     params: Dict[str, Any] = {
-        "query_embedding": query_embedding,
+        "query_embedding": json.dumps(query_embedding),
         "model_name": settings.EMBEDDING_MODEL,
         "top_k": top_k,
     }

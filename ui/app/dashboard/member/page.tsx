@@ -299,6 +299,13 @@ export default function MemberDashboard() {
                   <h3 className="font-bold text-lg md:text-xl mb-2">View Statement</h3>
                   <p className="text-sm md:text-base text-blue-100">View account statement</p>
                 </Link>
+                <Link
+                  href="/dashboard/member/reports"
+                  className="block p-5 md:p-6 bg-gradient-to-br from-blue-300 to-blue-400 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-500"
+                >
+                  <h3 className="font-bold text-lg md:text-xl mb-2">Group Report</h3>
+                  <p className="text-sm md:text-base text-blue-100">Monthly group savings, loans & profit summary</p>
+                </Link>
               </div>
             </div>
           </div>

@@ -47,7 +47,7 @@ class UserListItem(BaseModel):
 @router.get("/members")
 def get_all_members(
     status: Optional[str] = None,
-    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Treasurer", "Admin")),
     db: Session = Depends(get_db)
 ):
     """Get list of all members, optionally filtered by status (active, inactive).
@@ -325,7 +325,11 @@ def get_cycle_phases(
 ):
     """Get cycle phases configuration."""
     from app.models.cycle import CyclePhase
-    phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == cycle_id).all()
+    try:
+        cycle_uuid = UUID(cycle_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid cycle ID format")
+    phases = db.query(CyclePhase).filter(CyclePhase.cycle_id == cycle_uuid).all()
     return phases
 
 
@@ -357,7 +361,7 @@ def close_phase(
 
 @router.get("/cycles")
 def list_cycles(
-    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman")),
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
     """List all cycles."""
@@ -612,7 +616,7 @@ def get_cycle(
                 sql = text("""
                     SELECT id, phase_type, monthly_start_day, monthly_end_day, penalty_amount
                     FROM cycle_phase
-                    WHERE cycle_id = :cycle_id::uuid
+                    WHERE cycle_id = :cycle_id
                 """)
                 rows = db.execute(sql, {"cycle_id": str(cycle.id)}).fetchall()
                 # Create simple objects from the rows
@@ -1046,6 +1050,13 @@ def activate_cycle_endpoint(
     
     try:
         cycle = activate_cycle(db, cycle_uuid, current_user.id)
+        from app.core.audit import write_audit_log
+        write_audit_log(
+            user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+            user_role=current_user.role.value if current_user.role else "chairman",
+            action="Cycle activated",
+            details=f"year={cycle.year}"
+        )
         return {
             "message": "Cycle activated successfully. All other cycles have been deactivated.",
             "cycle": {
@@ -1092,6 +1103,13 @@ def close_cycle_endpoint(
     
     try:
         cycle = close_cycle(db, cycle_uuid, current_user.id)
+        from app.core.audit import write_audit_log
+        write_audit_log(
+            user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+            user_role=current_user.role.value if current_user.role else "chairman",
+            action="Cycle closed",
+            details=f"year={cycle.year}"
+        )
         return {
             "message": "Cycle closed successfully. All phases have been closed.",
             "cycle": {
@@ -1213,7 +1231,11 @@ def approve_user(
     db: Session = Depends(get_db)
 ):
     """Approve a user (Chairman/Vice-Chairman/Admin only). Also activates member profile if one exists."""
-    user = db.query(User).filter(User.id == user_id).first()
+    try:
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+    user = db.query(User).filter(User.id == user_uuid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -1268,7 +1290,11 @@ def suspend_user(
     db: Session = Depends(get_db)
 ):
     """Suspend/disable a user (Chairman/Vice-Chairman/Admin only). Also suspends member profile if one exists."""
-    user = db.query(User).filter(User.id == user_id).first()
+    try:
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+    user = db.query(User).filter(User.id == user_uuid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -1300,7 +1326,11 @@ def update_user_role(
     db: Session = Depends(get_db)
 ):
     """Update a user's role (Chairman/Vice-Chairman/Admin only)."""
-    user = db.query(User).filter(User.id == user_id).first()
+    try:
+        user_uuid = UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid user ID format")
+    user = db.query(User).filter(User.id == user_uuid).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     
@@ -1500,9 +1530,9 @@ def get_member_credit_rating(
     
     if not rating:
         return None
-    
+
     tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == rating.tier_id).first()
-    
+
     return {
         "id": str(rating.id),
         "tier_id": str(rating.tier_id),
@@ -1511,3 +1541,412 @@ def get_member_credit_rating(
         "notes": rating.notes,
         "assigned_at": rating.assigned_at.isoformat() if rating.assigned_at else None
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# Audit Log Endpoints
+# ─────────────────────────────────────────────────────────────
+
+@router.get("/audit/months")
+def get_audit_months(
+    current_user: User = Depends(require_any_role("Chairman", "Admin")),
+):
+    """List months for which audit log files exist, sorted descending."""
+    from app.core.audit import LOGS_DIR
+    import calendar
+
+    if not LOGS_DIR.exists():
+        return []
+
+    months = []
+    for f in LOGS_DIR.glob("audit_*.log"):
+        stem = f.stem  # e.g. audit_2026_02
+        parts = stem.split("_")
+        if len(parts) == 3:
+            try:
+                year = int(parts[1])
+                month = int(parts[2])
+                label = f"{calendar.month_name[month]} {year}"
+                months.append({"year": year, "month": month, "label": label})
+            except (ValueError, IndexError):
+                pass
+
+    months.sort(key=lambda x: (x["year"], x["month"]), reverse=True)
+    return months
+
+
+@router.get("/audit/{year}/{month}")
+def get_audit_log(
+    year: int,
+    month: int,
+    current_user: User = Depends(require_any_role("Chairman", "Admin")),
+):
+    """Read audit log entries for a given year/month."""
+    from app.core.audit import LOGS_DIR
+
+    log_file = LOGS_DIR / f"audit_{year}_{month:02d}.log"
+    if not log_file.exists():
+        raise HTTPException(status_code=404, detail="No audit log for this month")
+
+    lines_out = []
+    with open(log_file, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            raw_line = raw_line.rstrip("\n")
+            if not raw_line:
+                continue
+            parts = raw_line.split(" | ", 4)
+            if len(parts) == 5:
+                lines_out.append({
+                    "ts": parts[0],
+                    "role": parts[1],
+                    "name": parts[2],
+                    "action": parts[3],
+                    "details": parts[4],
+                })
+            else:
+                lines_out.append({"ts": raw_line, "role": "", "name": "", "action": "", "details": ""})
+
+    return {"lines": lines_out}
+
+
+# ─────────────────────────────────────────────────────────────
+# Reconciliation Endpoints
+# ─────────────────────────────────────────────────────────────
+
+class ReconcileRequest(BaseModel):
+    member_id: str
+    month: str  # YYYY-MM-DD
+    savings_amount: float = 0.0
+    social_fund: float = 0.0
+    admin_fund: float = 0.0
+    penalties: float = 0.0
+    interest_on_loan: float = 0.0
+    loan_repayment: float = 0.0
+    loan_amount: float = 0.0
+    loan_rate: float = 0.0
+
+
+@router.get("/reconcile")
+def get_reconcile(
+    member_id: str,
+    month: str,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Get existing declaration / loan data for a member + month to pre-fill reconciliation form."""
+    from app.models.transaction import Declaration, Loan, LoanStatus
+    from app.models.cycle import Cycle, CycleStatus
+    from sqlalchemy import extract, and_
+    from datetime import date as date_type
+
+    try:
+        member_uuid = UUID(member_id)
+        month_date = date_type.fromisoformat(month)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id or month format (use YYYY-MM-DD)")
+
+    today = date_type.today()
+    if (month_date.year, month_date.month) > (today.year, today.month):
+        raise HTTPException(status_code=400, detail="Cannot reconcile a future month")
+
+    # Active cycle
+    active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+
+    # Declaration for member + month
+    declaration = db.query(Declaration).filter(
+        and_(
+            Declaration.member_id == member_uuid,
+            extract("year", Declaration.effective_month) == month_date.year,
+            extract("month", Declaration.effective_month) == month_date.month,
+        )
+    ).first()
+
+    # Loan disbursed in that month
+    loan = db.query(Loan).filter(
+        and_(
+            Loan.member_id == member_uuid,
+            extract("year", Loan.disbursement_date) == month_date.year,
+            extract("month", Loan.disbursement_date) == month_date.month,
+        )
+    ).first()
+
+    decl_out = {
+        "savings_amount": float(declaration.declared_savings_amount or 0) if declaration else 0.0,
+        "social_fund": float(declaration.declared_social_fund or 0) if declaration else 0.0,
+        "admin_fund": float(declaration.declared_admin_fund or 0) if declaration else 0.0,
+        "penalties": float(declaration.declared_penalties or 0) if declaration else 0.0,
+        "interest_on_loan": float(declaration.declared_interest_on_loan or 0) if declaration else 0.0,
+        "loan_repayment": float(declaration.declared_loan_repayment or 0) if declaration else 0.0,
+        "status": declaration.status.value if declaration else None,
+    }
+
+    loan_out = {
+        "loan_amount": float(loan.loan_amount or 0) if loan else 0.0,
+        "loan_rate": float(loan.percentage_interest or 0) if loan else 0.0,
+    }
+
+    return {"declaration": decl_out, "loan": loan_out}
+
+
+@router.post("/reconcile")
+def post_reconcile(
+    body: ReconcileRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Save backlog financial data for a member + month, bypassing normal member flow."""
+    from app.models.transaction import (
+        Declaration, DeclarationStatus,
+        DepositProof, DepositProofStatus, DepositApproval,
+        Loan, LoanStatus,
+    )
+    from app.models.cycle import Cycle, CycleStatus
+    from app.models.ledger import LedgerAccount, AccountType, JournalEntry, JournalLine
+    from app.services.transaction import create_declaration, approve_deposit
+    from app.services.accounting import create_journal_entry
+    from app.core.audit import write_audit_log
+    from sqlalchemy import extract, and_
+    from datetime import date as date_type
+
+    try:
+        member_uuid = UUID(body.member_id)
+        month_date = date_type.fromisoformat(body.month)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id or month format (use YYYY-MM-DD)")
+
+    today = date_type.today()
+    if (month_date.year, month_date.month) > (today.year, today.month):
+        raise HTTPException(status_code=400, detail="Cannot reconcile a future month")
+
+    # 1. Active cycle
+    active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+    if not active_cycle:
+        raise HTTPException(status_code=404, detail="No active cycle found")
+
+    # 2. Load or create Declaration
+    declaration = db.query(Declaration).filter(
+        and_(
+            Declaration.member_id == member_uuid,
+            extract("year", Declaration.effective_month) == month_date.year,
+            extract("month", Declaration.effective_month) == month_date.month,
+        )
+    ).first()
+
+    if declaration:
+        declaration.declared_savings_amount = Decimal(str(body.savings_amount))
+        declaration.declared_social_fund = Decimal(str(body.social_fund))
+        declaration.declared_admin_fund = Decimal(str(body.admin_fund))
+        declaration.declared_penalties = Decimal(str(body.penalties))
+        declaration.declared_interest_on_loan = Decimal(str(body.interest_on_loan))
+        declaration.declared_loan_repayment = Decimal(str(body.loan_repayment))
+        declaration.status = DeclarationStatus.PENDING
+        db.flush()
+    else:
+        declaration = Declaration(
+            member_id=member_uuid,
+            cycle_id=active_cycle.id,
+            effective_month=month_date,
+            declared_savings_amount=Decimal(str(body.savings_amount)),
+            declared_social_fund=Decimal(str(body.social_fund)),
+            declared_admin_fund=Decimal(str(body.admin_fund)),
+            declared_penalties=Decimal(str(body.penalties)),
+            declared_interest_on_loan=Decimal(str(body.interest_on_loan)),
+            declared_loan_repayment=Decimal(str(body.loan_repayment)),
+            status=DeclarationStatus.PENDING,
+        )
+        db.add(declaration)
+        db.flush()
+
+    # 3. Reverse any existing DepositApproval journal entry
+    existing_proof = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration.id
+    ).order_by(DepositProof.uploaded_at.desc()).first()
+
+    if existing_proof:
+        existing_approval = db.query(DepositApproval).filter(
+            DepositApproval.deposit_proof_id == existing_proof.id
+        ).first()
+        if existing_approval and existing_approval.journal_entry_id:
+            old_entry = db.query(JournalEntry).filter(
+                JournalEntry.id == existing_approval.journal_entry_id
+            ).first()
+            if old_entry:
+                old_entry.reversed_by = current_user.id
+                old_entry.reversed_at = datetime.now()
+                db.flush()
+        # Mark old proof superseded
+        existing_proof.status = "superseded"
+        db.flush()
+
+    # 4. Create synthetic DepositProof
+    total_amount = Decimal(str(
+        body.savings_amount + body.social_fund + body.admin_fund +
+        body.penalties + body.interest_on_loan + body.loan_repayment
+    ))
+    synthetic_proof = DepositProof(
+        member_id=member_uuid,
+        cycle_id=active_cycle.id,
+        declaration_id=declaration.id,
+        upload_path="reconciliation",
+        amount=total_amount,
+        status=DepositProofStatus.SUBMITTED.value,
+    )
+    db.add(synthetic_proof)
+    db.flush()
+
+    # 5. Look up ledger accounts
+    bank_cash = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "BANK_CASH"
+    ).first()
+    if not bank_cash:
+        raise HTTPException(status_code=500, detail="BANK_CASH ledger account not found")
+
+    member_savings = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_uuid,
+        LedgerAccount.account_name.ilike("%savings%")
+    ).first()
+    if not member_savings:
+        short_id = str(member_uuid).replace("-", "")[:8]
+        member_savings = LedgerAccount(
+            account_code=f"MEM_SAV_{short_id}",
+            account_name=f"Member Savings - {member_uuid}",
+            account_type=AccountType.LIABILITY,
+            member_id=member_uuid,
+            description=f"Savings account for member {member_uuid}",
+        )
+        db.add(member_savings)
+        db.flush()
+
+    member_social_fund = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_uuid,
+        LedgerAccount.account_name.ilike("%social fund%")
+    ).first()
+    if not member_social_fund and body.social_fund > 0:
+        short_id = str(member_uuid).replace("-", "")[:8]
+        member_social_fund = LedgerAccount(
+            account_code=f"MEM_SOC_{short_id}",
+            account_name=f"Member Social Fund - {member_uuid}",
+            account_type=AccountType.LIABILITY,
+            member_id=member_uuid,
+            description=f"Social fund account for member {member_uuid}",
+        )
+        db.add(member_social_fund)
+        db.flush()
+
+    member_admin_fund = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_uuid,
+        LedgerAccount.account_name.ilike("%admin fund%")
+    ).first()
+    if not member_admin_fund and body.admin_fund > 0:
+        short_id = str(member_uuid).replace("-", "")[:8]
+        member_admin_fund = LedgerAccount(
+            account_code=f"MEM_ADM_{short_id}",
+            account_name=f"Member Admin Fund - {member_uuid}",
+            account_type=AccountType.LIABILITY,
+            member_id=member_uuid,
+            description=f"Admin fund account for member {member_uuid}",
+        )
+        db.add(member_admin_fund)
+        db.flush()
+
+    interest_income = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME"
+    ).first()
+
+    loans_receivable = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+    ).first()
+
+    # 6. Approve the synthetic deposit proof (posts to ledger)
+    try:
+        approve_deposit(
+            db=db,
+            deposit_proof_id=synthetic_proof.id,
+            approved_by=current_user.id,
+            bank_cash_account_id=bank_cash.id,
+            member_savings_account_id=member_savings.id,
+            member_social_fund_account_id=member_social_fund.id if member_social_fund else None,
+            member_admin_fund_account_id=member_admin_fund.id if member_admin_fund else None,
+            interest_income_account_id=interest_income.id if interest_income else None,
+            loans_receivable_account_id=loans_receivable.id if loans_receivable else None,
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to post reconciliation to ledger: {str(e)}")
+
+    # Backdate deposit journal entry to reconciliation month so B/F columns in group report are correct
+    updated_approval = db.query(DepositApproval).filter(
+        DepositApproval.deposit_proof_id == synthetic_proof.id
+    ).first()
+    if updated_approval and updated_approval.journal_entry_id:
+        deposit_je = db.query(JournalEntry).filter(
+            JournalEntry.id == updated_approval.journal_entry_id
+        ).first()
+        if deposit_je:
+            from datetime import datetime as dt
+            deposit_je.entry_date = dt.combine(month_date, dt.min.time())
+            db.flush()
+
+    # 7. Handle loan (if loan_amount > 0)
+    if body.loan_amount > 0:
+        existing_loan = db.query(Loan).filter(
+            and_(
+                Loan.member_id == member_uuid,
+                extract("year", Loan.disbursement_date) == month_date.year,
+                extract("month", Loan.disbursement_date) == month_date.month,
+            )
+        ).first()
+
+        if not existing_loan:
+            if not loans_receivable:
+                raise HTTPException(status_code=500, detail="LOANS_RECEIVABLE ledger account not found")
+
+            new_loan = Loan(
+                member_id=member_uuid,
+                cycle_id=active_cycle.id,
+                application_id=None,
+                loan_amount=Decimal(str(body.loan_amount)),
+                percentage_interest=Decimal(str(body.loan_rate)),
+                loan_status=LoanStatus.DISBURSED,
+                disbursement_date=month_date,
+            )
+            db.add(new_loan)
+            db.flush()
+
+            # Create disbursement journal entry: Debit LOANS_RECEIVABLE, Credit BANK_CASH
+            from datetime import datetime as dt
+            loan_je = create_journal_entry(
+                db=db,
+                description=f"Loan disbursement (reconciliation) for member {member_uuid} - {month_date}",
+                source_type="loan_disbursement",
+                source_ref=str(new_loan.id),
+                lines=[
+                    {
+                        "account_id": loans_receivable.id,
+                        "debit_amount": Decimal(str(body.loan_amount)),
+                        "credit_amount": Decimal("0.00"),
+                        "description": "Loan disbursed (reconciliation)",
+                    },
+                    {
+                        "account_id": bank_cash.id,
+                        "debit_amount": Decimal("0.00"),
+                        "credit_amount": Decimal(str(body.loan_amount)),
+                        "description": "Cash paid out for loan (reconciliation)",
+                    },
+                ],
+                created_by=current_user.id,
+            )
+            # Backdate loan disbursement entry to reconciliation month
+            loan_je.entry_date = dt.combine(month_date, dt.min.time())
+            db.flush()
+
+    # 8. Audit log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Reconciliation saved",
+        details=f"member={body.member_id}, month={month_date.strftime('%Y-%m')}",
+    )
+
+    db.commit()
+    return {"message": "Reconciliation saved successfully"}

@@ -31,6 +31,8 @@ def open_phase(
     phase_id: UUID
 ) -> CyclePhase:
     """Open a cycle phase."""
+    if isinstance(phase_id, str):
+        phase_id = UUID(phase_id)
     phase = db.query(CyclePhase).filter(CyclePhase.id == phase_id).first()
     if not phase:
         raise ValueError("Phase not found")
@@ -46,6 +48,8 @@ def close_phase(
     phase_id: UUID
 ) -> CyclePhase:
     """Close a cycle phase."""
+    if isinstance(phase_id, str):
+        phase_id = UUID(phase_id)
     phase = db.query(CyclePhase).filter(CyclePhase.id == phase_id).first()
     if not phase:
         raise ValueError("Phase not found")
@@ -100,10 +104,12 @@ def close_cycle(
     to the next cycle. Only cycle-specific data (declarations, loan applications)
     are tied to the cycle.
     """
+    if isinstance(cycle_id, str):
+        cycle_id = UUID(cycle_id)
     cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
     if not cycle:
         raise ValueError("Cycle not found")
-    
+
     if cycle.status == CycleStatus.CLOSED:
         return cycle  # Already closed
     
@@ -131,10 +137,12 @@ def reopen_cycle(
     This allows the cycle to be activated again if needed.
     Note: Only cycles from the current year or future years can be reopened.
     """
+    if isinstance(cycle_id, str):
+        cycle_id = UUID(cycle_id)
     cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
     if not cycle:
         raise ValueError("Cycle not found")
-    
+
     if cycle.status != CycleStatus.CLOSED:
         raise ValueError("Only closed cycles can be reopened")
     
@@ -170,10 +178,12 @@ def activate_cycle(
     2. The selected cycle is set to ACTIVE
     3. Account balances carry forward from previous cycles (via ledger)
     """
+    if isinstance(cycle_id, str):
+        cycle_id = UUID(cycle_id)
     cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
     if not cycle:
         raise ValueError("Cycle not found")
-    
+
     # Deactivate all other active cycles
     db.query(Cycle).filter(
         Cycle.id != cycle_id,
