@@ -93,7 +93,8 @@ export default function ManageCyclesPage() {
   const [depositsPenaltyTypeId, setDepositsPenaltyTypeId] = useState<string>('');
   const [depositsAutoApplyPenalty, setDepositsAutoApplyPenalty] = useState<boolean>(false);
   const [penaltyTypes, setPenaltyTypes] = useState<PenaltyType[]>([]);
-  
+  const [loanTermOptions, setLoanTermOptions] = useState<string[]>([]);
+
   // Credit rating scheme
   const [schemeName, setSchemeName] = useState('');
   const [schemeDescription, setSchemeDescription] = useState('');
@@ -110,6 +111,9 @@ export default function ManageCyclesPage() {
   useEffect(() => {
     loadCycles();
     loadPenaltyTypes();
+    api.get<{ term_months: string }[]>('/api/chairman/settings/loan-terms').then((res) => {
+      if (res.data) setLoanTermOptions(res.data.map((t) => t.term_months));
+    });
   }, []);
 
   const loadPenaltyTypes = async () => {
@@ -994,10 +998,11 @@ export default function ManageCyclesPage() {
                                     className="w-full text-sm"
                                   >
                                     <option value="">All Terms</option>
-                                    <option value="1">1 Month</option>
-                                    <option value="2">2 Months</option>
-                                    <option value="3">3 Months</option>
-                                    <option value="4">4 Months</option>
+                                    {loanTermOptions.map((t) => (
+                                      <option key={t} value={t}>
+                                        {t} {t === '1' ? 'Month' : 'Months'}
+                                      </option>
+                                    ))}
                                   </select>
                                 </div>
                                 <div>

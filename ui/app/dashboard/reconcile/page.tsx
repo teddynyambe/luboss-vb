@@ -48,10 +48,14 @@ export default function ReconcilePage() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [loanTermOptions, setLoanTermOptions] = useState<string[]>([]);
 
   useEffect(() => {
     api.get<Member[]>('/api/chairman/members?status=active').then((res) => {
       if (res.data) setMembers(res.data);
+    });
+    api.get<{ term_months: string }[]>('/api/chairman/settings/loan-terms').then((res) => {
+      if (res.data) setLoanTermOptions(res.data.map((t) => t.term_months));
     });
   }, []);
 
@@ -288,10 +292,20 @@ export default function ReconcilePage() {
                     onChange={(e) => setFormData((prev) => ({ ...prev, loan_term_months: e.target.value }))}
                     className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <option value="1">1 Month</option>
-                    <option value="2">2 Months</option>
-                    <option value="3">3 Months</option>
-                    <option value="4">4 Months</option>
+                    {loanTermOptions.length > 0 ? (
+                      loanTermOptions.map((t) => (
+                        <option key={t} value={t}>
+                          {t} {t === '1' ? 'Month' : 'Months'}
+                        </option>
+                      ))
+                    ) : (
+                      <>
+                        <option value="1">1 Month</option>
+                        <option value="2">2 Months</option>
+                        <option value="3">3 Months</option>
+                        <option value="4">4 Months</option>
+                      </>
+                    )}
                   </select>
                 </div>
               </div>

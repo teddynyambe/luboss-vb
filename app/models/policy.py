@@ -186,3 +186,13 @@ class CollateralHold(Base):
     # Relationships
     loan = relationship("Loan", back_populates="collateral_holds")
     asset = relationship("CollateralAsset", back_populates="holds")
+
+
+class LoanTermOption(Base):
+    """Chairman-configurable list of available loan term lengths."""
+    __tablename__ = "loan_term_option"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    term_months = Column(String(10), nullable=False, unique=True)  # "1", "2", "3", ...
+    sort_order = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))

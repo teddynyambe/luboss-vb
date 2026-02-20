@@ -64,6 +64,13 @@ export default function ChairmanDashboard() {
                 <h3 className="font-bold text-lg md:text-xl mb-2">Activity Log</h3>
                 <p className="text-sm md:text-base text-blue-100">View monthly activity audit trail</p>
               </Link>
+              <Link
+                href="/dashboard/chairman/settings"
+                className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
+              >
+                <h3 className="font-bold text-lg md:text-xl mb-2">Settings</h3>
+                <p className="text-sm md:text-base text-blue-100">Configure loan terms and system options</p>
+              </Link>
             </div>
           </div>
         </div>

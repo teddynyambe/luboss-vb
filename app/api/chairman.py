@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session
 from app.db.base import get_db
-from app.core.dependencies import require_any_role
+from app.core.dependencies import require_any_role, get_current_user
 from app.core.config import CONSTITUTION_UPLOADS_DIR
 from app.models.user import User, UserRoleEnum
 from app.models.member import MemberProfile, MemberStatus
@@ -1959,6 +1959,78 @@ def post_reconcile(
 # ---------------------------------------------------------------------------
 # Ledger Initialisation
 # ---------------------------------------------------------------------------
+
+# ─────────────────────────────────────────────────────────────
+# Loan Term Options Endpoints
+# ─────────────────────────────────────────────────────────────
+
+class LoanTermCreate(BaseModel):
+    term_months: str
+
+
+def _loan_terms_list(db: Session):
+    from app.models.policy import LoanTermOption
+    terms = db.query(LoanTermOption).order_by(
+        LoanTermOption.sort_order, LoanTermOption.term_months
+    ).all()
+    return [{"term_months": t.term_months, "sort_order": t.sort_order} for t in terms]
+
+
+@router.get("/settings/loan-terms")
+def get_loan_terms(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all configured loan term options (any authenticated user)."""
+    return _loan_terms_list(db)
+
+
+@router.post("/settings/loan-terms")
+def add_loan_term(
+    body: LoanTermCreate,
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman")),
+    db: Session = Depends(get_db)
+):
+    """Add a new loan term option (Chairman/Vice-Chairman only)."""
+    from app.models.policy import LoanTermOption
+
+    # Validate: must be a positive integer string
+    try:
+        months_int = int(body.term_months)
+        if months_int <= 0:
+            raise ValueError
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="term_months must be a positive integer")
+
+    term_str = str(months_int)
+
+    existing = db.query(LoanTermOption).filter(LoanTermOption.term_months == term_str).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Term '{term_str}' already exists")
+
+    new_term = LoanTermOption(term_months=term_str, sort_order=months_int)
+    db.add(new_term)
+    db.commit()
+    return _loan_terms_list(db)
+
+
+@router.delete("/settings/loan-terms/{term_months}")
+def delete_loan_term(
+    term_months: str,
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman")),
+    db: Session = Depends(get_db)
+):
+    """Delete a loan term option (Chairman/Vice-Chairman only)."""
+    from app.models.policy import LoanTermOption
+
+    term = db.query(LoanTermOption).filter(LoanTermOption.term_months == term_months).first()
+    if not term:
+        raise HTTPException(status_code=404, detail=f"Term '{term_months}' not found")
+
+    db.delete(term)
+    db.commit()
+    return _loan_terms_list(db)
+
 
 @router.post("/initialize-ledger")
 def initialize_ledger(
