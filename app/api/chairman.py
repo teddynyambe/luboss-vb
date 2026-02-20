@@ -701,7 +701,7 @@ def get_cycle(
                 interest_ranges = db.query(CreditRatingInterestRange).filter(
                     CreditRatingInterestRange.tier_id == tier.id,
                     CreditRatingInterestRange.cycle_id == cycle.id
-                ).order_by(CreditRatingInterestRange.term_months.nullsfirst()).all()
+                ).order_by(CreditRatingInterestRange.term_months.asc()).all()
                 
                 tier_data = {
                     "id": str(tier.id),
