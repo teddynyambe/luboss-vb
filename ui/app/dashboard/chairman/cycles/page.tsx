@@ -275,13 +275,19 @@ export default function ManageCyclesPage() {
             tier_order: tier.tier_order,
             description: tier.description || '',
             multiplier: typeof tier.multiplier === 'number' ? tier.multiplier : parseFloat(String(tier.multiplier)),
-            interest_ranges: tier.interest_ranges?.map(range => ({
-              id: range.id,
-              term_months: range.term_months || null,
-              effective_rate_percent: typeof range.effective_rate_percent === 'number' 
-                ? range.effective_rate_percent 
-                : parseFloat(String(range.effective_rate_percent))
-            })) || []
+            interest_ranges: (tier.interest_ranges || [])
+              .map(range => ({
+                id: range.id,
+                term_months: range.term_months || null,
+                effective_rate_percent: typeof range.effective_rate_percent === 'number'
+                  ? range.effective_rate_percent
+                  : parseFloat(String(range.effective_rate_percent))
+              }))
+              .sort((a, b) => {
+                if (a.term_months === null) return -1;
+                if (b.term_months === null) return 1;
+                return Number(a.term_months) - Number(b.term_months);
+              })
           })));
         }
       } else {

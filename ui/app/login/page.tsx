@@ -29,7 +29,7 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-blue-100 to-blue-200 py-8 px-4">
-      <div className="max-w-md w-full space-y-6 md:space-y-8">
+      <div className="max-w-md w-full space-y-6 md:space-y-8 bg-white rounded-2xl shadow-xl border-2 border-blue-200 px-8 py-10">
         <div>
           <h2 className="mt-6 text-center text-3xl md:text-4xl font-extrabold text-blue-900">
             Luboss95 Village Banking v2
@@ -77,6 +77,12 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
               />
             </div>
+          </div>
+
+          <div className="text-right -mt-2">
+            <Link href="/forgot-password" className="text-sm text-blue-600 hover:text-blue-800 font-medium">
+              Forgot password?
+            </Link>
           </div>
 
           <div>

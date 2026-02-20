@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Application
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+    FRONTEND_URL: str = "https://luboss95vb.com"
     
     class Config:
         env_file = env_file

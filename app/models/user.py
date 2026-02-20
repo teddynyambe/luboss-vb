@@ -35,6 +35,8 @@ class User(Base):
     last_name_next_of_kin = Column(String(100), nullable=True)
     phone_number_next_of_kin = Column(String(20), nullable=True)
     date_joined = Column(DateTime, nullable=True, server_default=text("CURRENT_TIMESTAMP"))
+    password_reset_token = Column(String(255), nullable=True)
+    password_reset_expires = Column(DateTime, nullable=True)
 
     # Relationships
     member_profile = relationship("MemberProfile", back_populates="user", uselist=False, foreign_keys="[MemberProfile.user_id]")
