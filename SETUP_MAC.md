@@ -72,6 +72,16 @@ DATABASE_URL=postgresql://your_username@localhost/village_bank
 SECRET_KEY=your-secret-key-here-change-in-production
 GROQ_API_KEY=your-groq-api-key
 OPENAI_API_KEY=your-openai-api-key
+
+# SMTP — required for forgot-password email flow
+SMTP_HOST=smtp.yourprovider.com
+SMTP_PORT=587
+SMTP_USER=your-smtp-username
+SMTP_PASSWORD=your-smtp-password
+FROM_EMAIL=noreply@yourdomain.com
+
+# Frontend URL — used in password reset email links
+FRONTEND_URL=http://localhost:3000
 ```
 
 **Note**: Your Mac username (from `whoami`) is typically used as the PostgreSQL username. If you need to create a specific user:
@@ -217,3 +227,13 @@ uvicorn main:app --reload
 3. Test the API at http://localhost:8000/docs
 4. Register a test user via `/api/auth/register`
 5. Create an admin user and assign roles
+
+## Features Requiring SMTP Configuration
+
+The following features require valid SMTP settings in `app/.env`:
+
+| Feature | Endpoint |
+|---------|----------|
+| Forgot Password email | `POST /api/auth/forgot-password` |
+
+If SMTP is not configured, the API will still accept the request and return success, but no email will be sent (a warning is logged). The reset link can still be constructed manually from the database token for testing purposes.

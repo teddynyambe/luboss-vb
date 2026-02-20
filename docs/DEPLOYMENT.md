@@ -132,7 +132,8 @@ Fill in:
 - `SECRET_KEY` - JWT secret key (generate a strong random string)
 - `GROQ_API_KEY` - Groq API key for AI chat
 - `OPENAI_API_KEY` - OpenAI API key for embeddings
-- Other optional settings (SMTP, etc.)
+- `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASSWORD` / `FROM_EMAIL` — required for forgot-password email flow
+- `FRONTEND_URL` — base URL of the frontend (e.g. `https://luboss95vb.com`); used in password reset email links
 
 #### Frontend Environment
 

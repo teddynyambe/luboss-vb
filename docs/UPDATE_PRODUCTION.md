@@ -335,3 +335,45 @@ sudo journalctl -u luboss-frontend -f
 4. **Review changes** with `git log` or `git diff` before pulling
 5. **Monitor logs** after restarting services
 6. **Keep .env files out of git** to avoid conflicts
+
+---
+
+## Recent Production Updates
+
+### 2026-02-20 — Forgot Password + Cycle Ranges Sort
+
+This release added a self-service password reset flow and fixed cycle interest rate range ordering.
+
+**Steps required after pulling this release:**
+
+```bash
+cd /var/www/luboss-vb
+
+# 1. Activate venv and run the new migration
+source app/venv/bin/activate
+alembic upgrade head
+# Adds: password_reset_token, password_reset_expires columns to `user` table
+
+# 2. Add new settings to app/.env (if not already present)
+#    FRONTEND_URL=https://luboss95vb.com
+#    SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / FROM_EMAIL
+
+# 3. Restart backend to load new /forgot-password and /reset-password routes
+sudo systemctl restart luboss-backend
+
+# 4. Rebuild and restart frontend (new pages: /forgot-password, /reset-password)
+cd ui && npm run build && cd ..
+sudo systemctl restart luboss-frontend
+```
+
+**Verify:**
+```bash
+# Check migration applied
+mysql -u root luboss -e "DESCRIBE user;" | grep password_reset
+
+# Test the new endpoint
+curl -X POST https://luboss95vb.com/api/auth/forgot-password \
+  -H "Content-Type: application/json" \
+  -d '{"email":"test@example.com"}'
+# Expected: {"message":"If that email is registered, a reset link has been sent."}
+```
