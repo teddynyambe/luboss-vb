@@ -245,6 +245,53 @@ export default function MemberStatementPage() {
                 );
               })()}
             </div>
+
+            {/* Contribution Summary Card */}
+            {savingsHistory.length > 0 && (() => {
+              const totals = savingsHistory.reduce(
+                (acc, entry) => {
+                  if (entry.is_declaration && entry.declaration_items) {
+                    acc.savings += entry.declaration_items.savings_amount;
+                    acc.social_fund += entry.declaration_items.social_fund;
+                    acc.admin_fund += entry.declaration_items.admin_fund;
+                    acc.penalties += entry.declaration_items.penalties;
+                  }
+                  return acc;
+                },
+                { savings: 0, social_fund: 0, admin_fund: 0, penalties: 0 }
+              );
+              const fmtS = (n: number) =>
+                `K ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+              const grand = totals.savings + totals.social_fund + totals.admin_fund + totals.penalties;
+
+              return (
+                <div className="card">
+                  <h2 className="text-lg md:text-xl font-bold text-blue-900 mb-5">Contribution Summary</h2>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4">
+                    <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
+                      <p className="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-2">Savings</p>
+                      <p className="text-base md:text-lg font-bold text-blue-900">{fmtS(totals.savings)}</p>
+                    </div>
+                    <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 text-center">
+                      <p className="text-xs font-semibold text-indigo-500 uppercase tracking-wider mb-2">Social Fund</p>
+                      <p className="text-base md:text-lg font-bold text-indigo-900">{fmtS(totals.social_fund)}</p>
+                    </div>
+                    <div className="bg-violet-50 border border-violet-200 rounded-xl p-4 text-center">
+                      <p className="text-xs font-semibold text-violet-500 uppercase tracking-wider mb-2">Admin Fund</p>
+                      <p className="text-base md:text-lg font-bold text-violet-900">{fmtS(totals.admin_fund)}</p>
+                    </div>
+                    <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center">
+                      <p className="text-xs font-semibold text-red-500 uppercase tracking-wider mb-2">Penalties</p>
+                      <p className="text-base md:text-lg font-bold text-red-900">{fmtS(totals.penalties)}</p>
+                    </div>
+                  </div>
+                  <div className="mt-5 pt-4 border-t-2 border-blue-200 flex justify-between items-center">
+                    <span className="text-sm font-semibold text-blue-700 uppercase tracking-wide">Total Contributions</span>
+                    <span className="text-xl font-bold text-blue-900">{fmtS(grand)}</span>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         )}
       </main>
