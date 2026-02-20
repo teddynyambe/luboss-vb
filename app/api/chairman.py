@@ -1876,6 +1876,16 @@ def post_reconcile(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to post reconciliation to ledger: {str(e)}")
 
+    # Transfer any excess social/admin fund contributions to savings
+    from app.services.transaction import post_excess_contributions
+    post_excess_contributions(
+        db=db,
+        member_id=member_uuid,
+        cycle=active_cycle,
+        effective_month=month_date,
+        approved_by=current_user.id,
+    )
+
     # Backdate deposit journal entry to reconciliation month so B/F columns in group report are correct
     updated_approval = db.query(DepositApproval).filter(
         DepositApproval.deposit_proof_id == synthetic_proof.id

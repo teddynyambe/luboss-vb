@@ -126,9 +126,8 @@ def get_member_savings_balance(
     if not savings_account:
         return Decimal("0.00")
     
-    # Sum only credits from deposit approvals (actual deposits)
-    # This excludes penalty debits and other transactions
-    query = db.query(func.sum(JournalLine.credit_amount)).join(
+    # Query 1: credits from deposit approvals (existing logic)
+    q1 = db.query(func.sum(JournalLine.credit_amount)).join(
         JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
     ).join(
         DepositApproval, JournalEntry.id == DepositApproval.journal_entry_id
@@ -137,15 +136,27 @@ def get_member_savings_balance(
     ).filter(
         JournalLine.ledger_account_id == savings_account.id,
         DepositProof.member_id == member_id,
-        JournalEntry.reversed_by.is_(None),  # Exclude reversed entries
-        JournalEntry.source_type == "deposit_approval"  # Only deposit approvals
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "deposit_approval",
     )
-    
     if as_of_date:
-        query = query.filter(JournalEntry.entry_date <= as_of_date)
-    
-    result = query.scalar()
-    return Decimal(str(result)) if result else Decimal("0.00")
+        q1 = q1.filter(JournalEntry.entry_date <= as_of_date)
+    deposit_credits = q1.scalar() or Decimal("0.00")
+
+    # Query 2: credits from excess contribution transfers
+    q2 = db.query(func.sum(JournalLine.credit_amount)).join(
+        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+    ).filter(
+        JournalLine.ledger_account_id == savings_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "excess_contribution",
+        JournalLine.credit_amount > 0,
+    )
+    if as_of_date:
+        q2 = q2.filter(JournalEntry.entry_date <= as_of_date)
+    excess_credits = q2.scalar() or Decimal("0.00")
+
+    return deposit_credits + excess_credits
 
 
 def get_member_loan_balance(

@@ -765,6 +765,107 @@ def approve_deposit(
     return approval
 
 
+def post_excess_contributions(
+    db: Session,
+    member_id: UUID,
+    cycle,               # Cycle model instance — carries social/admin fund required
+    effective_month,     # date — used to backdate the journal entry
+    approved_by: UUID,
+) -> dict:
+    """
+    After a deposit is approved, detect if the member has overpaid Social Fund
+    or Admin Fund vs the cycle annual requirement.  For each fund with an excess,
+    create a journal entry that reclassifies the excess to the member's savings
+    account, backdated to effective_month.
+
+    Idempotent: 'already_transferred' is computed from prior excess_contribution
+    debits on the fund account, so running twice will not double-transfer.
+
+    Returns {'social_excess': Decimal, 'admin_excess': Decimal}.
+    """
+    from app.models.ledger import LedgerAccount, JournalLine, JournalEntry
+    from app.services.accounting import create_journal_entry
+    from sqlalchemy import func
+    from datetime import datetime as dt
+
+    result = {'social_excess': Decimal("0.00"), 'admin_excess': Decimal("0.00")}
+
+    # Look up member's savings account (must exist — created by approve_deposit)
+    savings_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%savings%")
+    ).first()
+    if not savings_account:
+        return result
+
+    for fund_key, required, name_pattern, label in [
+        ("social", cycle.social_fund_required, "%social fund%", "Social Fund"),
+        ("admin",  cycle.admin_fund_required,  "%admin fund%",  "Admin Fund"),
+    ]:
+        if not required:
+            continue
+
+        fund_account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_id,
+            LedgerAccount.account_name.ilike(name_pattern)
+        ).first()
+        if not fund_account:
+            continue
+
+        # Total paid by member (credits from deposit_approval entries)
+        total_paid = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+            JournalLine.ledger_account_id == fund_account.id,
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.source_type == "deposit_approval",
+            JournalLine.credit_amount > 0
+        ).scalar() or Decimal("0.00")
+
+        # Already transferred in prior runs (debits from excess_contribution entries)
+        already_transferred = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+            JournalLine.ledger_account_id == fund_account.id,
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.source_type == "excess_contribution",
+            JournalLine.debit_amount > 0
+        ).scalar() or Decimal("0.00")
+
+        net_excess = total_paid - Decimal(str(required)) - already_transferred
+        if net_excess <= Decimal("0.01"):
+            continue
+
+        month_label = effective_month.strftime("%B %Y")
+        je = create_journal_entry(
+            db=db,
+            description=(
+                f"Excess {label} contribution K{net_excess:.2f} transferred to savings"
+                f" — {month_label}"
+            ),
+            source_type="excess_contribution",
+            source_ref=str(member_id),
+            lines=[
+                {
+                    "account_id": fund_account.id,
+                    "debit_amount": net_excess,
+                    "credit_amount": Decimal("0.00"),
+                    "description": f"Excess {label} reclassified to member savings",
+                },
+                {
+                    "account_id": savings_account.id,
+                    "debit_amount": Decimal("0.00"),
+                    "credit_amount": net_excess,
+                    "description": f"Savings — excess {label} contribution ({month_label})",
+                },
+            ],
+            created_by=approved_by,
+        )
+        # Backdate to the effective month (create_journal_entry commits above)
+        je.entry_date = dt.combine(effective_month, dt.min.time())
+        db.commit()
+
+        result[f"{fund_key}_excess"] = net_excess
+
+    return result
+
+
 def disburse_loan(
     db: Session,
     loan_id: UUID,

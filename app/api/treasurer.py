@@ -257,6 +257,24 @@ def approve_deposit_proof(
         )
         logger.info(f"Deposit approved successfully. Approval ID: {approval.id}")
         logger.info(f"=== DEPOSIT APPROVAL REQUEST SUCCESS ===")
+        # Check and transfer any excess social/admin fund contributions to savings
+        from app.models.cycle import Cycle, CycleStatus
+        from app.services.transaction import post_excess_contributions
+        active_cycle = db.query(Cycle).filter(
+            Cycle.status == CycleStatus.ACTIVE
+        ).first()
+        if active_cycle:
+            declaration = db.query(Declaration).filter(
+                Declaration.id == deposit.declaration_id
+            ).first()
+            eff_month = declaration.effective_month if declaration else date_type.today()
+            post_excess_contributions(
+                db=db,
+                member_id=deposit.member_id,
+                cycle=active_cycle,
+                effective_month=eff_month,
+                approved_by=current_user.id,
+            )
         # Get member name for audit
         _member_user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
         _member_name = f"{_member_user.first_name or ''} {_member_user.last_name or ''}".strip() if _member_user else str(member.id)

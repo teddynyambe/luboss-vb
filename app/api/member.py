@@ -1617,9 +1617,37 @@ def get_account_transactions(
                     }
                 })
             
+            # Include excess contribution transfers (internal reclassifications to savings)
+            exc_savings_account = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == member_profile.id,
+                LedgerAccount.account_name.ilike("%savings%")
+            ).first()
+            if exc_savings_account:
+                excess_lines = db.query(JournalLine).join(JournalEntry).filter(
+                    JournalLine.ledger_account_id == exc_savings_account.id,
+                    JournalEntry.source_type == "excess_contribution",
+                    JournalEntry.reversed_by.is_(None),
+                    JournalLine.credit_amount > 0,
+                ).all()
+                for line in excess_lines:
+                    je = line.journal_entry
+                    entry_date = (
+                        je.entry_date.date().isoformat()
+                        if je.entry_date else date.today().isoformat()
+                    )
+                    transactions.append({
+                        "id": f"excess_{je.id}",
+                        "date": entry_date,
+                        "description": je.description,
+                        "debit": 0.0,
+                        "credit": float(line.credit_amount),
+                        "amount": float(line.credit_amount),
+                        "is_declaration": False,
+                    })
+
             # Sort all transactions by date (most recent first)
             transactions.sort(key=lambda x: x["date"], reverse=True)
-        
+
         elif type == "penalties":
             from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType, Declaration, DeclarationStatus
             from app.models.cycle import Cycle, CyclePhase, PhaseType
