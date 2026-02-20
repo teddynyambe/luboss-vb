@@ -16,6 +16,12 @@ interface Cycle {
   end_date?: string;
 }
 
+/** Parse a date-only string (YYYY-MM-DD) as local midnight to avoid UTC timezone shift. */
+function parseLocalDate(dateStr: string): Date {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
 export default function LoanApplicationPage() {
   const { user } = useAuth();
   const router = useRouter();
@@ -381,7 +387,7 @@ export default function LoanApplicationPage() {
                           {currentLoan.repayments.map((repayment: any, index: number) => (
                             <tr key={index} className="border-b border-blue-200">
                               <td className="p-3 text-sm md:text-base text-blue-800">
-                                {repayment.date ? new Date(repayment.date).toLocaleDateString() : 'N/A'}
+                                {repayment.date ? parseLocalDate(repayment.date).toLocaleDateString() : 'N/A'}
                               </td>
                               <td className="p-3 text-sm md:text-base text-blue-800">
                                 K{repayment.principal?.toLocaleString() || '0.00'}
@@ -470,7 +476,7 @@ export default function LoanApplicationPage() {
                           <div>
                             <p className="text-xs md:text-sm text-blue-700 font-medium mb-1">Date</p>
                             <p className="text-base md:text-lg font-semibold text-blue-900">
-                              {loan.application_date ? new Date(loan.application_date).toLocaleDateString() : 'N/A'}
+                              {loan.application_date ? parseLocalDate(loan.application_date).toLocaleDateString() : 'N/A'}
                             </p>
                           </div>
                         </div>

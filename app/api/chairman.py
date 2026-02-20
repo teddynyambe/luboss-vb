@@ -1624,6 +1624,7 @@ class ReconcileRequest(BaseModel):
     loan_repayment: float = 0.0
     loan_amount: float = 0.0
     loan_rate: float = 0.0
+    loan_term_months: str = "1"  # e.g. "1", "2", "3", "4"
 
 
 @router.get("/reconcile")
@@ -1683,6 +1684,7 @@ def get_reconcile(
     loan_out = {
         "loan_amount": float(loan.loan_amount or 0) if loan else 0.0,
         "loan_rate": float(loan.percentage_interest or 0) if loan else 0.0,
+        "loan_term_months": loan.number_of_instalments or "1" if loan else "1",
     }
 
     return {"declaration": decl_out, "loan": loan_out}
@@ -1907,8 +1909,10 @@ def post_reconcile(
                 application_id=None,
                 loan_amount=Decimal(str(body.loan_amount)),
                 percentage_interest=Decimal(str(body.loan_rate)),
+                number_of_instalments=body.loan_term_months,
                 loan_status=LoanStatus.DISBURSED,
                 disbursement_date=month_date,
+                effective_month=month_date,
             )
             db.add(new_loan)
             db.flush()
@@ -1950,3 +1954,93 @@ def post_reconcile(
 
     db.commit()
     return {"message": "Reconciliation saved successfully"}
+
+
+# ---------------------------------------------------------------------------
+# Ledger Initialisation
+# ---------------------------------------------------------------------------
+
+@router.post("/initialize-ledger")
+def initialize_ledger(
+    current_user: User = Depends(require_any_role("Chairman", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Seed the global chart of accounts on a fresh install.
+
+    Safe to call multiple times — accounts that already exist are skipped.
+    Returns a summary of accounts created vs already present.
+    """
+    from app.models.ledger import LedgerAccount, AccountType
+
+    GLOBAL_ACCOUNTS = [
+        {
+            "account_code": "BANK_CASH",
+            "account_name": "Bank / Cash",
+            "account_type": AccountType.ASSET,
+            "description": "Main bank and cash account",
+        },
+        {
+            "account_code": "LOANS_RECEIVABLE",
+            "account_name": "Loans Receivable",
+            "account_type": AccountType.ASSET,
+            "description": "Outstanding member loans",
+        },
+        {
+            "account_code": "INTEREST_INCOME",
+            "account_name": "Interest Income",
+            "account_type": AccountType.INCOME,
+            "description": "Income from loan interest",
+        },
+        {
+            "account_code": "PENALTY_INCOME",
+            "account_name": "Penalty Income",
+            "account_type": AccountType.INCOME,
+            "description": "Income from member penalties",
+        },
+        {
+            "account_code": "SOCIAL_FUND",
+            "account_name": "Social Fund",
+            "account_type": AccountType.LIABILITY,
+            "description": "Group social fund pool",
+        },
+        {
+            "account_code": "ADMIN_FUND",
+            "account_name": "Administration Fund",
+            "account_type": AccountType.LIABILITY,
+            "description": "Group administration fund pool",
+        },
+        {
+            "account_code": "EQUITY",
+            "account_name": "Group Equity",
+            "account_type": AccountType.EQUITY,
+            "description": "Group retained earnings / equity",
+        },
+    ]
+
+    created = []
+    already_exists = []
+
+    for acct in GLOBAL_ACCOUNTS:
+        existing = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == acct["account_code"]
+        ).first()
+        if existing:
+            already_exists.append(acct["account_code"])
+        else:
+            new_acct = LedgerAccount(
+                account_code=acct["account_code"],
+                account_name=acct["account_name"],
+                account_type=acct["account_type"],
+                description=acct["description"],
+                is_active=True,
+            )
+            db.add(new_acct)
+            created.append(acct["account_code"])
+
+    db.commit()
+
+    return {
+        "message": "Ledger initialised successfully",
+        "created": created,
+        "already_existed": already_exists,
+    }

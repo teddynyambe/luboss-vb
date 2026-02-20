@@ -159,10 +159,11 @@ def get_member_loan_balance(
     """
     from app.models.transaction import Loan, LoanStatus, Repayment
     
-    # Get all active loans (OPEN status) for this member
+    # Get all active loans (OPEN or DISBURSED) for this member
+    # Reconciliation-created loans use DISBURSED; normal disbursed loans use OPEN
     query = db.query(Loan).filter(
         Loan.member_id == member_id,
-        Loan.loan_status == LoanStatus.OPEN
+        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
     )
     
     if as_of_date:

@@ -20,6 +20,7 @@ interface FormData {
   loan_repayment: string;
   loan_amount: string;
   loan_rate: string;
+  loan_term_months: string;
 }
 
 const emptyForm: FormData = {
@@ -31,6 +32,7 @@ const emptyForm: FormData = {
   loan_repayment: '0',
   loan_amount: '0',
   loan_rate: '0',
+  loan_term_months: '1',
 };
 
 export default function ReconcilePage() {
@@ -93,7 +95,7 @@ export default function ReconcilePage() {
           loan_repayment: number;
           status: string | null;
         };
-        loan: { loan_amount: number; loan_rate: number };
+        loan: { loan_amount: number; loan_rate: number; loan_term_months: string };
       }>(`/api/chairman/reconcile?member_id=${selectedMemberId}&month=${monthDate}`);
 
       if (res.data) {
@@ -108,6 +110,7 @@ export default function ReconcilePage() {
           loan_repayment: String(d.loan_repayment ?? 0),
           loan_amount: String(l.loan_amount ?? 0),
           loan_rate: String(l.loan_rate ?? 0),
+          loan_term_months: l.loan_term_months || '1',
         });
         setLoaded(true);
       } else {
@@ -140,6 +143,7 @@ export default function ReconcilePage() {
         loan_repayment: parseFloat(formData.loan_repayment) || 0,
         loan_amount: parseFloat(formData.loan_amount) || 0,
         loan_rate: parseFloat(formData.loan_rate) || 0,
+        loan_term_months: formData.loan_term_months || '1',
       });
 
       if (!res.error) {
@@ -274,9 +278,22 @@ export default function ReconcilePage() {
             {/* Loan fields */}
             <div className="card">
               <h2 className="text-lg font-bold text-blue-900 mb-4">Loan Applied (leave 0 if none)</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 {field('Loan Amount (K)', 'loan_amount')}
                 {field('Interest Rate (%)', 'loan_rate')}
+                <div className="flex flex-col gap-1">
+                  <label className="text-sm font-semibold text-blue-900">Loan Term (Months)</label>
+                  <select
+                    value={formData.loan_term_months}
+                    onChange={(e) => setFormData((prev) => ({ ...prev, loan_term_months: e.target.value }))}
+                    className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="1">1 Month</option>
+                    <option value="2">2 Months</option>
+                    <option value="3">3 Months</option>
+                    <option value="4">4 Months</option>
+                  </select>
+                </div>
               </div>
             </div>
 

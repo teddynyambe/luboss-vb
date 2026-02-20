@@ -46,7 +46,31 @@ def root():
     return {"message": "Luboss95 Village Banking v2 API", "version": "2.0.0"}
 
 
-@app.get("/health")
+@app.get("/api/health")
 def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy"}
+    """Health check endpoint — checks API and database connectivity."""
+    from app.db.base import get_db
+    from sqlalchemy import text
+    from datetime import datetime, timezone
+
+    db_status = "unreachable"
+    db_error = None
+    try:
+        db = next(get_db())
+        db.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception as e:
+        db_error = str(e)
+
+    status = "healthy" if db_status == "connected" else "degraded"
+
+    return {
+        "status": status,
+        "version": "2.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "services": {
+            "api": "ok",
+            "database": db_status,
+        },
+        **({"database_error": db_error} if db_error else {})
+    }
