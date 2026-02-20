@@ -491,6 +491,65 @@ def get_member_info(
     }
 
 
+def get_member_personal_details(
+    db: Session,
+    search_term: str = None,
+    user_role: str = None,
+) -> Dict:
+    """
+    Get full personal details for a member (chairman/treasurer only).
+    Returns NRC number, bank account details, physical address, and next-of-kin
+    information in addition to basic profile data.
+    Restricted to users with role 'chairman' or 'treasurer'.
+    """
+    from app.models.member import MemberProfile, MemberStatus
+    from app.models.user import User
+    from sqlalchemy import or_, func
+
+    ALLOWED_ROLES = {"chairman", "treasurer"}
+    if not user_role or user_role.lower() not in ALLOWED_ROLES:
+        return {"error": "Access denied. Only chairman and treasurer can view personal details."}
+
+    if not search_term or not search_term.strip():
+        return {"error": "Please provide a member name, email, or NRC number to look up personal details."}
+
+    query = db.query(MemberProfile).join(User, MemberProfile.user_id == User.id).filter(
+        or_(
+            User.first_name.ilike(f"%{search_term}%"),
+            User.last_name.ilike(f"%{search_term}%"),
+            User.email.ilike(f"%{search_term}%"),
+            func.concat(User.first_name, " ", User.last_name).ilike(f"%{search_term}%"),
+            User.nrc_number.ilike(f"%{search_term}%"),
+        )
+    )
+
+    members = query.all()
+    if not members:
+        return {"members": [], "count": 0, "message": "No members found matching that search."}
+
+    result = []
+    for member in members:
+        user = member.user
+        result.append({
+            "member_id": str(member.id),
+            "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
+            "email": user.email,
+            "phone_number": user.phone_number,
+            "nrc_number": user.nrc_number,
+            "bank_account": user.bank_account,
+            "bank_name": user.bank_name,
+            "bank_branch": user.bank_branch,
+            "physical_address": user.physical_address,
+            "next_of_kin_first_name": user.first_name_next_of_kin,
+            "next_of_kin_last_name": user.last_name_next_of_kin,
+            "next_of_kin_phone": user.phone_number_next_of_kin,
+            "status": member.status.value,
+            "date_joined": user.date_joined.isoformat() if user.date_joined else None,
+        })
+
+    return {"members": result, "count": len(result)}
+
+
 def get_group_info(db: Session) -> Dict:
     """
     Get group-level information: total members, active member count, committee members

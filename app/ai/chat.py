@@ -15,7 +15,8 @@ def process_ai_query(
     user_id: UUID,
     member_id: UUID,
     query: str,
-    user_first_name: Optional[str] = None
+    user_first_name: Optional[str] = None,
+    user_role: Optional[str] = None,
 ) -> Dict:
     """
     Process AI query with function calling - LLM dynamically selects which tools to use.
@@ -126,6 +127,18 @@ Your role is to assist members with:
 - Call tools based on what the user is asking about
 - You can call multiple tools if needed to answer a question completely
 - If tools are not available, provide answers based on your training knowledge and the context provided"""
+
+    # Role-specific addendum
+    admin_roles = {"chairman", "treasurer"}
+    if user_role and user_role.lower() in admin_roles:
+        system_prompt += f"""
+
+**Administrative Access ({user_role.title()})**:
+- You have elevated access as a {user_role.title()}.
+- You can use `get_member_personal_details` to retrieve a member's NRC number, bank account, bank name, bank branch, physical address, and next-of-kin information.
+- Use this tool when you are asked about a member's NRC, bank details, address, next of kin, or other personal/sensitive information.
+- Always confirm which member you are returning details for by name before displaying sensitive fields.
+- This tool requires a search term (name, email, or NRC number)."""
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -199,7 +212,7 @@ Your role is to assist members with:
                         
                         # Execute the tool
                         try:
-                            result = execute_tool(tool_name, arguments, db, user_id)
+                            result = execute_tool(tool_name, arguments, db, user_id, user_role=user_role)
                             tool_calls.append({
                                 "tool": tool_name,
                                 "arguments": arguments,
@@ -254,9 +267,10 @@ Your role is to assist members with:
                 get_my_declarations,
                 get_my_credit_rating,
                 get_policy_answer,
-                get_member_info
+                get_member_info,
+                get_member_personal_details,
             )
-            
+
             query_lower = query.lower()
             is_account_query = any(keyword in query_lower for keyword in [
                 "my", "account", "balance", "loan", "savings", "penalty", "declaration", "status",
@@ -269,6 +283,13 @@ Your role is to assist members with:
                 "rule", "policy", "constitution", "interest", "rate", "collateral", "how", "what", "explain",
                 "app", "use", "help", "documentation", "guide", "interpret", "clarify", "meaning"
             ])
+            is_personal_details_query = any(keyword in query_lower for keyword in [
+                "bank account", "bank details", "account number", "account details",
+                "nrc", "nrc number", "national registration",
+                "physical address", "home address", "address",
+                "next of kin", "next-of-kin", "kin",
+                "bank name", "bank branch",
+            ])
             is_member_info_query = any(keyword in query_lower for keyword in [
                 "member", "who is", "who are", "find member", "member list", "active member", "pending member",
                 "suspended member", "member email", "member contact", "member phone", "member status",
@@ -277,7 +298,7 @@ Your role is to assist members with:
                 "who are all", "show all", "list all", "everyone", "people in", "who belongs"
             ])
             
-            if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query):
+            if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query or is_personal_details_query):
                 is_policy_query = True
             
             context = ""
@@ -344,6 +365,38 @@ Your role is to assist members with:
                         pass
                     tool_calls.append({"tool": "get_my_credit_rating", "result": {"error": str(e)}})
             
+            # Handle personal details queries (chairman/treasurer only)
+            if is_personal_details_query:
+                try:
+                    # Extract member name from the query
+                    personal_search_term = None
+                    personal_patterns = [
+                        r"(?:bank account|bank details|account details|account number|nrc|address|next of kin|bank name|bank branch)\s+(?:for|of)\s+(?:member\s+)?(.+?)(?:\?|$)",
+                        r"(?:for|of)\s+(?:member\s+)?(.+?)\s+(?:bank account|bank details|account details|nrc|address|next of kin)",
+                        r"member\s+(.+?)'s\s+(?:bank|nrc|address|next of kin|account)",
+                        r"(.+?)'s\s+(?:bank account|bank details|nrc|address|next of kin|account number|account details)",
+                        r"(?:what is|what are|get|find|show)\s+(?:the\s+)?(?:bank account|bank details|nrc|address|next of kin)\s+(?:for|of)\s+(?:member\s+)?(.+?)(?:\?|$)",
+                    ]
+                    for pattern in personal_patterns:
+                        match = re.search(pattern, query_lower, re.IGNORECASE)
+                        if match:
+                            candidate = match.group(1).strip()
+                            if candidate and candidate not in ["the", "a", "an", "member", "this", "that"]:
+                                personal_search_term = candidate
+                                break
+
+                    personal_details = get_member_personal_details(
+                        db, search_term=personal_search_term, user_role=user_role
+                    )
+                    tool_calls.append({"tool": "get_member_personal_details", "result": personal_details})
+                    context += f"Member personal details: {personal_details}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_member_personal_details", "result": {"error": str(e)}})
+
             # Handle member information queries (non-financial)
             if is_member_info_query:
                 try:

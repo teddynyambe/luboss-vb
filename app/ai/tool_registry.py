@@ -51,27 +51,29 @@ def get_tool_schemas() -> List[Dict[str, Any]]:
     return schemas
 
 
-def execute_tool(tool_name: str, arguments: Dict[str, Any], db: Session, user_id: UUID) -> Any:
+def execute_tool(tool_name: str, arguments: Dict[str, Any], db: Session, user_id: UUID, user_role: str = None) -> Any:
     """Execute a tool by name with given arguments."""
     if tool_name not in TOOL_REGISTRY:
         return {"error": f"Tool '{tool_name}' not found"}
-    
+
     tool_info = TOOL_REGISTRY[tool_name]
     func = tool_info["function"]
-    
+
     # Get function signature to determine which parameters to pass
     sig = inspect.signature(func)
     params = {}
-    
-    # Always pass db and user_id if function accepts them
+
+    # Always pass db and user_id if function accepts them; pass user_role if accepted
     for param_name in sig.parameters:
         if param_name == "db":
             params["db"] = db
         elif param_name == "user_id":
             params["user_id"] = user_id
+        elif param_name == "user_role":
+            params["user_role"] = user_role
         elif param_name in arguments:
             params[param_name] = arguments[param_name]
-    
+
     try:
         result = func(**params)
         return result
@@ -90,6 +92,7 @@ def initialize_tools():
         get_my_credit_rating,
         get_policy_answer,
         get_member_info,
+        get_member_personal_details,
         get_penalty_information,
         get_group_info
     )
@@ -206,6 +209,28 @@ def initialize_tools():
             "required": []
         },
         function=get_group_info
+    )
+
+    register_tool(
+        name="get_member_personal_details",
+        description=(
+            "Get a member's full personal details including NRC number, bank account, bank name, "
+            "bank branch, physical address, and next-of-kin information. "
+            "Only available to chairman and treasurer. "
+            "Use this when a chairman or treasurer asks for a member's NRC, bank details, address, "
+            "next of kin, or other personal/sensitive information."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "search_term": {
+                    "type": "string",
+                    "description": "Member name, email, or NRC number to search for."
+                }
+            },
+            "required": ["search_term"]
+        },
+        function=get_member_personal_details
     )
 
 

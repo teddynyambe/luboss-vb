@@ -119,6 +119,7 @@ def chat(
         user_id=current_user.id,
         member_id=member_profile.id,
         user_first_name=current_user.first_name,
+        user_role=current_user.role.value if current_user.role else None,
         query=chat_request.query
     )
 
