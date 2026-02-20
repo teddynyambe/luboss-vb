@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, ReactElement } from 'react';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -15,8 +15,8 @@ interface ChatMessage {
 
 function renderMarkdown(text: string) {
   const lines = text.split('\n');
-  const elements: JSX.Element[] = [];
-  let currentList: JSX.Element[] = [];
+  const elements: ReactElement[] = [];
+  let currentList: ReactElement[] = [];
   let listType: 'ul' | 'ol' | null = null;
   let key = 0;
 
@@ -41,7 +41,7 @@ function renderMarkdown(text: string) {
   };
 
   const processBold = (line: string, lineKey: number) => {
-    const parts: (string | JSX.Element)[] = [];
+    const parts: (string | ReactElement)[] = [];
     const regex = /\*\*(.*?)\*\*/g;
     let lastIndex = 0;
     let match;
