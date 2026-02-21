@@ -1333,25 +1333,52 @@ def get_current_loan(
     # Get the most recent active loan
     loan = active_loans[0]
     
-    # Calculate payment breakdown
+    # Compute payment history from approved declarations.
+    # Declarations are the authoritative payment record: when a deposit is approved,
+    # declared_loan_repayment = principal paid, declared_interest_on_loan = interest paid.
+    # This covers both pre-fix data (no Repayment rows) and post-fix data equally.
+    from app.models.transaction import Declaration, DeclarationStatus
+    from sqlalchemy import or_
+
+    decl_query = db.query(Declaration).filter(
+        Declaration.member_id == member_profile.id,
+        Declaration.status == DeclarationStatus.APPROVED,
+        or_(
+            Declaration.declared_loan_repayment > 0,
+            Declaration.declared_interest_on_loan > 0,
+        ),
+    )
+    if loan.disbursement_date:
+        decl_query = decl_query.filter(
+            Declaration.effective_month >= loan.disbursement_date
+        )
+    paid_declarations = decl_query.order_by(Declaration.effective_month.asc()).all()
+
     total_principal_paid = Decimal("0.00")
     total_interest_paid = Decimal("0.00")
-    total_paid = Decimal("0.00")
-    
-    for repayment in loan.repayments:
-        total_principal_paid += repayment.principal_amount
-        total_interest_paid += repayment.interest_amount
-        total_paid += repayment.total_amount
-    
-    outstanding_balance = loan.loan_amount - total_principal_paid
-    
-    # Check if loan is fully paid and update status to CLOSED
-    if outstanding_balance <= Decimal("0.01"):  # Allow small rounding differences
+    repayment_items = []
+    for decl in paid_declarations:
+        principal = decl.declared_loan_repayment or Decimal("0.00")
+        interest = decl.declared_interest_on_loan or Decimal("0.00")
+        total_principal_paid += principal
+        total_interest_paid += interest
+        repayment_items.append({
+            "id": f"decl_{decl.id}",
+            "date": decl.effective_month.isoformat(),
+            "principal": float(principal),
+            "interest": float(interest),
+            "total": float(principal + interest),
+        })
+
+    outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
+
+    # Auto-close the loan when fully repaid
+    if outstanding_balance <= Decimal("0.01"):
         if loan.loan_status != LoanStatus.CLOSED:
             loan.loan_status = LoanStatus.CLOSED
             db.commit()
             db.refresh(loan)
-    
+
     return {
         "id": str(loan.id),
         "loan_amount": float(loan.loan_amount),
@@ -1361,18 +1388,9 @@ def get_current_loan(
         "status": loan.loan_status.value,
         "total_principal_paid": float(total_principal_paid),
         "total_interest_paid": float(total_interest_paid),
-        "total_paid": float(total_paid),
+        "total_paid": float(total_principal_paid + total_interest_paid),
         "outstanding_balance": float(outstanding_balance),
-        "repayments": [
-            {
-                "id": str(repayment.id),
-                "date": repayment.repayment_date.isoformat(),
-                "principal": float(repayment.principal_amount),
-                "interest": float(repayment.interest_amount),
-                "total": float(repayment.total_amount)
-            }
-            for repayment in loan.repayments
-        ]
+        "repayments": repayment_items,
     }
 
 

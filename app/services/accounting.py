@@ -165,46 +165,52 @@ def get_member_loan_balance(
     as_of_date: datetime = None
 ) -> Decimal:
     """Get member's outstanding loan balance.
-    
-    Calculates by summing all active loan amounts and subtracting principal repayments.
+
+    Calculates by summing active loan amounts and subtracting principal paid.
+    Principal paid is sourced from APPROVED declarations (declared_loan_repayment),
+    which covers both historical deposits (no Repayment record) and new ones equally.
     """
-    from app.models.transaction import Loan, LoanStatus, Repayment
-    
+    from app.models.transaction import Loan, LoanStatus, Declaration, DeclarationStatus
+
     # Get all active loans (OPEN or DISBURSED) for this member
-    # Reconciliation-created loans use DISBURSED; normal disbursed loans use OPEN
-    query = db.query(Loan).filter(
+    loan_query = db.query(Loan).filter(
         Loan.member_id == member_id,
         Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
     )
-    
     if as_of_date:
-        # Filter loans created before or on the date
-        query = query.filter(Loan.created_at <= as_of_date)
-    
-    active_loans = query.all()
-    
+        loan_query = loan_query.filter(Loan.created_at <= as_of_date)
+
+    active_loans = loan_query.all()
     if not active_loans:
         return Decimal("0.00")
-    
-    # Calculate total outstanding balance
+
     total_outstanding = Decimal("0.00")
-    
+
     for loan in active_loans:
-        # Get total principal paid for this loan
-        repayments_query = db.query(Repayment).filter(Repayment.loan_id == loan.id)
-        if as_of_date:
-            repayments_query = repayments_query.filter(Repayment.repayment_date <= as_of_date.date())
-        
-        total_principal_paid = sum(
-            repayment.principal_amount 
-            for repayment in repayments_query.all()
+        # Sum principal paid from approved declarations dated on/after disbursement
+        decl_query = db.query(Declaration).filter(
+            Declaration.member_id == member_id,
+            Declaration.status == DeclarationStatus.APPROVED,
+            Declaration.declared_loan_repayment > 0,
         )
-        
-        # Outstanding balance = loan amount - principal paid
+        if loan.disbursement_date:
+            decl_query = decl_query.filter(
+                Declaration.effective_month >= loan.disbursement_date
+            )
+        if as_of_date:
+            decl_query = decl_query.filter(
+                Declaration.effective_month <= as_of_date.date()
+            )
+
+        total_principal_paid = sum(
+            (decl.declared_loan_repayment or Decimal("0.00"))
+            for decl in decl_query.all()
+        )
+
         outstanding = loan.loan_amount - total_principal_paid
         total_outstanding += outstanding
-    
-    return max(Decimal("0.00"), total_outstanding)  # Ensure non-negative
+
+    return max(Decimal("0.00"), total_outstanding)
 
 
 def get_member_social_fund_balance(
