@@ -42,12 +42,24 @@ export default function MemberDashboard() {
   const [hasCurrentMonthDeclaration, setHasCurrentMonthDeclaration] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [modalType, setModalType] = useState<'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null>(null);
+  const [currentLoan, setCurrentLoan] = useState<any>(null);
+  const [loanModalOpen, setLoanModalOpen] = useState(false);
 
   useEffect(() => {
     loadStatus();
     loadCycles();
     loadCurrentMonthDeclaration();
+    loadCurrentLoan();
   }, []);
+
+  const loadCurrentLoan = async () => {
+    try {
+      const response = await memberApi.getCurrentLoan();
+      if (response.data) setCurrentLoan(response.data);
+    } catch {
+      // no active loan — leave null
+    }
+  };
 
   const loadStatus = async () => {
     const response = await api.get<AccountStatus>('/api/member/status');
@@ -160,14 +172,28 @@ export default function MemberDashboard() {
                         K{status.savings_balance.toLocaleString()}
                       </p>
                     </div>
-                    <div className="bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300">
+                    <div
+                      onClick={() => currentLoan && setLoanModalOpen(true)}
+                      className={`bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300 ${currentLoan ? 'cursor-pointer hover:ring-2 hover:ring-red-400 hover:shadow-lg transition-all duration-200' : ''}`}
+                    >
                       <p className="text-xs md:text-sm text-red-700 font-medium mb-2">Loan Balance</p>
                       <p className="text-xl md:text-3xl font-bold text-red-900">
-                        K{status.loan_balance.toLocaleString()}
+                        K{(currentLoan?.loan_amount ?? status.loan_balance).toLocaleString()}
                       </p>
-                      <p className="text-xs md:text-sm text-red-600 mt-1">
-                        {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
-                      </p>
+                      {currentLoan ? (
+                        <>
+                          <p className="text-xs md:text-sm text-red-700 font-medium mt-1">
+                            Outstanding: K{currentLoan.outstanding_balance?.toLocaleString()}
+                          </p>
+                          <p className="text-xs md:text-sm text-red-500 mt-0.5">
+                            Interest paid: K{currentLoan.total_interest_paid?.toLocaleString()}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-xs md:text-sm text-red-600 mt-1">
+                          {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
+                        </p>
+                      )}
                     </div>
                     <div
                       onClick={() => handleCardClick('social_fund')}
@@ -216,14 +242,28 @@ export default function MemberDashboard() {
                     K{status.savings_balance.toLocaleString()}
                   </p>
                 </div>
-                <div className="bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300">
+                <div
+                  onClick={() => currentLoan && setLoanModalOpen(true)}
+                  className={`bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300 ${currentLoan ? 'cursor-pointer hover:ring-2 hover:ring-red-400 hover:shadow-lg transition-all duration-200' : ''}`}
+                >
                   <p className="text-xs md:text-sm text-red-700 font-medium mb-2">Loan Balance</p>
                   <p className="text-xl md:text-3xl font-bold text-red-900">
-                    K{status.loan_balance.toLocaleString()}
+                    K{(currentLoan?.loan_amount ?? status.loan_balance).toLocaleString()}
                   </p>
-                  <p className="text-xs md:text-sm text-red-600 mt-1">
-                    {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
-                  </p>
+                  {currentLoan ? (
+                    <>
+                      <p className="text-xs md:text-sm text-red-700 font-medium mt-1">
+                        Outstanding: K{currentLoan.outstanding_balance?.toLocaleString()}
+                      </p>
+                      <p className="text-xs md:text-sm text-red-500 mt-0.5">
+                        Interest paid: K{currentLoan.total_interest_paid?.toLocaleString()}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="text-xs md:text-sm text-red-600 mt-1">
+                      {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
+                    </p>
+                  )}
                 </div>
                 <div
                   onClick={() => handleCardClick('social_fund')}
@@ -325,6 +365,108 @@ export default function MemberDashboard() {
           title={getModalTitle(modalType)}
         />
       )}
+
+      {/* Loan Repayment Modal */}
+      {loanModalOpen && currentLoan && (() => {
+        // Build rows with running balance (oldest first)
+        let runningBalance: number = currentLoan.loan_amount ?? 0;
+        const rows = [...(currentLoan.repayments ?? [])].map((r: any) => {
+          runningBalance = runningBalance - (r.principal ?? 0);
+          return { ...r, runningBalance };
+        });
+        return (
+          <div
+            className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+            onClick={() => setLoanModalOpen(false)}
+          >
+            <div
+              className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="sticky top-0 bg-red-600 text-white px-6 py-4 rounded-t-xl flex justify-between items-start">
+                <div>
+                  <h2 className="text-xl font-bold">Loan Repayment History</h2>
+                  <p className="text-sm text-red-100 mt-0.5">
+                    Borrowed: K{currentLoan.loan_amount?.toLocaleString()} &nbsp;·&nbsp;
+                    {currentLoan.term_months} {currentLoan.term_months === '1' || currentLoan.term_months === 1 ? 'month' : 'months'} term
+                    {currentLoan.interest_rate != null && ` · ${currentLoan.interest_rate}% interest`}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setLoanModalOpen(false)}
+                  className="text-white hover:text-red-200 text-2xl font-bold leading-none ml-4"
+                >×</button>
+              </div>
+
+              {/* Summary row */}
+              <div className="grid grid-cols-3 gap-3 p-4 bg-red-50 border-b border-red-200">
+                <div className="text-center">
+                  <p className="text-xs text-red-600 font-medium">Borrowed</p>
+                  <p className="text-lg font-bold text-red-900">K{currentLoan.loan_amount?.toLocaleString()}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-red-600 font-medium">Outstanding</p>
+                  <p className="text-lg font-bold text-red-700">K{currentLoan.outstanding_balance?.toLocaleString()}</p>
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-red-600 font-medium">Interest Paid</p>
+                  <p className="text-lg font-bold text-orange-700">K{currentLoan.total_interest_paid?.toLocaleString()}</p>
+                </div>
+              </div>
+
+              {/* Repayment table */}
+              <div className="overflow-y-auto flex-1 p-4">
+                {rows.length === 0 ? (
+                  <p className="text-center text-gray-500 py-8">No repayments recorded yet.</p>
+                ) : (
+                  <table className="w-full border-collapse text-sm">
+                    <thead>
+                      <tr className="bg-red-100 border-b-2 border-red-300">
+                        <th className="text-left p-3 font-semibold text-red-900">Date</th>
+                        <th className="text-right p-3 font-semibold text-red-900">Principal</th>
+                        <th className="text-right p-3 font-semibold text-red-900">Interest</th>
+                        <th className="text-right p-3 font-semibold text-red-900">Total Paid</th>
+                        <th className="text-right p-3 font-semibold text-red-900">Balance</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {/* Opening balance row */}
+                      <tr className="border-b border-gray-200 bg-gray-50">
+                        <td className="p-3 text-gray-500 italic" colSpan={4}>Opening balance</td>
+                        <td className="p-3 text-right font-semibold text-gray-800">
+                          K{currentLoan.loan_amount?.toLocaleString()}
+                        </td>
+                      </tr>
+                      {rows.map((r: any, i: number) => (
+                        <tr key={i} className="border-b border-red-100 hover:bg-red-50">
+                          <td className="p-3 text-gray-700">
+                            {r.date
+                              ? new Date(r.date + 'T00:00:00').toLocaleDateString()
+                              : 'N/A'}
+                          </td>
+                          <td className="p-3 text-right text-green-700 font-medium">
+                            K{(r.principal ?? 0).toLocaleString()}
+                          </td>
+                          <td className="p-3 text-right text-orange-600">
+                            K{(r.interest ?? 0).toLocaleString()}
+                          </td>
+                          <td className="p-3 text-right font-semibold text-gray-800">
+                            K{(r.total ?? 0).toLocaleString()}
+                          </td>
+                          <td className="p-3 text-right font-bold text-red-700">
+                            K{r.runningBalance.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -733,6 +733,31 @@ def approve_deposit(
     # Update declaration status to APPROVED
     declaration.status = DeclarationStatus.APPROVED
     
+    # Create Repayment record so that get_current_loan() / get_member_loan_balance()
+    # can compute outstanding balance and paid totals from Repayment rows.
+    # The journal lines above already post to the ledger; this record is the
+    # source of truth for principal-vs-interest tracking on the Loan object.
+    if loan_repayment > Decimal("0.00") or interest_on_loan > Decimal("0.00"):
+        active_loan = (
+            db.query(Loan)
+            .filter(
+                Loan.member_id == deposit.member_id,
+                Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
+            )
+            .order_by(Loan.created_at.asc())  # oldest active loan first
+            .first()
+        )
+        if active_loan:
+            repayment_record = Repayment(
+                loan_id=active_loan.id,
+                repayment_date=declaration.effective_month,
+                principal_amount=loan_repayment,
+                interest_amount=interest_on_loan,
+                total_amount=loan_repayment + interest_on_loan,
+                journal_entry_id=journal_entry.id,
+            )
+            db.add(repayment_record)
+
     # Mark penalties as PAID when deposit is approved
     # Find all APPROVED penalty records for this member that match the declared penalty amount
     if penalties > 0:

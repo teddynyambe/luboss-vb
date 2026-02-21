@@ -370,41 +370,59 @@ export default function LoanApplicationPage() {
                   </div>
                 </div>
                 
-                {currentLoan.repayments && currentLoan.repayments.length > 0 && (
-                  <div>
-                    <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-3">Repayment History</h3>
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse">
-                        <thead>
-                          <tr className="bg-blue-100 border-b-2 border-blue-300">
-                            <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Date</th>
-                            <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Principal</th>
-                            <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Interest</th>
-                            <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Total</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {currentLoan.repayments.map((repayment: any, index: number) => (
-                            <tr key={index} className="border-b border-blue-200">
-                              <td className="p-3 text-sm md:text-base text-blue-800">
-                                {repayment.date ? parseLocalDate(repayment.date).toLocaleDateString() : 'N/A'}
-                              </td>
-                              <td className="p-3 text-sm md:text-base text-blue-800">
-                                K{repayment.principal?.toLocaleString() || '0.00'}
-                              </td>
-                              <td className="p-3 text-sm md:text-base text-blue-800">
-                                K{repayment.interest?.toLocaleString() || '0.00'}
-                              </td>
-                              <td className="p-3 text-sm md:text-base font-semibold text-blue-900">
-                                K{repayment.total?.toLocaleString() || '0.00'}
+                {currentLoan.repayments && currentLoan.repayments.length > 0 && (() => {
+                  let runningBal: number = currentLoan.loan_amount ?? 0;
+                  const rows = [...currentLoan.repayments].map((r: any) => {
+                    runningBal = runningBal - (r.principal ?? 0);
+                    return { ...r, runningBal };
+                  });
+                  return (
+                    <div>
+                      <h3 className="text-lg md:text-xl font-bold text-blue-900 mb-3">Repayment History</h3>
+                      <div className="overflow-x-auto">
+                        <table className="w-full border-collapse">
+                          <thead>
+                            <tr className="bg-blue-100 border-b-2 border-blue-300">
+                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Date</th>
+                              <th className="text-right p-3 text-sm md:text-base font-semibold text-blue-900">Principal</th>
+                              <th className="text-right p-3 text-sm md:text-base font-semibold text-blue-900">Interest</th>
+                              <th className="text-right p-3 text-sm md:text-base font-semibold text-blue-900">Total</th>
+                              <th className="text-right p-3 text-sm md:text-base font-semibold text-blue-900">Balance</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {/* Opening balance */}
+                            <tr className="border-b border-blue-200 bg-blue-50">
+                              <td className="p-3 text-sm text-blue-500 italic" colSpan={4}>Opening balance</td>
+                              <td className="p-3 text-right text-sm font-semibold text-blue-900">
+                                K{(currentLoan.loan_amount ?? 0).toLocaleString()}
                               </td>
                             </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                            {rows.map((repayment: any, index: number) => (
+                              <tr key={index} className="border-b border-blue-200">
+                                <td className="p-3 text-sm md:text-base text-blue-800">
+                                  {repayment.date ? parseLocalDate(repayment.date).toLocaleDateString() : 'N/A'}
+                                </td>
+                                <td className="p-3 text-sm md:text-base text-right text-green-700 font-medium">
+                                  K{(repayment.principal ?? 0).toLocaleString()}
+                                </td>
+                                <td className="p-3 text-sm md:text-base text-right text-orange-600">
+                                  K{(repayment.interest ?? 0).toLocaleString()}
+                                </td>
+                                <td className="p-3 text-sm md:text-base text-right font-semibold text-blue-900">
+                                  K{(repayment.total ?? 0).toLocaleString()}
+                                </td>
+                                <td className="p-3 text-sm md:text-base text-right font-bold text-red-700">
+                                  K{repayment.runningBal.toLocaleString()}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </div>
           ) : null}
