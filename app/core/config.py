@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     ENABLE_AI_CHAT: bool = True
     ENABLE_DOCUMENT_UPLOAD: bool = True
     
+    # Scheduler
+    SCHEDULER_INTERVAL_MINUTES: int = 5
+
     # Application
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"

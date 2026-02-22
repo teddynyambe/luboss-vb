@@ -1470,3 +1470,46 @@ def get_bank_statement_file(
     media_type = media_types.get(ext, "application/octet-stream")
 
     return FileResponse(path=str(file_path), filename=safe_filename, media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
+# Scheduler control endpoints
+# ---------------------------------------------------------------------------
+
+class SchedulerIntervalUpdate(BaseModel):
+    interval_minutes: int
+
+
+@router.get("/scheduler/status")
+def scheduler_status(
+    current_user: User = Depends(require_treasurer),
+):
+    """Return the current state of the background scheduler."""
+    from app.services.scheduler import get_scheduler_status
+    return get_scheduler_status()
+
+
+@router.put("/scheduler/interval")
+def update_scheduler_interval(
+    body: SchedulerIntervalUpdate,
+    current_user: User = Depends(require_treasurer),
+):
+    """Change the scheduler run interval (in minutes) at runtime."""
+    if body.interval_minutes < 1:
+        raise HTTPException(status_code=400, detail="Interval must be at least 1 minute")
+
+    from app.services.scheduler import reschedule_jobs, get_scheduler_status
+    try:
+        reschedule_jobs(body.interval_minutes)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Scheduler interval updated",
+        details=f"new_interval={body.interval_minutes} minutes",
+    )
+
+    return get_scheduler_status()

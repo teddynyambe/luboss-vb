@@ -1,6 +1,9 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import auth, admin, chairman, treasurer, compliance, member, ai
+from app.services.scheduler import start_scheduler, stop_scheduler
 import logging
 
 # Configure logging
@@ -14,10 +17,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("Starting Luboss95 Village Banking v2 API")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
 app = FastAPI(
     title="Luboss95 Village Banking v2 API",
     description="LUBOSS 95 Village Banking System",
-    version="2.0.0"
+    version="2.0.0",
+    lifespan=lifespan,
 )
 
 # CORS middleware

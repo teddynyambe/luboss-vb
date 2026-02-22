@@ -1372,8 +1372,13 @@ def get_current_loan(
 
     outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
 
-    # Auto-close the loan when fully repaid
-    if outstanding_balance <= Decimal("0.01"):
+    rate = float(loan.percentage_interest or 0)
+    interest_expected = Decimal(str(
+        float(loan.loan_amount) * (rate / 100)
+    )) if rate > 0 else Decimal("0.00")
+
+    # Auto-close the loan when principal AND interest are fully repaid
+    if outstanding_balance <= Decimal("0.01") and total_interest_paid >= interest_expected:
         if loan.loan_status != LoanStatus.CLOSED:
             loan.loan_status = LoanStatus.CLOSED
             db.commit()
