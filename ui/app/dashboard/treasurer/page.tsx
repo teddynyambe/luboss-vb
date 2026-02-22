@@ -88,6 +88,7 @@ interface LoanDetail {
     principal: number;
     interest: number;
     total: number;
+    balance: number;
     is_on_time: boolean;
   }>;
 }
@@ -1509,36 +1510,37 @@ export default function TreasurerDashboard() {
                         <table className="w-full border-collapse">
                           <thead>
                             <tr className="bg-blue-100 border-b-2 border-blue-300">
-                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Date</th>
-                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Principal</th>
-                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Interest</th>
-                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Total</th>
-                              <th className="text-left p-3 text-sm md:text-base font-semibold text-blue-900">Status</th>
+                              <th className="text-left p-3 text-sm font-semibold text-blue-900">Date</th>
+                              <th className="text-right p-3 text-sm font-semibold text-blue-900">Principal</th>
+                              <th className="text-right p-3 text-sm font-semibold text-blue-900">Interest</th>
+                              <th className="text-right p-3 text-sm font-semibold text-blue-900">Total Paid</th>
+                              <th className="text-right p-3 text-sm font-semibold text-blue-900">Balance</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {selectedLoan.repayments.map((repayment, index) => (
-                              <tr key={repayment.id} className="border-b border-blue-200">
-                                <td className="p-3 text-sm md:text-base text-blue-800">
-                                  {new Date(repayment.date).toLocaleDateString()}
+                            {/* Opening balance row */}
+                            <tr className="border-b border-blue-200 bg-blue-50">
+                              <td className="p-3 text-sm text-blue-500 italic" colSpan={4}>Opening balance</td>
+                              <td className="p-3 text-right text-sm font-semibold text-blue-900">
+                                K{selectedLoan.loan_amount.toLocaleString()}
+                              </td>
+                            </tr>
+                            {selectedLoan.repayments.map((repayment) => (
+                              <tr key={repayment.id} className="border-b border-blue-200 hover:bg-blue-50">
+                                <td className="p-3 text-sm text-blue-800">
+                                  {new Date(repayment.date + 'T00:00:00').toLocaleDateString()}
                                 </td>
-                                <td className="p-3 text-sm md:text-base text-blue-800">
+                                <td className="p-3 text-sm text-right text-green-700 font-medium">
                                   K{repayment.principal.toLocaleString()}
                                 </td>
-                                <td className="p-3 text-sm md:text-base text-blue-800">
+                                <td className="p-3 text-sm text-right text-orange-600">
                                   K{repayment.interest.toLocaleString()}
                                 </td>
-                                <td className="p-3 text-sm md:text-base font-semibold text-blue-900">
+                                <td className="p-3 text-sm text-right font-semibold text-blue-900">
                                   K{repayment.total.toLocaleString()}
                                 </td>
-                                <td className="p-3 text-sm md:text-base">
-                                  <span className={`px-2 py-1 rounded-full text-xs font-semibold ${
-                                    repayment.is_on_time
-                                      ? 'bg-green-200 text-green-900'
-                                      : 'bg-yellow-200 text-yellow-900'
-                                  }`}>
-                                    {repayment.is_on_time ? 'On Time' : 'Late'}
-                                  </span>
+                                <td className="p-3 text-sm text-right font-bold text-red-700">
+                                  K{(repayment.balance ?? 0).toLocaleString()}
                                 </td>
                               </tr>
                             ))}

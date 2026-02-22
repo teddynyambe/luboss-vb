@@ -714,24 +714,45 @@ def get_active_loans(
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
-    """Get list of active loans (OPEN status)."""
+    """Get list of active loans (OPEN or DISBURSED status).
+    Reconciliation-created loans use DISBURSED; normally disbursed loans use OPEN.
+    """
+    from app.models.transaction import Declaration, DeclarationStatus
+    from decimal import Decimal
+    from sqlalchemy import or_
+
     loans = db.query(Loan).filter(
-        Loan.loan_status == LoanStatus.OPEN
+        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
     ).order_by(Loan.created_at.desc()).all()
-    
+
     result = []
     for loan in loans:
         member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
         user = None
         if member:
             user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
-        
-        # Calculate payment summary
-        total_principal_paid = sum(repayment.principal_amount for repayment in loan.repayments)
-        total_interest_paid = sum(repayment.interest_amount for repayment in loan.repayments)
-        total_paid = total_principal_paid + total_interest_paid
-        outstanding_balance = loan.loan_amount - total_principal_paid
-        
+
+        # Compute paid amounts from approved declarations (covers pre- and post-fix data)
+        decl_q = db.query(Declaration).filter(
+            Declaration.member_id == loan.member_id,
+            Declaration.status == DeclarationStatus.APPROVED,
+            or_(
+                Declaration.declared_loan_repayment > 0,
+                Declaration.declared_interest_on_loan > 0,
+            ),
+        )
+        if loan.disbursement_date:
+            decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
+        paid_decls = decl_q.all()
+
+        total_principal_paid = sum(
+            (d.declared_loan_repayment or Decimal("0.00")) for d in paid_decls
+        )
+        total_interest_paid = sum(
+            (d.declared_interest_on_loan or Decimal("0.00")) for d in paid_decls
+        )
+        outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
+
         result.append({
             "id": str(loan.id),
             "application_id": str(loan.application_id) if loan.application_id else None,
@@ -744,13 +765,14 @@ def get_active_loans(
             "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
             "created_at": loan.created_at.isoformat() if loan.created_at else None,
             "cycle_id": str(loan.cycle_id),
+            "status": loan.loan_status.value,
             "total_principal_paid": float(total_principal_paid),
             "total_interest_paid": float(total_interest_paid),
-            "total_paid": float(total_paid),
+            "total_paid": float(total_principal_paid + total_interest_paid),
             "outstanding_balance": float(outstanding_balance),
-            "repayment_count": len(loan.repayments)
+            "repayment_count": len(paid_decls),
         })
-    
+
     return result
 
 
@@ -778,37 +800,46 @@ def get_loan_details(
     if member:
         user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
     
-    # Calculate payment summary
+    # Compute payment history from approved declarations (covers all historical data)
+    from app.models.transaction import Declaration, DeclarationStatus
+    from sqlalchemy import or_
+
+    decl_q = db.query(Declaration).filter(
+        Declaration.member_id == loan.member_id,
+        Declaration.status == DeclarationStatus.APPROVED,
+        or_(
+            Declaration.declared_loan_repayment > 0,
+            Declaration.declared_interest_on_loan > 0,
+        ),
+    )
+    if loan.disbursement_date:
+        decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
+    paid_decls = decl_q.order_by(Declaration.effective_month.asc()).all()
+
     total_principal_paid = Decimal("0.00")
     total_interest_paid = Decimal("0.00")
-    total_paid = Decimal("0.00")
-    
     repayments_list = []
-    for repayment in loan.repayments:
-        total_principal_paid += repayment.principal_amount
-        total_interest_paid += repayment.interest_amount
-        total_paid += repayment.total_amount
-        
-        # Calculate if payment was on time
-        # For now, we'll consider a payment on time if it's within the same month as expected
-        # In a real system, you'd compare against scheduled due dates
-        is_on_time = True  # Default - can be enhanced with due date logic
-        
+    running_balance = loan.loan_amount
+
+    for decl in paid_decls:
+        principal = decl.declared_loan_repayment or Decimal("0.00")
+        interest = decl.declared_interest_on_loan or Decimal("0.00")
+        total_principal_paid += principal
+        total_interest_paid += interest
+        running_balance -= principal
         repayments_list.append({
-            "id": str(repayment.id),
-            "date": repayment.repayment_date.isoformat(),
-            "principal": float(repayment.principal_amount),
-            "interest": float(repayment.interest_amount),
-            "total": float(repayment.total_amount),
-            "is_on_time": is_on_time
+            "id": f"decl_{decl.id}",
+            "date": decl.effective_month.isoformat(),
+            "principal": float(principal),
+            "interest": float(interest),
+            "total": float(principal + interest),
+            "balance": float(max(Decimal("0.00"), running_balance)),
+            "is_on_time": True,
         })
-    
-    outstanding_balance = loan.loan_amount - total_principal_paid
-    
-    # Calculate payment performance
-    all_payments_on_time = all(rep["is_on_time"] for rep in repayments_list)
-    payment_performance = "On Time" if all_payments_on_time else "Some Late Payments"
-    
+
+    outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
+    payment_performance = "On Time"
+
     return {
         "id": str(loan.id),
         "application_id": str(loan.application_id) if loan.application_id else None,
@@ -824,11 +855,11 @@ def get_loan_details(
         "status": loan.loan_status.value,
         "total_principal_paid": float(total_principal_paid),
         "total_interest_paid": float(total_interest_paid),
-        "total_paid": float(total_paid),
+        "total_paid": float(total_principal_paid + total_interest_paid),
         "outstanding_balance": float(outstanding_balance),
         "payment_performance": payment_performance,
-        "all_payments_on_time": all_payments_on_time,
-        "repayments": repayments_list
+        "all_payments_on_time": True,
+        "repayments": repayments_list,
     }
 
 
