@@ -204,11 +204,6 @@ export default function TreasurerDashboard() {
   }, []);
 
   useEffect(() => {
-    loadLoans(loanFilter);
-    setShowAllLoans(false);
-  }, [loanFilter]);
-
-  useEffect(() => {
     if (!penaltyNotification) return;
     const timer = setTimeout(() => setPenaltyNotification(null), 4000);
     return () => clearTimeout(timer);
@@ -228,7 +223,7 @@ export default function TreasurerDashboard() {
       api.get<PendingDeposit[]>('/api/treasurer/deposits/pending'),
       api.get<PendingPenalty[]>('/api/treasurer/penalties/pending'),
       api.get<PendingLoanApplication[]>('/api/treasurer/loans/pending'),
-      api.get<ActiveLoan[]>('/api/treasurer/loans/active?loan_filter=active'),
+      api.get<ActiveLoan[]>('/api/treasurer/loans/active'),
     ]);
 
     if (depositsRes.data) setPendingDeposits(depositsRes.data);
@@ -826,7 +821,7 @@ export default function TreasurerDashboard() {
               {/* Filter tabs */}
               <div className="flex gap-2 mb-3">
                 <button
-                  onClick={() => setLoanFilter('active')}
+                  onClick={() => { if (loanFilter !== 'active') { setLoanFilter('active'); setShowAllLoans(false); loadLoans('active'); } }}
                   className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
                     loanFilter === 'active'
                       ? 'bg-blue-600 text-white border-blue-600'
@@ -836,7 +831,7 @@ export default function TreasurerDashboard() {
                   Active
                 </button>
                 <button
-                  onClick={() => setLoanFilter('paid')}
+                  onClick={() => { if (loanFilter !== 'paid') { setLoanFilter('paid'); setShowAllLoans(false); loadLoans('paid'); } }}
                   className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
                     loanFilter === 'paid'
                       ? 'bg-green-600 text-white border-green-600'
