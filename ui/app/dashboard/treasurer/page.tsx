@@ -61,6 +61,7 @@ interface ActiveLoan {
   term_months: string;
   interest_rate?: number;
   disbursement_date?: string;
+  status: string;
   total_principal_paid: number;
   total_interest_paid: number;
   total_paid: number;
@@ -110,6 +111,8 @@ export default function TreasurerDashboard() {
   const [pendingPenalties, setPendingPenalties] = useState<PendingPenalty[]>([]);
   const [pendingLoans, setPendingLoans] = useState<PendingLoanApplication[]>([]);
   const [activeLoans, setActiveLoans] = useState<ActiveLoan[]>([]);
+  const [loanFilter, setLoanFilter] = useState<'active' | 'paid'>('active');
+  const [showAllLoans, setShowAllLoans] = useState(false);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<string | null>(null);
@@ -199,6 +202,11 @@ export default function TreasurerDashboard() {
   }, []);
 
   useEffect(() => {
+    loadLoans(loanFilter);
+    setShowAllLoans(false);
+  }, [loanFilter]);
+
+  useEffect(() => {
     if (!penaltyNotification) return;
     const timer = setTimeout(() => setPenaltyNotification(null), 4000);
     return () => clearTimeout(timer);
@@ -208,12 +216,17 @@ export default function TreasurerDashboard() {
     loadReports();
   }, [selectedReportMonth]);
 
+  const loadLoans = async (filter: 'active' | 'paid') => {
+    const res = await api.get<ActiveLoan[]>(`/api/treasurer/loans/active?loan_filter=${filter}`);
+    if (res.data) setActiveLoans(res.data);
+  };
+
   const loadData = async () => {
     const [depositsRes, penaltiesRes, loansRes, activeLoansRes] = await Promise.all([
       api.get<PendingDeposit[]>('/api/treasurer/deposits/pending'),
       api.get<PendingPenalty[]>('/api/treasurer/penalties/pending'),
       api.get<PendingLoanApplication[]>('/api/treasurer/loans/pending'),
-      api.get<ActiveLoan[]>('/api/treasurer/loans/active'),
+      api.get<ActiveLoan[]>('/api/treasurer/loans/active?loan_filter=active'),
     ]);
 
     if (depositsRes.data) setPendingDeposits(depositsRes.data);
@@ -799,22 +812,46 @@ export default function TreasurerDashboard() {
               )}
             </div>
 
-            {/* Active Loans - Compact Card */}
+            {/* Loans - Compact Card */}
             <div className="card">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-lg md:text-xl font-bold text-blue-900">Active Loans</h2>
-                {activeLoans.length > 0 && (
-                  <span className="px-3 py-1 bg-green-600 text-white rounded-full text-sm font-semibold">
-                    {activeLoans.length}
-                  </span>
-                )}
+              <div className="flex justify-between items-center mb-3">
+                <h2 className="text-lg md:text-xl font-bold text-blue-900">Loans</h2>
+                <span className="px-3 py-1 bg-green-600 text-white rounded-full text-sm font-semibold">
+                  {activeLoans.length}
+                </span>
               </div>
-              
+
+              {/* Filter tabs */}
+              <div className="flex gap-2 mb-3">
+                <button
+                  onClick={() => setLoanFilter('active')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                    loanFilter === 'active'
+                      ? 'bg-blue-600 text-white border-blue-600'
+                      : 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50'
+                  }`}
+                >
+                  Active
+                </button>
+                <button
+                  onClick={() => setLoanFilter('paid')}
+                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                    loanFilter === 'paid'
+                      ? 'bg-green-600 text-white border-green-600'
+                      : 'bg-white text-green-700 border-green-300 hover:bg-green-50'
+                  }`}
+                >
+                  Paid Off
+                </button>
+              </div>
+
               {activeLoans.length === 0 ? (
-                <p className="text-blue-700 text-sm text-center py-6">No active loans</p>
+                <p className="text-blue-700 text-sm text-center py-6">
+                  {loanFilter === 'paid' ? 'No paid-off loans' : 'No active loans'}
+                </p>
               ) : (
-                <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                  {activeLoans.slice(0, 3).map((loan) => (
+                <div className="space-y-2 max-h-[460px] overflow-y-auto">
+                  {(showAllLoans ? activeLoans : activeLoans.slice(0, 3)).map((loan) => (
                     <div
                       key={loan.id}
                       className="p-3 bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
@@ -822,28 +859,41 @@ export default function TreasurerDashboard() {
                     >
                       <div className="flex justify-between items-start gap-2">
                         <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-sm text-blue-900 truncate">
+                          <p className="font-semibold text-sm text-blue-900 truncate mb-1.5">
                             {loan.member_name}
                           </p>
-                          <div className="grid grid-cols-2 gap-1 mt-1">
+                          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
                             <div>
-                              <p className="text-xs text-blue-600">Loan</p>
+                              <p className="text-xs text-blue-500">Principal Loan</p>
                               <p className="text-xs font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</p>
                             </div>
                             <div>
-                              <p className="text-xs text-red-600">Outstanding</p>
+                              <p className="text-xs text-red-500">Outstanding</p>
                               <p className="text-xs font-semibold text-red-700">K{loan.outstanding_balance.toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-green-600">Paid Principal</p>
+                              <p className="text-xs font-semibold text-green-800">K{loan.total_principal_paid.toLocaleString()}</p>
+                            </div>
+                            <div>
+                              <p className="text-xs text-orange-500">Paid Interest</p>
+                              <p className="text-xs font-semibold text-orange-700">K{loan.total_interest_paid.toLocaleString()}</p>
                             </div>
                           </div>
                         </div>
-                        <span className="text-xs text-blue-600 flex-shrink-0">→</span>
+                        <span className="text-xs text-blue-600 flex-shrink-0 mt-1">→</span>
                       </div>
                     </div>
                   ))}
                   {activeLoans.length > 3 && (
-                    <p className="text-xs text-blue-600 text-center pt-2">
-                      +{activeLoans.length - 3} more
-                    </p>
+                    <button
+                      onClick={() => setShowAllLoans(prev => !prev)}
+                      className="w-full text-xs text-blue-600 font-semibold text-center pt-2 hover:text-blue-800 transition-colors"
+                    >
+                      {showAllLoans
+                        ? 'Show less'
+                        : `+${activeLoans.length - 3} more`}
+                    </button>
                   )}
                 </div>
               )}

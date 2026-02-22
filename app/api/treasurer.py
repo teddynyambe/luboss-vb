@@ -711,18 +711,25 @@ def get_approved_loans(
 
 @router.get("/loans/active")
 def get_active_loans(
+    loan_filter: str = "active",
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
-    """Get list of active loans (OPEN or DISBURSED status).
+    """Get list of loans filtered by status.
+    loan_filter='active' returns OPEN/DISBURSED; loan_filter='paid' returns CLOSED.
     Reconciliation-created loans use DISBURSED; normally disbursed loans use OPEN.
     """
     from app.models.transaction import Declaration, DeclarationStatus
     from decimal import Decimal
     from sqlalchemy import or_
 
+    if loan_filter == "paid":
+        statuses = [LoanStatus.CLOSED]
+    else:
+        statuses = [LoanStatus.OPEN, LoanStatus.DISBURSED]
+
     loans = db.query(Loan).filter(
-        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
+        Loan.loan_status.in_(statuses)
     ).order_by(Loan.created_at.desc()).all()
 
     result = []
