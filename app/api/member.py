@@ -943,6 +943,9 @@ def get_loan_eligibility(
                 "interest_rate": float(ir.effective_rate_percent)
             })
     
+    # Sort by term months ascending (None/"All Terms" entries go first)
+    available_terms.sort(key=lambda t: int(t["term_months"]) if t["term_months"] else 0)
+
     return {
         "has_credit_rating": True,
         "tier_name": tier.tier_name,

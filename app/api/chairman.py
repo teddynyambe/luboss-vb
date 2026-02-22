@@ -1408,6 +1408,65 @@ def get_credit_rating_tiers_for_cycle(
     return result
 
 
+@router.get("/members/{member_id}/loan-terms")
+def get_member_loan_terms(
+    member_id: str,
+    current_user: User = Depends(require_any_role("Chairman", "Vice-Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Get a member's available loan terms based on their credit rating for the active cycle."""
+    from app.models.cycle import Cycle, CycleStatus
+    from app.models.policy import MemberCreditRating, CreditRatingTier, CreditRatingInterestRange
+
+    try:
+        member_uuid = UUID(member_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid member ID format")
+
+    active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+    if not active_cycle:
+        return {"available_terms": [], "message": "No active cycle"}
+
+    credit_rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_uuid,
+        MemberCreditRating.cycle_id == active_cycle.id
+    ).first()
+
+    if not credit_rating:
+        return {"available_terms": [], "message": "No credit rating assigned for this member"}
+
+    tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == credit_rating.tier_id).first()
+    if not tier:
+        return {"available_terms": [], "message": "Credit rating tier not found"}
+
+    interest_ranges = db.query(CreditRatingInterestRange).filter(
+        CreditRatingInterestRange.tier_id == tier.id,
+        CreditRatingInterestRange.cycle_id == active_cycle.id
+    ).all()
+
+    available_terms = []
+    for ir in interest_ranges:
+        if ir.term_months is None:
+            available_terms.append({
+                "term_months": None,
+                "term_label": "All Terms",
+                "interest_rate": float(ir.effective_rate_percent)
+            })
+        else:
+            available_terms.append({
+                "term_months": ir.term_months,
+                "term_label": f"{ir.term_months} Month{'s' if ir.term_months != '1' else ''}",
+                "interest_rate": float(ir.effective_rate_percent)
+            })
+
+    available_terms.sort(key=lambda t: int(t["term_months"]) if t["term_months"] else 0)
+
+    return {
+        "available_terms": available_terms,
+        "tier_name": tier.tier_name,
+    }
+
+
 @router.post("/members/{member_id}/credit-rating")
 def assign_credit_rating(
     member_id: str,

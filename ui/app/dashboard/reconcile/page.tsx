@@ -11,6 +11,12 @@ interface Member {
   user?: { first_name?: string; last_name?: string; email?: string };
 }
 
+interface LoanTerm {
+  term_months: string | null;
+  term_label: string;
+  interest_rate: number;
+}
+
 interface FormData {
   savings_amount: string;
   social_fund: string;
@@ -49,6 +55,8 @@ export default function ReconcilePage() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [loanTermOptions, setLoanTermOptions] = useState<string[]>([]);
+  const [creditRatingTerms, setCreditRatingTerms] = useState<LoanTerm[]>([]);
+  const [creditRatingTierName, setCreditRatingTierName] = useState<string>('');
 
   useEffect(() => {
     api.get<Member[]>('/api/chairman/members?status=active').then((res) => {
@@ -60,11 +68,29 @@ export default function ReconcilePage() {
   }, []);
 
   // Reset form when member or month changes after a load
+  const fetchMemberLoanTerms = async (memberId: string) => {
+    setCreditRatingTerms([]);
+    setCreditRatingTierName('');
+    if (!memberId) return;
+    try {
+      const res = await api.get<{ available_terms: LoanTerm[]; tier_name?: string; message?: string }>(
+        `/api/chairman/members/${memberId}/loan-terms`
+      );
+      if (res.data && res.data.available_terms) {
+        setCreditRatingTerms(res.data.available_terms);
+        setCreditRatingTierName(res.data.tier_name || '');
+      }
+    } catch {
+      // silently fail — terms dropdown will fall back to manual entry
+    }
+  };
+
   const handleMemberChange = (id: string) => {
     setSelectedMemberId(id);
     setLoaded(false);
     setFormData(emptyForm);
     setMessage(null);
+    fetchMemberLoanTerms(id);
   };
 
   const handleMonthChange = (m: string) => {
@@ -105,6 +131,16 @@ export default function ReconcilePage() {
       if (res.data) {
         const d = res.data.declaration;
         const l = res.data.loan;
+        let loanRate = String(l.loan_rate ?? 0);
+        let loanTermMonths = l.loan_term_months || '1';
+
+        // If credit rating terms available and no existing loan, default to first term
+        if (creditRatingTerms.length > 0 && (l.loan_amount ?? 0) === 0) {
+          const first = creditRatingTerms[0];
+          loanTermMonths = first.term_months || '1';
+          loanRate = String(first.interest_rate);
+        }
+
         setFormData({
           savings_amount: String(d.savings_amount ?? 0),
           social_fund: String(d.social_fund ?? 0),
@@ -113,8 +149,8 @@ export default function ReconcilePage() {
           interest_on_loan: String(d.interest_on_loan ?? 0),
           loan_repayment: String(d.loan_repayment ?? 0),
           loan_amount: String(l.loan_amount ?? 0),
-          loan_rate: String(l.loan_rate ?? 0),
-          loan_term_months: l.loan_term_months || '1',
+          loan_rate: loanRate,
+          loan_term_months: loanTermMonths,
         });
         setLoaded(true);
       } else {
@@ -281,33 +317,69 @@ export default function ReconcilePage() {
 
             {/* Loan fields */}
             <div className="card">
-              <h2 className="text-lg font-bold text-blue-900 mb-4">Loan Applied (leave 0 if none)</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <h2 className="text-lg font-bold text-blue-900 mb-4">
+                Loan Applied (leave 0 if none)
+                {creditRatingTierName && (
+                  <span className="ml-2 text-sm font-medium text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">
+                    {creditRatingTierName}
+                  </span>
+                )}
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 {field('Loan Amount (K)', 'loan_amount')}
-                {field('Interest Rate (%)', 'loan_rate')}
-                <div className="flex flex-col gap-1">
-                  <label className="text-sm font-semibold text-blue-900">Loan Term (Months)</label>
-                  <select
-                    value={formData.loan_term_months}
-                    onChange={(e) => setFormData((prev) => ({ ...prev, loan_term_months: e.target.value }))}
-                    className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  >
-                    {loanTermOptions.length > 0 ? (
-                      loanTermOptions.map((t) => (
-                        <option key={t} value={t}>
-                          {t} {t === '1' ? 'Month' : 'Months'}
-                        </option>
-                      ))
-                    ) : (
-                      <>
-                        <option value="1">1 Month</option>
-                        <option value="2">2 Months</option>
-                        <option value="3">3 Months</option>
-                        <option value="4">4 Months</option>
-                      </>
-                    )}
-                  </select>
-                </div>
+                {creditRatingTerms.length > 0 ? (
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-semibold text-blue-900">Loan Term &amp; Interest Rate</label>
+                    <select
+                      value={`${formData.loan_term_months}|${formData.loan_rate}`}
+                      onChange={(e) => {
+                        const [term, rate] = e.target.value.split('|');
+                        setFormData((prev) => ({
+                          ...prev,
+                          loan_term_months: term,
+                          loan_rate: rate,
+                        }));
+                      }}
+                      className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {creditRatingTerms.map((t) => {
+                        const termVal = t.term_months || '1';
+                        return (
+                          <option key={`${termVal}-${t.interest_rate}`} value={`${termVal}|${t.interest_rate}`}>
+                            {t.term_label} — {t.interest_rate}% interest
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                ) : (
+                  <>
+                    {field('Interest Rate (%)', 'loan_rate')}
+                    <div className="flex flex-col gap-1">
+                      <label className="text-sm font-semibold text-blue-900">Loan Term (Months)</label>
+                      <select
+                        value={formData.loan_term_months}
+                        onChange={(e) => setFormData((prev) => ({ ...prev, loan_term_months: e.target.value }))}
+                        className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        {loanTermOptions.length > 0 ? (
+                          loanTermOptions.map((t) => (
+                            <option key={t} value={t}>
+                              {t} {t === '1' ? 'Month' : 'Months'}
+                            </option>
+                          ))
+                        ) : (
+                          <>
+                            <option value="1">1 Month</option>
+                            <option value="2">2 Months</option>
+                            <option value="3">3 Months</option>
+                            <option value="4">4 Months</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
 
