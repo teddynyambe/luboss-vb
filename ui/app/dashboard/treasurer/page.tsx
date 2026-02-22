@@ -61,6 +61,7 @@ interface ActiveLoan {
   term_months: string;
   interest_rate?: number;
   disbursement_date?: string;
+  maturity_date?: string;
   status: string;
   total_principal_paid: number;
   total_interest_paid: number;
