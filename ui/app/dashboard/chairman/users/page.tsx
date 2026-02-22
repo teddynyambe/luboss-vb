@@ -41,6 +41,9 @@ interface UserCreditRating {
 const ROLES = ['admin', 'treasurer', 'member', 'compliance', 'chairman'] as const;
 type FilterStatus = 'inactive' | 'active' | 'all';
 
+const toTitleCase = (str: string) =>
+  str.split(' ').map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : '').join(' ').trim();
+
 export default function UserManagementPage() {
   const { user } = useAuth();
   const router = useRouter();
@@ -456,7 +459,7 @@ export default function UserManagementPage() {
                       >
                         <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
                           {user.first_name || user.last_name
-                            ? `${user.first_name || ''} ${user.last_name || ''}`.trim()
+                            ? toTitleCase(`${user.first_name || ''} ${user.last_name || ''}`)
                             : 'N/A'}
                         </td>
                         <td className="p-3 md:p-4 text-sm md:text-base text-blue-800 break-words">
@@ -560,7 +563,7 @@ export default function UserManagementPage() {
                     <div>
                       <h3 className="font-bold text-base text-blue-900">
                         {user.first_name || user.last_name
-                          ? `${user.first_name || ''} ${user.last_name || ''}`.trim()
+                          ? toTitleCase(`${user.first_name || ''} ${user.last_name || ''}`)
                           : 'N/A'}
                       </h3>
                       <p className="text-sm text-blue-700 break-words">{user.email}</p>

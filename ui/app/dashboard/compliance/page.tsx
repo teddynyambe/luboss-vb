@@ -192,9 +192,12 @@ export default function ComplianceDashboard() {
     }
   };
 
+  const toTitleCase = (str: string) =>
+    str.split(' ').map(w => w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : '').join(' ').trim();
+
   const getMemberDisplayName = (member: Member) => {
     if (member.user?.first_name || member.user?.last_name) {
-      return `${member.user.first_name || ''} ${member.user.last_name || ''}`.trim();
+      return toTitleCase(`${member.user.first_name || ''} ${member.user.last_name || ''}`);
     }
     return member.user?.email || `Member ${member.id.substring(0, 8)}`;
   };

@@ -50,7 +50,7 @@ def get_pending_deposits(
                 "amount": float(dep.amount),
                 "reference": dep.reference,
                 "member_id": str(dep.member_id),
-                "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+                "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
                 "member_email": user.email if user else None,
                 "declaration_id": str(dep.declaration_id) if dep.declaration_id else None,
                 "effective_month": declaration.effective_month.isoformat() if declaration and declaration.effective_month else None,
@@ -507,7 +507,7 @@ def get_pending_penalties(
             result.append({
                 "id": str(penalty.id),
                 "member_id": str(penalty.member_id),
-                "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+                "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
                 "member_email": user.email if user else None,
                 "date_issued": penalty.date_issued.isoformat() if penalty.date_issued else None,
                 "notes": penalty.notes,
@@ -664,7 +664,7 @@ def get_pending_loan_applications(
         result.append({
             "id": str(app.id),
             "member_id": str(app.member_id),
-            "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+            "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
             "member_email": user.email if user else None,
             "amount": float(app.amount),
             "term_months": app.term_months,
@@ -697,7 +697,7 @@ def get_approved_loans(
             "id": str(loan.id),
             "application_id": str(loan.application_id) if loan.application_id else None,
             "member_id": str(loan.member_id),
-            "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+            "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
             "member_email": user.email if user else None,
             "loan_amount": float(loan.loan_amount),
             "term_months": loan.number_of_instalments or "N/A",
@@ -757,7 +757,7 @@ def get_active_loans(
             "id": str(loan.id),
             "application_id": str(loan.application_id) if loan.application_id else None,
             "member_id": str(loan.member_id),
-            "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+            "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
             "member_email": user.email if user else None,
             "loan_amount": float(loan.loan_amount),
             "term_months": loan.number_of_instalments or "N/A",
@@ -844,7 +844,7 @@ def get_loan_details(
         "id": str(loan.id),
         "application_id": str(loan.application_id) if loan.application_id else None,
         "member_id": str(loan.member_id),
-        "member_name": f"{user.first_name or ''} {user.last_name or ''}".strip() if user else "Unknown",
+        "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
         "member_email": user.email if user else None,
         "loan_amount": float(loan.loan_amount),
         "term_months": loan.number_of_instalments or "N/A",
@@ -1047,7 +1047,7 @@ def get_declarations_report(
         if user.role == UserRoleEnum.ADMIN:
             continue
 
-        member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        member_name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
         if not member_name:
             continue
 
@@ -1095,8 +1095,8 @@ def get_declarations_report(
             "is_paid": is_paid
         })
     
-    # Sort by member name
-    result.sort(key=lambda x: x["member_name"])
+    # Sort by surname (last word of name)
+    result.sort(key=lambda x: x["member_name"].rsplit(" ", 1)[-1].lower())
     
     return {
         "month": target_date.isoformat(),
@@ -1134,7 +1134,7 @@ def get_declaration_details_report(
     user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    member_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or "Unknown"
+    member_name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() or "Unknown"
 
     declaration = db.query(Declaration).filter(
         and_(
@@ -1225,7 +1225,7 @@ def get_loans_report(
         if not user:
             continue
 
-        member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        member_name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
         if not member_name:
             continue
 
@@ -1239,7 +1239,7 @@ def get_loans_report(
             "is_paid": True,
         })
 
-    result.sort(key=lambda x: x["member_name"])
+    result.sort(key=lambda x: x["member_name"].rsplit(" ", 1)[-1].lower())
 
     return {"loans": result}
 

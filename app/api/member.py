@@ -2590,7 +2590,7 @@ def get_group_summary_report(
     rows = []
     for member, user in members_users:
         mid  = str(member.id)
-        name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+        name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
 
         savings_bf      = _member_val(savings_accs, sav_bf_map,    member.id)
         social_admin_bf = (_member_val(social_accs, social_bf_map, member.id) +
@@ -2647,7 +2647,7 @@ def get_group_summary_report(
             "interest_on_loan_applied": round(interest_on_loan_applied, 2),
         })
 
-    rows.sort(key=lambda x: x["name"])
+    rows.sort(key=lambda x: x["name"].rsplit(" ", 1)[-1].lower())
 
     num_keys = [
         "savings_bf", "social_admin_bf", "interest_bf", "loan_bf",
