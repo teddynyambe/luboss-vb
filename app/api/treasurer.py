@@ -766,6 +766,16 @@ def get_active_loans(
             total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
             status_val = loan.loan_status.value if hasattr(loan.loan_status, "value") else str(loan.loan_status)
 
+            # Compute maturity date from disbursement + term months
+            maturity_date = None
+            if loan.disbursement_date and loan.number_of_instalments:
+                try:
+                    from dateutil.relativedelta import relativedelta
+                    term = int(loan.number_of_instalments)
+                    maturity_date = (loan.disbursement_date + relativedelta(months=term)).isoformat()
+                except (ValueError, TypeError):
+                    pass
+
             result.append({
                 "id": str(loan.id),
                 "application_id": str(loan.application_id) if loan.application_id else None,
@@ -776,6 +786,7 @@ def get_active_loans(
                 "term_months": loan.number_of_instalments or "N/A",
                 "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
                 "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+                "maturity_date": maturity_date,
                 "created_at": loan.created_at.isoformat() if loan.created_at else None,
                 "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
                 "status": status_val,
@@ -860,6 +871,16 @@ def get_loan_details(
     # Interest is a flat charge on the principal (not compounded per month)
     total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
 
+    # Compute maturity date from disbursement + term months
+    maturity_date = None
+    if loan.disbursement_date and loan.number_of_instalments:
+        try:
+            from dateutil.relativedelta import relativedelta
+            term = int(loan.number_of_instalments)
+            maturity_date = (loan.disbursement_date + relativedelta(months=term)).isoformat()
+        except (ValueError, TypeError):
+            pass
+
     return {
         "id": str(loan.id),
         "application_id": str(loan.application_id) if loan.application_id else None,
@@ -870,6 +891,7 @@ def get_loan_details(
         "term_months": loan.number_of_instalments or "N/A",
         "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
         "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+        "maturity_date": maturity_date,
         "created_at": loan.created_at.isoformat() if loan.created_at else None,
         "cycle_id": str(loan.cycle_id),
         "status": loan.loan_status.value,

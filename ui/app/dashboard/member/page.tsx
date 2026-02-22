@@ -392,6 +392,15 @@ export default function MemberDashboard() {
                     {currentLoan.term_months} {currentLoan.term_months === '1' || currentLoan.term_months === 1 ? 'month' : 'months'} term
                     {currentLoan.interest_rate != null && ` · ${currentLoan.interest_rate}% interest`}
                   </p>
+                  <p className="text-xs text-red-200 mt-0.5">
+                    {currentLoan.disbursement_date && (
+                      <>Date Borrowed: {new Date(currentLoan.disbursement_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</>
+                    )}
+                    {currentLoan.disbursement_date && currentLoan.maturity_date && ' · '}
+                    {currentLoan.maturity_date && (
+                      <>Maturity: {new Date(currentLoan.maturity_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</>
+                    )}
+                  </p>
                 </div>
                 <button
                   onClick={() => setLoanModalOpen(false)}

@@ -368,6 +368,22 @@ export default function LoanApplicationPage() {
                       K{currentLoan.total_interest_paid?.toLocaleString() || '0.00'}
                     </p>
                   </div>
+                  {currentLoan.disbursement_date && (
+                    <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                      <p className="text-sm md:text-base text-blue-700 font-medium mb-1">Date Borrowed</p>
+                      <p className="text-xl md:text-2xl font-bold text-blue-900">
+                        {new Date(currentLoan.disbursement_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+                  )}
+                  {currentLoan.maturity_date && (
+                    <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
+                      <p className="text-sm md:text-base text-blue-700 font-medium mb-1">Maturity Date</p>
+                      <p className="text-xl md:text-2xl font-bold text-blue-900">
+                        {new Date(currentLoan.maturity_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 
                 {currentLoan.repayments && currentLoan.repayments.length > 0 && (() => {

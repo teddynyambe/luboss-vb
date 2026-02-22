@@ -1384,12 +1384,23 @@ def get_current_loan(
             db.commit()
             db.refresh(loan)
 
+    # Compute maturity date from disbursement + term months
+    maturity_date = None
+    if loan.disbursement_date and loan.number_of_instalments:
+        try:
+            from dateutil.relativedelta import relativedelta
+            term = int(loan.number_of_instalments)
+            maturity_date = (loan.disbursement_date + relativedelta(months=term)).isoformat()
+        except (ValueError, TypeError):
+            pass
+
     return {
         "id": str(loan.id),
         "loan_amount": float(loan.loan_amount),
         "term_months": loan.number_of_instalments or "N/A",
         "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
         "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+        "maturity_date": maturity_date,
         "status": loan.loan_status.value,
         "total_principal_paid": float(total_principal_paid),
         "total_interest_paid": float(total_interest_paid),

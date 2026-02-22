@@ -868,6 +868,22 @@ export default function TreasurerDashboard() {
                             {loan.member_name}
                           </p>
                           <div className="space-y-0.5">
+                            {loan.disbursement_date && (
+                              <div className="flex justify-between text-xs">
+                                <span className="text-gray-500">Borrowed</span>
+                                <span className="font-medium text-gray-700">
+                                  {new Date(loan.disbursement_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                                </span>
+                              </div>
+                            )}
+                            {loan.maturity_date && (
+                              <div className="flex justify-between text-xs">
+                                <span className="text-gray-500">Maturity</span>
+                                <span className="font-medium text-gray-700">
+                                  {new Date(loan.maturity_date + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                                </span>
+                              </div>
+                            )}
                             <div className="flex justify-between text-xs">
                               <span className="text-blue-500">Principal Amount</span>
                               <span className="font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</span>

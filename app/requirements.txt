@@ -27,6 +27,7 @@ openai==2.15.0
 passlib==1.7.4
 pgvector==0.4.2
 psycopg2-binary==2.9.11
+python-dateutil==2.9.0.post0
 pyasn1==0.6.2
 pycparser==3.0
 pydantic==2.12.5
