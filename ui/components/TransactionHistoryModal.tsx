@@ -187,12 +187,13 @@ export default function TransactionHistoryModal({
                     const isDeclaration = transaction.is_declaration === true;
                     const isInitialRequirement = transaction.is_initial_requirement === true;
                     const isPayment = transaction.is_payment === true;
-                    
+                    const isExcessTransfer = transaction.is_excess_transfer === true;
+
                     return (
                       <tr
                         key={transaction.id}
                         className={`border-b border-gray-200 hover:bg-blue-50 transition-colors ${
-                          isPenaltyRecord 
+                          isPenaltyRecord
                             ? (isLateDeclaration ? 'bg-blue-50/50' : 'bg-yellow-50/50')
                             : isDeclaration
                             ? 'bg-green-50/50'
@@ -200,6 +201,8 @@ export default function TransactionHistoryModal({
                             ? 'bg-orange-50/50'
                             : isPayment
                             ? 'bg-purple-50/50'
+                            : isExcessTransfer
+                            ? 'bg-red-50/50'
                             : ''
                         }`}
                       >
@@ -236,6 +239,14 @@ export default function TransactionHistoryModal({
                               <span>{transaction.description}</span>
                               <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-medium">
                                 Payment
+                              </span>
+                            </div>
+                          ) : isExcessTransfer ? (
+                            <div className="flex items-center gap-2">
+                              <span className="text-red-500">•</span>
+                              <span>{transaction.description}</span>
+                              <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
+                                Overpayment
                               </span>
                             </div>
                           ) : (

@@ -432,12 +432,11 @@ def get_member_penalties_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's outstanding penalties balance.
+    """Get member's total penalties (approved + paid).
 
-    Computes the total from PenaltyRecord entries that are APPROVED (charged
-    but not yet paid).  PENDING penalties are excluded because they haven't
-    been confirmed by the treasurer yet, and PAID penalties are already
-    settled.
+    Sums the fee_amount from all PenaltyRecords that have been confirmed by
+    the treasurer (APPROVED or PAID).  PENDING penalties are excluded because
+    they haven't been confirmed yet.
     """
     from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType
 
@@ -446,7 +445,10 @@ def get_member_penalties_balance(
         .join(PenaltyRecord, PenaltyRecord.penalty_type_id == PenaltyType.id)
         .filter(
             PenaltyRecord.member_id == member_id,
-            PenaltyRecord.status == PenaltyRecordStatus.APPROVED,
+            PenaltyRecord.status.in_([
+                PenaltyRecordStatus.APPROVED,
+                PenaltyRecordStatus.PAID,
+            ]),
         )
     )
 

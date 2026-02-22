@@ -1871,7 +1871,7 @@ def get_account_transactions(
                         credit_val = line.credit_amount if line.credit_amount is not None else Decimal("0.00")
                         debit_amount = float(debit_val) if debit_val and debit_val > Decimal("0.00") else 0.0
                         credit_amount = float(credit_val) if credit_val and credit_val > Decimal("0.00") else 0.0
-                        
+
                         # For payments, prioritize credit (new correct behavior)
                         # If there's a credit, use it; otherwise fall back to debit (legacy data)
                         if credit_amount > 0:
@@ -1899,7 +1899,20 @@ def get_account_transactions(
                                 "amount": debit_amount,
                                 "is_payment": True
                             })
-        
+                    elif line.journal_entry.source_type == "excess_contribution":
+                        # Excess transferred to savings (debit on fund account)
+                        debit_val = float(line.debit_amount) if line.debit_amount and line.debit_amount > 0 else 0.0
+                        if debit_val > 0:
+                            transactions.append({
+                                "id": str(line.id),
+                                "date": line.journal_entry.entry_date.isoformat(),
+                                "description": "Overpayment transferred to Savings",
+                                "debit": debit_val,
+                                "credit": 0.0,
+                                "amount": debit_val,
+                                "is_excess_transfer": True
+                            })
+
         elif type == "admin_fund":
             # Get member's admin fund account (member-specific)
             member_admin_fund_account = db.query(LedgerAccount).filter(
@@ -1940,7 +1953,7 @@ def get_account_transactions(
                         credit_val = line.credit_amount if line.credit_amount is not None else Decimal("0.00")
                         debit_amount = float(debit_val) if debit_val and debit_val > Decimal("0.00") else 0.0
                         credit_amount = float(credit_val) if credit_val and credit_val > Decimal("0.00") else 0.0
-                        
+
                         # For payments, prioritize credit (new correct behavior)
                         # If there's a credit, use it; otherwise fall back to debit (legacy data)
                         if credit_amount > 0:
@@ -1968,7 +1981,20 @@ def get_account_transactions(
                                 "amount": debit_amount,
                                 "is_payment": True
                             })
-    
+                    elif line.journal_entry.source_type == "excess_contribution":
+                        # Excess transferred to savings (debit on fund account)
+                        debit_val = float(line.debit_amount) if line.debit_amount and line.debit_amount > 0 else 0.0
+                        if debit_val > 0:
+                            transactions.append({
+                                "id": str(line.id),
+                                "date": line.journal_entry.entry_date.isoformat(),
+                                "description": "Overpayment transferred to Savings",
+                                "debit": debit_val,
+                                "credit": 0.0,
+                                "amount": debit_val,
+                                "is_excess_transfer": True
+                            })
+
     except Exception as e:
         import logging
         import traceback

@@ -89,6 +89,7 @@ export interface Transaction {
   is_declaration?: boolean;
   is_initial_requirement?: boolean;
   is_payment?: boolean;
+  is_excess_transfer?: boolean;
 }
 
 export interface AccountTransactionsResponse {
