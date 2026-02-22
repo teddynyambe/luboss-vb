@@ -432,28 +432,36 @@ def get_member_penalties_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's total penalties (approved + paid).
+    """Get member's penalties balance from the ledger, excluding reversed entries.
 
-    Sums the fee_amount from all PenaltyRecords that have been confirmed by
-    the treasurer (APPROVED or PAID).  PENDING penalties are excluded because
-    they haven't been confirmed yet.
+    Uses the Penalties Payable account (LIABILITY).  For a liability account
+    the balance is credits minus debits.  Only non-reversed journal entries
+    are included so that voided transactions don't inflate the total.
     """
-    from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType
+    from app.models.ledger import JournalLine, JournalEntry
 
-    query = (
-        db.query(func.sum(PenaltyType.fee_amount))
-        .join(PenaltyRecord, PenaltyRecord.penalty_type_id == PenaltyType.id)
-        .filter(
-            PenaltyRecord.member_id == member_id,
-            PenaltyRecord.status.in_([
-                PenaltyRecordStatus.APPROVED,
-                PenaltyRecordStatus.PAID,
-            ]),
-        )
+    account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%penalties%")
+    ).first()
+
+    if not account:
+        return Decimal("0.00")
+
+    query = db.query(
+        func.sum(JournalLine.credit_amount).label("total_credits"),
+        func.sum(JournalLine.debit_amount).label("total_debits"),
+    ).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == account.id,
+        JournalEntry.reversed_by.is_(None),
     )
 
     if as_of_date:
-        query = query.filter(PenaltyRecord.date_issued <= as_of_date)
+        query = query.filter(JournalEntry.entry_date <= as_of_date)
 
-    outstanding = query.scalar() or Decimal("0.00")
-    return max(Decimal("0.00"), outstanding)
+    result = query.first()
+    total_credits = result.total_credits or Decimal("0.00")
+    total_debits = result.total_debits or Decimal("0.00")
+
+    # LIABILITY: balance = credits - debits
+    return max(Decimal("0.00"), total_credits - total_debits)
