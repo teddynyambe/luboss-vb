@@ -763,8 +763,8 @@ def get_active_loans(
             )
             outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
             rate = float(loan.percentage_interest or 0)
-            term = int(loan.number_of_instalments) if loan.number_of_instalments else 0
-            total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
+            # Interest is a flat charge on the principal (not compounded per month)
+            total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
             status_val = loan.loan_status.value if hasattr(loan.loan_status, "value") else str(loan.loan_status)
 
             result.append({
@@ -858,8 +858,8 @@ def get_loan_details(
     outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
     payment_performance = "On Time"
     rate = float(loan.percentage_interest or 0)
-    term = loan.number_of_instalments or 0
-    total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
+    # Interest is a flat charge on the principal (not compounded per month)
+    total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
 
     return {
         "id": str(loan.id),

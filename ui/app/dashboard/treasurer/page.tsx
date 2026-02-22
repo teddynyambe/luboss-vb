@@ -877,7 +877,11 @@ export default function TreasurerDashboard() {
                               <span className="font-semibold text-green-800">K{loan.total_principal_paid.toLocaleString()}</span>
                             </div>
                             <div className="flex justify-between text-xs">
-                              <span className="text-orange-500">Interest on Loan</span>
+                              <span className="text-orange-500">
+                                Interest on Loan{loan.interest_rate
+                                  ? ` (${loan.interest_rate}%${loan.term_months !== 'N/A' ? `, ${loan.term_months}m` : ''})`
+                                  : ''}
+                              </span>
                               <span className="font-semibold text-orange-700">
                                 {loan.total_interest_expected != null ? `K${loan.total_interest_expected.toLocaleString()}` : 'N/A'}
                               </span>
@@ -1514,7 +1518,9 @@ export default function TreasurerDashboard() {
                     <div className="flex justify-between items-center py-1 border-b border-blue-200">
                       <p className="text-sm font-medium text-orange-600">
                         Interest on Loan
-                        {selectedLoan.interest_rate ? ` (${selectedLoan.interest_rate}% × ${selectedLoan.term_months} months)` : ''}
+                        {selectedLoan.interest_rate
+                          ? ` (${selectedLoan.interest_rate}% of principal${selectedLoan.term_months !== 'N/A' ? `, ${selectedLoan.term_months} months` : ''})`
+                          : ''}
                       </p>
                       <p className="text-base font-bold text-orange-700">
                         {selectedLoan.total_interest_expected != null
