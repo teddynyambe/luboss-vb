@@ -64,6 +64,7 @@ interface ActiveLoan {
   status: string;
   total_principal_paid: number;
   total_interest_paid: number;
+  total_interest_expected: number | null;
   total_paid: number;
   outstanding_balance: number;
   repayment_count: number;
@@ -79,6 +80,7 @@ interface LoanDetail {
   disbursement_date?: string;
   total_principal_paid: number;
   total_interest_paid: number;
+  total_interest_expected: number | null;
   total_paid: number;
   outstanding_balance: number;
   payment_performance: string;
@@ -862,22 +864,28 @@ export default function TreasurerDashboard() {
                           <p className="font-semibold text-sm text-blue-900 truncate mb-1.5">
                             {loan.member_name}
                           </p>
-                          <div className="grid grid-cols-2 gap-x-3 gap-y-1">
-                            <div>
-                              <p className="text-xs text-blue-500">Principal Loan</p>
-                              <p className="text-xs font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</p>
+                          <div className="space-y-0.5">
+                            <div className="flex justify-between text-xs">
+                              <span className="text-blue-500">Principal Amount</span>
+                              <span className="font-semibold text-blue-900">K{loan.loan_amount.toLocaleString()}</span>
                             </div>
-                            <div>
-                              <p className="text-xs text-red-500">Outstanding</p>
-                              <p className="text-xs font-semibold text-red-700">K{loan.outstanding_balance.toLocaleString()}</p>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-green-600">Principal Paid</span>
+                              <span className="font-semibold text-green-800">K{loan.total_principal_paid.toLocaleString()}</span>
                             </div>
-                            <div>
-                              <p className="text-xs text-green-600">Paid Principal</p>
-                              <p className="text-xs font-semibold text-green-800">K{loan.total_principal_paid.toLocaleString()}</p>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-orange-500">Interest on Loan</span>
+                              <span className="font-semibold text-orange-700">
+                                {loan.total_interest_expected != null ? `K${loan.total_interest_expected.toLocaleString()}` : 'N/A'}
+                              </span>
                             </div>
-                            <div>
-                              <p className="text-xs text-orange-500">Paid Interest</p>
-                              <p className="text-xs font-semibold text-orange-700">K{loan.total_interest_paid.toLocaleString()}</p>
+                            <div className="flex justify-between text-xs">
+                              <span className="text-orange-400">Interest Paid</span>
+                              <span className="font-semibold text-orange-600">K{loan.total_interest_paid.toLocaleString()}</span>
+                            </div>
+                            <div className="flex justify-between text-xs border-t border-green-200 pt-0.5 mt-0.5">
+                              <span className="text-red-500 font-medium">Outstanding</span>
+                              <span className="font-bold text-red-700">K{loan.outstanding_balance.toLocaleString()}</span>
                             </div>
                           </div>
                         </div>
@@ -1490,42 +1498,34 @@ export default function TreasurerDashboard() {
                     )}
                   </div>
 
-                  {/* Loan Summary */}
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                    <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
-                      <p className="text-sm text-blue-700 font-medium mb-1">Loan Amount</p>
-                      <p className="text-xl font-bold text-blue-900">K{selectedLoan.loan_amount.toLocaleString()}</p>
+                  {/* Loan Summary — 5-row breakdown */}
+                  <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 space-y-3">
+                    <div className="flex justify-between items-center py-1 border-b border-blue-200">
+                      <p className="text-sm font-medium text-blue-700">Principal Amount</p>
+                      <p className="text-base font-bold text-blue-900">K{selectedLoan.loan_amount.toLocaleString()}</p>
                     </div>
-                    <div className="bg-red-50 border-2 border-red-200 rounded-xl p-4">
-                      <p className="text-sm text-red-700 font-medium mb-1">Outstanding</p>
-                      <p className="text-xl font-bold text-red-900">K{selectedLoan.outstanding_balance.toLocaleString()}</p>
+                    <div className="flex justify-between items-center py-1 border-b border-blue-200">
+                      <p className="text-sm font-medium text-green-700">Principal Paid</p>
+                      <p className="text-base font-bold text-green-900">K{selectedLoan.total_principal_paid.toLocaleString()}</p>
                     </div>
-                    <div className="bg-green-50 border-2 border-green-200 rounded-xl p-4">
-                      <p className="text-sm text-green-700 font-medium mb-1">Total Paid</p>
-                      <p className="text-xl font-bold text-green-900">K{selectedLoan.total_paid.toLocaleString()}</p>
+                    <div className="flex justify-between items-center py-1 border-b border-blue-200">
+                      <p className="text-sm font-medium text-orange-600">
+                        Interest on Loan
+                        {selectedLoan.interest_rate ? ` (${selectedLoan.interest_rate}% × ${selectedLoan.term_months} months)` : ''}
+                      </p>
+                      <p className="text-base font-bold text-orange-700">
+                        {selectedLoan.total_interest_expected != null
+                          ? `K${selectedLoan.total_interest_expected.toLocaleString()}`
+                          : 'N/A'}
+                      </p>
                     </div>
-                    <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4">
-                      <p className="text-sm text-yellow-700 font-medium mb-1">Interest Rate</p>
-                      <p className="text-xl font-bold text-yellow-900">{selectedLoan.interest_rate || 'N/A'}%</p>
+                    <div className="flex justify-between items-center py-1 border-b border-blue-200">
+                      <p className="text-sm font-medium text-orange-500">Interest Paid</p>
+                      <p className="text-base font-bold text-orange-600">K{selectedLoan.total_interest_paid.toLocaleString()}</p>
                     </div>
-                  </div>
-
-                  {/* Payment Breakdown */}
-                  <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4">
-                    <h3 className="font-bold text-lg text-blue-900 mb-3">Payment Breakdown</h3>
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-                      <div>
-                        <p className="text-sm text-blue-700 font-medium mb-1">Principal Paid</p>
-                        <p className="text-lg font-bold text-blue-900">K{selectedLoan.total_principal_paid.toLocaleString()}</p>
-                      </div>
-                      <div>
-                        <p className="text-sm text-blue-700 font-medium mb-1">Interest Paid</p>
-                        <p className="text-lg font-bold text-blue-900">K{selectedLoan.total_interest_paid.toLocaleString()}</p>
-                      </div>
-                      <div>
-                        <p className="text-sm text-blue-700 font-medium mb-1">Remaining Balance</p>
-                        <p className="text-lg font-bold text-red-900">K{selectedLoan.outstanding_balance.toLocaleString()}</p>
-                      </div>
+                    <div className="flex justify-between items-center py-1">
+                      <p className="text-sm font-semibold text-red-700">Outstanding</p>
+                      <p className="text-lg font-bold text-red-900">K{selectedLoan.outstanding_balance.toLocaleString()}</p>
                     </div>
                   </div>
 

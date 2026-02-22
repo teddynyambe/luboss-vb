@@ -759,6 +759,9 @@ def get_active_loans(
             (d.declared_interest_on_loan or Decimal("0.00")) for d in paid_decls
         )
         outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
+        rate = float(loan.percentage_interest or 0)
+        term = loan.number_of_instalments or 0
+        total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
 
         result.append({
             "id": str(loan.id),
@@ -775,6 +778,7 @@ def get_active_loans(
             "status": loan.loan_status.value,
             "total_principal_paid": float(total_principal_paid),
             "total_interest_paid": float(total_interest_paid),
+            "total_interest_expected": total_interest_expected,
             "total_paid": float(total_principal_paid + total_interest_paid),
             "outstanding_balance": float(outstanding_balance),
             "repayment_count": len(paid_decls),
@@ -846,6 +850,9 @@ def get_loan_details(
 
     outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
     payment_performance = "On Time"
+    rate = float(loan.percentage_interest or 0)
+    term = loan.number_of_instalments or 0
+    total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
 
     return {
         "id": str(loan.id),
@@ -862,6 +869,7 @@ def get_loan_details(
         "status": loan.loan_status.value,
         "total_principal_paid": float(total_principal_paid),
         "total_interest_paid": float(total_interest_paid),
+        "total_interest_expected": total_interest_expected,
         "total_paid": float(total_principal_paid + total_interest_paid),
         "outstanding_balance": float(outstanding_balance),
         "payment_performance": payment_performance,
