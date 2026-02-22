@@ -267,47 +267,57 @@ def get_member_social_fund_payments(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's social fund accumulated payments from ledger.
-    
-    Returns total accumulated payments made (sum of all credits/payments).
-    This shows how much the member has paid towards their social fund requirement.
+    """Get member's net social fund balance (payments minus excess transfers).
+
+    Returns the amount currently held in the member's social fund after any
+    excess contributions have been reclassified to savings by the scheduler.
     """
     from app.models.ledger import JournalLine, JournalEntry
-    
+
     # Find member's social fund account (member-specific)
     member_social_fund_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%social fund%")
     ).first()
-    
+
     if not member_social_fund_account:
         return Decimal("0.00")
-    
-    # Get total credits (payments) - also handle legacy debits as payments
+
+    # Credits from deposit approvals (payments into the fund)
     query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalEntry.source_type == "deposit_approval",
         JournalLine.credit_amount > 0
     )
-    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    # Legacy debits from deposit approvals (older accounting style)
+    query_legacy_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalEntry.source_type == "deposit_approval",
         JournalLine.debit_amount > 0
     )
-    
+    # Debits from excess contribution transfers (scheduler moved excess to savings)
+    query_excess_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_social_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "excess_contribution",
+        JournalLine.debit_amount > 0
+    )
+
     if as_of_date:
         query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
-        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
-    
+        query_legacy_debits = query_legacy_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_excess_debits = query_excess_debits.filter(JournalEntry.entry_date <= as_of_date)
+
     total_credits = query_credits.scalar() or Decimal("0.00")
-    total_debits = query_debits.scalar() or Decimal("0.00")
-    
-    # Accumulated payments = credits (new) + debits (legacy)
-    accumulated_payments = total_credits + total_debits
-    
-    return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
+    total_legacy_debits = query_legacy_debits.scalar() or Decimal("0.00")
+    excess_transferred = query_excess_debits.scalar() or Decimal("0.00")
+
+    # Net balance = payments (credits + legacy debits) minus excess transferred out
+    net_balance = total_credits + total_legacy_debits - excess_transferred
+
+    return max(Decimal("0.00"), net_balance)
 
 
 def get_member_admin_fund_balance(
@@ -364,47 +374,57 @@ def get_member_admin_fund_payments(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's admin fund accumulated payments from ledger.
-    
-    Returns total accumulated payments made (sum of all credits/payments).
-    This shows how much the member has paid towards their admin fund requirement.
+    """Get member's net admin fund balance (payments minus excess transfers).
+
+    Returns the amount currently held in the member's admin fund after any
+    excess contributions have been reclassified to savings by the scheduler.
     """
     from app.models.ledger import JournalLine, JournalEntry
-    
+
     # Find member's admin fund account (member-specific)
     member_admin_fund_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%admin fund%")
     ).first()
-    
+
     if not member_admin_fund_account:
         return Decimal("0.00")
-    
-    # Get total credits (payments) - also handle legacy debits as payments
+
+    # Credits from deposit approvals (payments into the fund)
     query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalEntry.source_type == "deposit_approval",
         JournalLine.credit_amount > 0
     )
-    query_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    # Legacy debits from deposit approvals (older accounting style)
+    query_legacy_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",  # Only payment entries
+        JournalEntry.source_type == "deposit_approval",
         JournalLine.debit_amount > 0
     )
-    
+    # Debits from excess contribution transfers (scheduler moved excess to savings)
+    query_excess_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+        JournalLine.ledger_account_id == member_admin_fund_account.id,
+        JournalEntry.reversed_by.is_(None),
+        JournalEntry.source_type == "excess_contribution",
+        JournalLine.debit_amount > 0
+    )
+
     if as_of_date:
         query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
-        query_debits = query_debits.filter(JournalEntry.entry_date <= as_of_date)
-    
+        query_legacy_debits = query_legacy_debits.filter(JournalEntry.entry_date <= as_of_date)
+        query_excess_debits = query_excess_debits.filter(JournalEntry.entry_date <= as_of_date)
+
     total_credits = query_credits.scalar() or Decimal("0.00")
-    total_debits = query_debits.scalar() or Decimal("0.00")
-    
-    # Accumulated payments = credits (new) + debits (legacy)
-    accumulated_payments = total_credits + total_debits
-    
-    return max(Decimal("0.00"), accumulated_payments)  # Ensure non-negative
+    total_legacy_debits = query_legacy_debits.scalar() or Decimal("0.00")
+    excess_transferred = query_excess_debits.scalar() or Decimal("0.00")
+
+    # Net balance = payments (credits + legacy debits) minus excess transferred out
+    net_balance = total_credits + total_legacy_debits - excess_transferred
+
+    return max(Decimal("0.00"), net_balance)
 
 
 def get_member_penalties_balance(
@@ -412,14 +432,26 @@ def get_member_penalties_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's penalties balance from ledger."""
-    # Find member's penalties account
-    account = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_id,
-        LedgerAccount.account_name.ilike("%penalties%")
-    ).first()
-    
-    if not account:
-        return Decimal("0.00")
-    
-    return get_account_balance(db, account.id, as_of_date)
+    """Get member's outstanding penalties balance.
+
+    Computes the total from PenaltyRecord entries that are APPROVED (charged
+    but not yet paid).  PENDING penalties are excluded because they haven't
+    been confirmed by the treasurer yet, and PAID penalties are already
+    settled.
+    """
+    from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType
+
+    query = (
+        db.query(func.sum(PenaltyType.fee_amount))
+        .join(PenaltyRecord, PenaltyRecord.penalty_type_id == PenaltyType.id)
+        .filter(
+            PenaltyRecord.member_id == member_id,
+            PenaltyRecord.status == PenaltyRecordStatus.APPROVED,
+        )
+    )
+
+    if as_of_date:
+        query = query.filter(PenaltyRecord.date_issued <= as_of_date)
+
+    outstanding = query.scalar() or Decimal("0.00")
+    return max(Decimal("0.00"), outstanding)
