@@ -715,10 +715,12 @@ def get_active_loans(
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
-    """Get list of loans filtered by status.
-    loan_filter='active' returns OPEN/DISBURSED; loan_filter='paid' returns CLOSED.
-    Reconciliation-created loans use DISBURSED; normally disbursed loans use OPEN.
+    """Get loans by filter.
+    loan_filter='active' → OPEN + DISBURSED (default)
+    loan_filter='paid'   → CLOSED (paid-off loans)
     """
+    import logging
+    logger = logging.getLogger(__name__)
     from app.models.transaction import Declaration, DeclarationStatus
     from decimal import Decimal
     from sqlalchemy import or_
@@ -734,55 +736,60 @@ def get_active_loans(
 
     result = []
     for loan in loans:
-        member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
-        user = None
-        if member:
-            user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
+        try:
+            member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
+            user = None
+            if member:
+                user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
 
-        # Compute paid amounts from approved declarations (covers pre- and post-fix data)
-        decl_q = db.query(Declaration).filter(
-            Declaration.member_id == loan.member_id,
-            Declaration.status == DeclarationStatus.APPROVED,
-            or_(
-                Declaration.declared_loan_repayment > 0,
-                Declaration.declared_interest_on_loan > 0,
-            ),
-        )
-        if loan.disbursement_date:
-            decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
-        paid_decls = decl_q.all()
+            # Compute paid amounts from approved declarations
+            decl_q = db.query(Declaration).filter(
+                Declaration.member_id == loan.member_id,
+                Declaration.status == DeclarationStatus.APPROVED,
+                or_(
+                    Declaration.declared_loan_repayment > 0,
+                    Declaration.declared_interest_on_loan > 0,
+                ),
+            )
+            if loan.disbursement_date:
+                decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
+            paid_decls = decl_q.all()
 
-        total_principal_paid = sum(
-            (d.declared_loan_repayment or Decimal("0.00")) for d in paid_decls
-        )
-        total_interest_paid = sum(
-            (d.declared_interest_on_loan or Decimal("0.00")) for d in paid_decls
-        )
-        outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
-        rate = float(loan.percentage_interest or 0)
-        term = loan.number_of_instalments or 0
-        total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
+            total_principal_paid = sum(
+                (d.declared_loan_repayment or Decimal("0.00")) for d in paid_decls
+            )
+            total_interest_paid = sum(
+                (d.declared_interest_on_loan or Decimal("0.00")) for d in paid_decls
+            )
+            outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
+            rate = float(loan.percentage_interest or 0)
+            term = int(loan.number_of_instalments) if loan.number_of_instalments else 0
+            total_interest_expected = float(loan.loan_amount) * (rate / 100) * term if term > 0 else None
+            status_val = loan.loan_status.value if hasattr(loan.loan_status, "value") else str(loan.loan_status)
 
-        result.append({
-            "id": str(loan.id),
-            "application_id": str(loan.application_id) if loan.application_id else None,
-            "member_id": str(loan.member_id),
-            "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
-            "member_email": user.email if user else None,
-            "loan_amount": float(loan.loan_amount),
-            "term_months": loan.number_of_instalments or "N/A",
-            "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
-            "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
-            "created_at": loan.created_at.isoformat() if loan.created_at else None,
-            "cycle_id": str(loan.cycle_id),
-            "status": loan.loan_status.value,
-            "total_principal_paid": float(total_principal_paid),
-            "total_interest_paid": float(total_interest_paid),
-            "total_interest_expected": total_interest_expected,
-            "total_paid": float(total_principal_paid + total_interest_paid),
-            "outstanding_balance": float(outstanding_balance),
-            "repayment_count": len(paid_decls),
-        })
+            result.append({
+                "id": str(loan.id),
+                "application_id": str(loan.application_id) if loan.application_id else None,
+                "member_id": str(loan.member_id),
+                "member_name": f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip() if user else "Unknown",
+                "member_email": user.email if user else None,
+                "loan_amount": float(loan.loan_amount),
+                "term_months": loan.number_of_instalments or "N/A",
+                "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
+                "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+                "created_at": loan.created_at.isoformat() if loan.created_at else None,
+                "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
+                "status": status_val,
+                "total_principal_paid": float(total_principal_paid),
+                "total_interest_paid": float(total_interest_paid),
+                "total_interest_expected": total_interest_expected,
+                "total_paid": float(total_principal_paid + total_interest_paid),
+                "outstanding_balance": float(outstanding_balance),
+                "repayment_count": len(paid_decls),
+            })
+        except Exception as e:
+            logger.error(f"Error processing loan {loan.id}: {e}", exc_info=True)
+            continue
 
     return result
 

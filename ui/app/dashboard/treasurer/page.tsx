@@ -215,7 +215,11 @@ export default function TreasurerDashboard() {
 
   const loadLoans = async (filter: 'active' | 'paid') => {
     const res = await api.get<ActiveLoan[]>(`/api/treasurer/loans/active?loan_filter=${filter}`);
-    if (res.data) setActiveLoans(res.data);
+    if (res.data) {
+      setActiveLoans(res.data);
+    } else if (res.error) {
+      console.error('Loans fetch error:', res.error);
+    }
   };
 
   const loadData = async () => {
@@ -223,13 +227,17 @@ export default function TreasurerDashboard() {
       api.get<PendingDeposit[]>('/api/treasurer/deposits/pending'),
       api.get<PendingPenalty[]>('/api/treasurer/penalties/pending'),
       api.get<PendingLoanApplication[]>('/api/treasurer/loans/pending'),
-      api.get<ActiveLoan[]>('/api/treasurer/loans/active'),
+      api.get<ActiveLoan[]>('/api/treasurer/loans/active?loan_filter=active'),
     ]);
 
     if (depositsRes.data) setPendingDeposits(depositsRes.data);
     if (penaltiesRes.data) setPendingPenalties(penaltiesRes.data);
     if (loansRes.data) setPendingLoans(loansRes.data);
-    if (activeLoansRes.data) setActiveLoans(activeLoansRes.data);
+    if (activeLoansRes.data) {
+      setActiveLoans(activeLoansRes.data);
+    } else if (activeLoansRes.error) {
+      console.error('Active loans fetch error:', activeLoansRes.error);
+    }
     setLoading(false);
   };
 
