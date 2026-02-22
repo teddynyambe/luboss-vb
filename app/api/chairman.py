@@ -1968,7 +1968,13 @@ def post_reconcile(
             )
         ).first()
 
-        if not existing_loan:
+        if existing_loan:
+            # Update existing loan details
+            existing_loan.loan_amount = Decimal(str(body.loan_amount))
+            existing_loan.percentage_interest = Decimal(str(body.loan_rate))
+            existing_loan.number_of_instalments = body.loan_term_months
+            db.flush()
+        else:
             if not loans_receivable:
                 raise HTTPException(status_code=500, detail="LOANS_RECEIVABLE ledger account not found")
 
