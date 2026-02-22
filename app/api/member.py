@@ -2647,7 +2647,7 @@ def get_group_summary_report(
             "interest_on_loan_applied": round(interest_on_loan_applied, 2),
         })
 
-    rows.sort(key=lambda x: x["name"].rsplit(" ", 1)[-1].lower())
+    rows.sort(key=lambda x: (x["name"].rsplit(" ", 1)[-1].lower(), x["name"].rsplit(" ", 1)[0].lower()))
 
     num_keys = [
         "savings_bf", "social_admin_bf", "interest_bf", "loan_bf",

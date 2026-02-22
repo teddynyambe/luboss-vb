@@ -1096,7 +1096,7 @@ def get_declarations_report(
         })
     
     # Sort by surname (last word of name)
-    result.sort(key=lambda x: x["member_name"].rsplit(" ", 1)[-1].lower())
+    result.sort(key=lambda x: (x["member_name"].rsplit(" ", 1)[-1].lower(), x["member_name"].rsplit(" ", 1)[0].lower()))
     
     return {
         "month": target_date.isoformat(),
@@ -1239,7 +1239,7 @@ def get_loans_report(
             "is_paid": True,
         })
 
-    result.sort(key=lambda x: x["member_name"].rsplit(" ", 1)[-1].lower())
+    result.sort(key=lambda x: (x["member_name"].rsplit(" ", 1)[-1].lower(), x["member_name"].rsplit(" ", 1)[0].lower()))
 
     return {"loans": result}
 

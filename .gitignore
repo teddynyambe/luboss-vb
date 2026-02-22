@@ -63,3 +63,5 @@ alembic/__pycache__/
 *.tmp
 *.bak
 *.swp
+# ssh
+*.sh
