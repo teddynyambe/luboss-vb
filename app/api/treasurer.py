@@ -228,8 +228,7 @@ def approve_deposit_proof(
     ).first()
     
     loans_receivable = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == deposit.member_id,
-        LedgerAccount.account_name.ilike("%loan%receivable%")
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
     ).first()
     
     logger.info(f"Optional accounts: Social Fund={member_social_fund.id if member_social_fund else None}, "
