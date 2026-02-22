@@ -27,9 +27,13 @@ interface SavingsEntry {
   id: string;
   date: string;        // "YYYY-MM-DD" or ISO
   description: string;
+  debit?: number;
+  credit?: number;
   amount: number;
   is_declaration?: boolean;
   declaration_items?: DeclarationItems;
+  is_excess_transfer?: boolean;
+  excess_source?: string; // "social_fund" | "admin_fund"
 }
 
 export default function MemberStatementPage() {
@@ -255,6 +259,15 @@ export default function MemberStatementPage() {
                     acc.social_fund += entry.declaration_items.social_fund;
                     acc.admin_fund += entry.declaration_items.admin_fund;
                     acc.penalties += entry.declaration_items.penalties;
+                  } else if (entry.is_excess_transfer) {
+                    // Excess fund contributions transferred to savings
+                    const amt = entry.credit || entry.amount || 0;
+                    acc.savings += amt;
+                    if (entry.excess_source === 'social_fund') {
+                      acc.social_fund -= amt;
+                    } else if (entry.excess_source === 'admin_fund') {
+                      acc.admin_fund -= amt;
+                    }
                   }
                   return acc;
                 },

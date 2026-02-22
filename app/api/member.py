@@ -1672,6 +1672,23 @@ def get_account_transactions(
                         je.entry_date.date().isoformat()
                         if je.entry_date else date.today().isoformat()
                     )
+                    # Determine source fund by checking the debit line's account
+                    excess_source = "unknown"
+                    sibling_debit = db.query(JournalLine).filter(
+                        JournalLine.journal_entry_id == je.id,
+                        JournalLine.debit_amount > 0,
+                        JournalLine.id != line.id,
+                    ).first()
+                    if sibling_debit:
+                        fund_acct = db.query(LedgerAccount).filter(
+                            LedgerAccount.id == sibling_debit.ledger_account_id
+                        ).first()
+                        if fund_acct:
+                            name_lower = (fund_acct.account_name or "").lower()
+                            if "social" in name_lower:
+                                excess_source = "social_fund"
+                            elif "admin" in name_lower:
+                                excess_source = "admin_fund"
                     transactions.append({
                         "id": f"excess_{je.id}",
                         "date": entry_date,
@@ -1680,6 +1697,8 @@ def get_account_transactions(
                         "credit": float(line.credit_amount),
                         "amount": float(line.credit_amount),
                         "is_declaration": False,
+                        "is_excess_transfer": True,
+                        "excess_source": excess_source,
                     })
 
             # Sort all transactions by date (most recent first)
