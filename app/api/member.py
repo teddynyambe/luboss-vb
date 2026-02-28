@@ -2740,8 +2740,14 @@ def get_member_savings_history(
     from app.models.ledger import LedgerAccount, JournalEntry, JournalLine
     from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositApproval
     from app.models.member import MemberProfile
+    import uuid as _uuid
 
-    member_profile = db.query(MemberProfile).filter(MemberProfile.id == member_id).first()
+    try:
+        member_uuid = _uuid.UUID(member_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid member_id format")
+
+    member_profile = db.query(MemberProfile).filter(MemberProfile.id == member_uuid).first()
     if not member_profile:
         raise HTTPException(status_code=404, detail="Member not found")
 
