@@ -2695,6 +2695,7 @@ def get_group_summary_report(
                 interest_on_loan_applied += float(loan.loan_amount) * float(loan.percentage_interest) / 100
 
         rows.append({
+            "member_id":                str(member.id),
             "name":                     name,
             "savings_bf":               round(savings_bf, 2),
             "social_admin_bf":          round(social_admin_bf, 2),
@@ -2723,3 +2724,138 @@ def get_group_summary_report(
     totals["name"] = "TOTAL"
 
     return {"month": target_date.isoformat(), "members": rows, "totals": totals}
+
+
+# ---------------------------------------------------------------------------
+# Member Savings History (for group-report drill-down)
+# ---------------------------------------------------------------------------
+
+@router.get("/reports/member-savings-history")
+def get_member_savings_history(
+    member_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get savings transaction history for a specific member (used by group report drill-down)."""
+    from app.models.ledger import LedgerAccount, JournalEntry, JournalLine
+    from app.models.transaction import Declaration, DeclarationStatus, DepositProof, DepositApproval
+    from app.models.member import MemberProfile
+
+    member_profile = db.query(MemberProfile).filter(MemberProfile.id == member_id).first()
+    if not member_profile:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    member_name = f"{member_profile.user.first_name or ''} {member_profile.user.last_name or ''}".strip()
+
+    transactions = []
+
+    # Approved deposits
+    deposit_approvals = db.query(DepositApproval).join(
+        DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
+    ).join(
+        JournalEntry, DepositApproval.journal_entry_id == JournalEntry.id
+    ).filter(
+        DepositProof.member_id == member_profile.id,
+        JournalEntry.reversed_by.is_(None)
+    ).order_by(JournalEntry.entry_date.desc()).all()
+
+    for da in deposit_approvals:
+        deposit = da.deposit_proof
+        declaration = deposit.declaration if deposit else None
+
+        if declaration:
+            date_str = declaration.effective_month.isoformat()
+            description = f"Deposit approved for {declaration.effective_month.strftime('%B %Y')} declaration"
+        else:
+            date_str = da.journal_entry.entry_date.isoformat()
+            description = "Approved deposit"
+
+        transactions.append({
+            "id": str(da.id),
+            "date": date_str,
+            "description": description,
+            "debit": 0.0,
+            "credit": float(deposit.amount),
+            "amount": float(deposit.amount)
+        })
+
+    # Declarations as debit entries
+    declarations = db.query(Declaration).filter(
+        Declaration.member_id == member_profile.id,
+        Declaration.declared_savings_amount.isnot(None),
+        Declaration.declared_savings_amount > 0
+    ).order_by(Declaration.created_at.desc()).all()
+
+    for declaration in declarations:
+        transactions.append({
+            "id": f"declaration_{declaration.id}",
+            "date": declaration.effective_month.isoformat(),
+            "description": f"Declaration for {declaration.effective_month.strftime('%B %Y')}",
+            "debit": float(declaration.declared_savings_amount or 0),
+            "credit": 0.0,
+            "amount": float(declaration.declared_savings_amount or 0),
+            "is_declaration": True,
+            "declaration_items": {
+                "savings_amount":   float(declaration.declared_savings_amount or 0),
+                "social_fund":      float(declaration.declared_social_fund or 0),
+                "admin_fund":       float(declaration.declared_admin_fund or 0),
+                "penalties":        float(declaration.declared_penalties or 0),
+                "loan_repayment":   float(declaration.declared_loan_repayment or 0),
+                "interest_on_loan": float(declaration.declared_interest_on_loan or 0),
+            }
+        })
+
+    # Excess contribution transfers
+    exc_savings_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_profile.id,
+        LedgerAccount.account_name.ilike("%savings%")
+    ).first()
+    if exc_savings_account:
+        excess_lines = db.query(JournalLine).join(JournalEntry).filter(
+            JournalLine.ledger_account_id == exc_savings_account.id,
+            JournalEntry.source_type == "excess_contribution",
+            JournalEntry.reversed_by.is_(None),
+            JournalLine.credit_amount > 0,
+        ).all()
+        for line in excess_lines:
+            je = line.journal_entry
+            entry_date = (
+                je.entry_date.date().isoformat()
+                if je.entry_date else date.today().isoformat()
+            )
+            excess_source = "unknown"
+            sibling_debit = db.query(JournalLine).filter(
+                JournalLine.journal_entry_id == je.id,
+                JournalLine.debit_amount > 0,
+                JournalLine.id != line.id,
+            ).first()
+            if sibling_debit:
+                fund_acct = db.query(LedgerAccount).filter(
+                    LedgerAccount.id == sibling_debit.ledger_account_id
+                ).first()
+                if fund_acct:
+                    name_lower = (fund_acct.account_name or "").lower()
+                    if "social" in name_lower:
+                        excess_source = "social_fund"
+                    elif "admin" in name_lower:
+                        excess_source = "admin_fund"
+            transactions.append({
+                "id": f"excess_{je.id}",
+                "date": entry_date,
+                "description": je.description,
+                "debit": 0.0,
+                "credit": float(line.credit_amount),
+                "amount": float(line.credit_amount),
+                "is_declaration": False,
+                "is_excess_transfer": True,
+                "excess_source": excess_source,
+            })
+
+    transactions.sort(key=lambda x: x["date"], reverse=True)
+
+    return {
+        "member_name": member_name,
+        "member_id": member_id,
+        "type": "savings",
+        "transactions": transactions,
+    }

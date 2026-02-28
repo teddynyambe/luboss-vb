@@ -4,8 +4,10 @@ import { useState, useEffect, useRef } from 'react';
 import { api } from '@/lib/api';
 import Link from 'next/link';
 import UserMenu from '@/components/UserMenu';
+import MemberDetailModal from '@/components/MemberDetailModal';
 
 interface MemberRow {
+  member_id?: string;
   name: string;
   savings_bf: number;
   social_admin_bf: number;
@@ -62,6 +64,7 @@ export default function GroupReportPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError]     = useState<string | null>(null);
   const tableRef = useRef<HTMLDivElement>(null);
+  const [selectedMember, setSelectedMember] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     loadReport();
@@ -184,7 +187,15 @@ export default function GroupReportPage() {
                           {i + 1}
                         </td>
                         <td className="sticky left-7 z-10 bg-inherit px-3 py-1.5 font-medium text-blue-900 border-r border-blue-100">
-                          {row.name}
+                          {row.member_id ? (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedMember({ id: row.member_id!, name: row.name })}
+                              className="text-left underline decoration-blue-300 hover:decoration-blue-600 hover:text-blue-700 transition-colors cursor-pointer"
+                            >
+                              {row.name}
+                            </button>
+                          ) : row.name}
                         </td>
                         {activeCols.map(c => (
                           <td key={c.key} className="px-3 py-1.5 text-right text-blue-800 border-l border-blue-50">
@@ -217,6 +228,15 @@ export default function GroupReportPage() {
             </p>
           </div>
         ) : null}
+
+        {selectedMember && (
+          <MemberDetailModal
+            open={!!selectedMember}
+            onClose={() => setSelectedMember(null)}
+            memberId={selectedMember.id}
+            memberName={selectedMember.name}
+          />
+        )}
       </main>
     </div>
   );
