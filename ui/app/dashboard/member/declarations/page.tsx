@@ -71,9 +71,18 @@ export default function DeclarationsPage() {
   const [loadingDeclarations, setLoadingDeclarations] = useState(false);
   const [selectedDeclaration, setSelectedDeclaration] = useState<Declaration | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [memberStatus, setMemberStatus] = useState<{
+    social_fund_balance?: number;
+    social_fund_required?: number | null;
+    admin_fund_balance?: number;
+    admin_fund_required?: number | null;
+    loan_balance?: number;
+    interest_on_loan_due?: number;
+  } | null>(null);
 
   useEffect(() => {
     loadCycles();
+    loadMemberStatus();
     // Set current month as default (first day of current month)
     const now = new Date();
     const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
@@ -331,6 +340,27 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
       setError('Unable to load cycles. Please try again later.');
     }
   };
+
+  const loadMemberStatus = async () => {
+    try {
+      const res = await api.get<{
+        social_fund_balance?: number;
+        social_fund_required?: number | null;
+        admin_fund_balance?: number;
+        admin_fund_required?: number | null;
+        loan_balance?: number;
+        interest_on_loan_due?: number;
+      }>('/api/member/status');
+      if (res.data) {
+        setMemberStatus(res.data);
+      }
+    } catch (err) {
+      console.error('Error loading member status:', err);
+    }
+  };
+
+  const fmtBal = (n: number) =>
+    `K${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -719,6 +749,11 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   <div>
                     <label htmlFor="declared_social_fund" className="block text-base font-semibold text-blue-900 mb-2">
                       Social Fund (K)
+                      {memberStatus && memberStatus.social_fund_required != null && (
+                        <span className="ml-2 text-xs font-normal text-amber-600">
+                          Pending: {fmtBal(Math.max(0, (memberStatus.social_fund_required ?? 0) - (memberStatus.social_fund_balance ?? 0)))}
+                        </span>
+                      )}
                     </label>
                     <input
                       type="number"
@@ -736,6 +771,11 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   <div>
                     <label htmlFor="declared_admin_fund" className="block text-base font-semibold text-blue-900 mb-2">
                       Admin Fund (K)
+                      {memberStatus && memberStatus.admin_fund_required != null && (
+                        <span className="ml-2 text-xs font-normal text-amber-600">
+                          Pending: {fmtBal(Math.max(0, (memberStatus.admin_fund_required ?? 0) - (memberStatus.admin_fund_balance ?? 0)))}
+                        </span>
+                      )}
                     </label>
                     <input
                       type="number"
@@ -796,6 +836,11 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   <div>
                     <label htmlFor="declared_interest_on_loan" className="block text-base font-semibold text-blue-900 mb-2">
                       Interest on Loan (K)
+                      {memberStatus && (memberStatus.interest_on_loan_due ?? 0) > 0 && (
+                        <span className="ml-2 text-xs font-normal text-amber-600">
+                          Due: {fmtBal(memberStatus.interest_on_loan_due!)}
+                        </span>
+                      )}
                     </label>
                     <input
                       type="number"
@@ -813,6 +858,11 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   <div>
                     <label htmlFor="declared_loan_repayment" className="block text-base font-semibold text-blue-900 mb-2">
                       Loan Repayment (K)
+                      {memberStatus && (memberStatus.loan_balance ?? 0) > 0 && (
+                        <span className="ml-2 text-xs font-normal text-amber-600">
+                          Outstanding: {fmtBal(memberStatus.loan_balance!)}
+                        </span>
+                      )}
                     </label>
                     <input
                       type="number"

@@ -121,7 +121,21 @@ def get_my_status(
             ).count()
         except Exception:
             pending_penalties_count = 0
-        
+
+        # Monthly interest due on active loans
+        try:
+            from app.models.transaction import LoanStatus as _LS
+            active_loans = db.query(Loan).filter(
+                Loan.member_id == member_profile.id,
+                Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED])
+            ).all()
+            interest_on_loan_due = sum(
+                float(loan.loan_amount) * float(loan.percentage_interest) / 100
+                for loan in active_loans
+            )
+        except Exception:
+            interest_on_loan_due = 0.0
+
         return {
             "member_id": str(member_profile.id),
             "savings_balance": float(savings_balance),
@@ -131,6 +145,7 @@ def get_my_status(
             "admin_fund_balance": float(admin_fund_balance),
             "admin_fund_required": float(admin_fund_required) if admin_fund_required else None,
             "penalties_balance": float(penalties_balance),
+            "interest_on_loan_due": interest_on_loan_due,
             "total_loans_count": total_loans,
             "pending_penalties_count": pending_penalties_count
         }
