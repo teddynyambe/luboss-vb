@@ -122,17 +122,30 @@ def get_my_status(
         except Exception:
             pending_penalties_count = 0
 
-        # Monthly interest due on active loans
+        # Monthly interest due on active loans (minus interest already paid)
         try:
             from app.models.transaction import LoanStatus as _LS
             active_loans = db.query(Loan).filter(
                 Loan.member_id == member_profile.id,
                 Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED])
             ).all()
-            interest_on_loan_due = sum(
-                float(loan.loan_amount) * float(loan.percentage_interest) / 100
-                for loan in active_loans
-            )
+            interest_on_loan_due = 0.0
+            for loan in active_loans:
+                monthly_interest = float(loan.loan_amount) * float(loan.percentage_interest) / 100
+                # Subtract interest already paid via approved declarations
+                decl_query = db.query(Declaration).filter(
+                    Declaration.member_id == member_profile.id,
+                    Declaration.status == DeclarationStatus.APPROVED,
+                    Declaration.declared_interest_on_loan > 0,
+                )
+                if loan.disbursement_date:
+                    decl_query = decl_query.filter(
+                        Declaration.effective_month >= loan.disbursement_date
+                    )
+                total_interest_paid = sum(
+                    float(d.declared_interest_on_loan or 0) for d in decl_query.all()
+                )
+                interest_on_loan_due += max(0.0, monthly_interest - total_interest_paid)
         except Exception:
             interest_on_loan_due = 0.0
 
