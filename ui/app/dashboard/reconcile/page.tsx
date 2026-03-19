@@ -53,6 +53,9 @@ export default function ReconcilePage() {
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [movingMonth, setMovingMonth] = useState(false);
+  const [showMoveModal, setShowMoveModal] = useState(false);
+  const [newMonth, setNewMonth] = useState('');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [loanTermOptions, setLoanTermOptions] = useState<string[]>([]);
   const [creditRatingTerms, setCreditRatingTerms] = useState<LoanTerm[]>([]);
@@ -197,6 +200,49 @@ export default function ReconcilePage() {
     }
   };
 
+  const handleOpenMoveModal = () => {
+    setNewMonth('');
+    setShowMoveModal(true);
+  };
+
+  const handleMoveMonth = async () => {
+    if (!newMonth) {
+      setMessage({ type: 'error', text: 'Please select a target month.' });
+      return;
+    }
+    const now = new Date();
+    const maxMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    if (newMonth > maxMonth) {
+      setMessage({ type: 'error', text: 'Cannot move declaration to a future month.' });
+      return;
+    }
+    if (newMonth === selectedMonth) {
+      setMessage({ type: 'error', text: 'Target month is the same as the current month.' });
+      return;
+    }
+    setMovingMonth(true);
+    setMessage(null);
+    try {
+      const res = await api.put<{ message: string }>('/api/chairman/reconcile/move-month', {
+        member_id: selectedMemberId,
+        current_month: `${selectedMonth}-01`,
+        new_month: `${newMonth}-01`,
+      });
+      if (!res.error) {
+        setShowMoveModal(false);
+        // Update state and reload — we set selectedMonth first, then trigger load after render
+        setSelectedMonth(newMonth);
+        setLoaded(false);
+        setMessage({ type: 'success', text: res.data?.message || 'Declaration moved successfully!' });
+      } else {
+        // Show conflict or other error inline in the modal area
+        setMessage({ type: 'error', text: res.error || 'Failed to move declaration' });
+      }
+    } finally {
+      setMovingMonth(false);
+    }
+  };
+
   const field = (label: string, key: keyof FormData) => (
     <div className="flex flex-col gap-1">
       <label className="text-sm font-semibold text-blue-900">{label}</label>
@@ -293,14 +339,67 @@ export default function ReconcilePage() {
         {loaded && (
           <>
             {/* Context banner */}
-            <div className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium">
-              {selectedMember ? getMemberName(selectedMember) : selectedMemberId}
-              {' — '}
-              {(() => {
-                const [y, m] = selectedMonth.split('-').map(Number);
-                return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-              })()}
+            <div className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium flex items-center justify-between">
+              <span>
+                {selectedMember ? getMemberName(selectedMember) : selectedMemberId}
+                {' — '}
+                {(() => {
+                  const [y, m] = selectedMonth.split('-').map(Number);
+                  return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+                })()}
+              </span>
+              <button
+                onClick={handleOpenMoveModal}
+                className="px-3 py-1 bg-white text-blue-600 rounded-lg text-xs font-semibold hover:bg-blue-50 transition-colors"
+              >
+                Change Month
+              </button>
             </div>
+
+            {/* Move Month Modal */}
+            {showMoveModal && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+                <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4 space-y-4">
+                  <h3 className="text-lg font-bold text-blue-900">Move Declaration to Different Month</h3>
+                  <p className="text-sm text-gray-600">
+                    Move <strong>{selectedMember ? getMemberName(selectedMember) : 'this member'}</strong>&apos;s declaration
+                    from{' '}
+                    <strong>
+                      {(() => {
+                        const [y, m] = selectedMonth.split('-').map(Number);
+                        return new Date(y, m - 1, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+                      })()}
+                    </strong>{' '}
+                    to a new month.
+                  </p>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-sm font-semibold text-blue-900">New Month</label>
+                    <input
+                      type="month"
+                      value={newMonth}
+                      max={`${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`}
+                      onChange={(e) => setNewMonth(e.target.value)}
+                      className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex justify-end gap-3 pt-2">
+                    <button
+                      onClick={() => { setShowMoveModal(false); setMessage(null); }}
+                      className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800 transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleMoveMonth}
+                      disabled={movingMonth || !newMonth}
+                      className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 disabled:opacity-50 transition-colors"
+                    >
+                      {movingMonth ? 'Moving…' : 'Move Declaration'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Declaration fields */}
             <div className="card">

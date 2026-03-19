@@ -2031,6 +2031,121 @@ def post_reconcile(
     return {"message": "Reconciliation saved successfully"}
 
 
+class MoveDeclarationMonthRequest(BaseModel):
+    member_id: str
+    current_month: str  # YYYY-MM-DD
+    new_month: str      # YYYY-MM-DD
+
+
+@router.put("/reconcile/move-month")
+def move_declaration_month(
+    body: MoveDeclarationMonthRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db)
+):
+    """Move a declaration from one month to another.
+
+    If a declaration already exists in the target month, return a conflict
+    error so the caller can resolve it first.
+    """
+    from app.models.transaction import Declaration, Loan
+    from app.models.ledger import JournalEntry
+    from app.models.transaction import DepositProof, DepositApproval
+    from app.core.audit import write_audit_log
+    from sqlalchemy import extract, and_
+    from datetime import date as date_type
+
+    try:
+        member_uuid = UUID(body.member_id)
+        current_date = date_type.fromisoformat(body.current_month)
+        new_date = date_type.fromisoformat(body.new_month)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id or month format (use YYYY-MM-DD)")
+
+    if (current_date.year, current_date.month) == (new_date.year, new_date.month):
+        raise HTTPException(status_code=400, detail="Source and target months are the same")
+
+    today = date_type.today()
+    if (new_date.year, new_date.month) > (today.year, today.month):
+        raise HTTPException(status_code=400, detail="Cannot move declaration to a future month")
+
+    # Find the declaration in the current month
+    source_declaration = db.query(Declaration).filter(
+        and_(
+            Declaration.member_id == member_uuid,
+            extract("year", Declaration.effective_month) == current_date.year,
+            extract("month", Declaration.effective_month) == current_date.month,
+        )
+    ).first()
+
+    if not source_declaration:
+        raise HTTPException(status_code=404, detail="No declaration found for the selected month")
+
+    # Check for a conflict in the target month
+    target_declaration = db.query(Declaration).filter(
+        and_(
+            Declaration.member_id == member_uuid,
+            extract("year", Declaration.effective_month) == new_date.year,
+            extract("month", Declaration.effective_month) == new_date.month,
+        )
+    ).first()
+
+    if target_declaration:
+        target_label = new_date.strftime("%B %Y")
+        raise HTTPException(
+            status_code=409,
+            detail=f"A declaration already exists for {target_label}. "
+                   f"Please move or delete that declaration first before moving this one."
+        )
+
+    # Move the declaration
+    source_declaration.effective_month = new_date
+    db.flush()
+
+    # Move associated loan if one exists for the source month
+    source_loan = db.query(Loan).filter(
+        and_(
+            Loan.member_id == member_uuid,
+            extract("year", Loan.disbursement_date) == current_date.year,
+            extract("month", Loan.disbursement_date) == current_date.month,
+        )
+    ).first()
+    if source_loan:
+        source_loan.disbursement_date = new_date
+        if source_loan.effective_month:
+            source_loan.effective_month = new_date
+        db.flush()
+
+    # Update associated journal entries to the new month
+    deposit_proofs = db.query(DepositProof).filter(
+        DepositProof.declaration_id == source_declaration.id
+    ).all()
+    for proof in deposit_proofs:
+        approval = db.query(DepositApproval).filter(
+            DepositApproval.deposit_proof_id == proof.id
+        ).first()
+        if approval and approval.journal_entry_id:
+            je = db.query(JournalEntry).filter(
+                JournalEntry.id == approval.journal_entry_id
+            ).first()
+            if je and not je.reversed_at:
+                from datetime import datetime as dt
+                je.entry_date = dt.combine(new_date, dt.min.time())
+                db.flush()
+
+    # Audit
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Declaration month moved",
+        details=f"member={body.member_id}, from={current_date.strftime('%Y-%m')} to={new_date.strftime('%Y-%m')}",
+    )
+
+    db.commit()
+    new_label = new_date.strftime("%B %Y")
+    return {"message": f"Declaration moved to {new_label} successfully"}
+
+
 # ---------------------------------------------------------------------------
 # Ledger Initialisation
 # ---------------------------------------------------------------------------
