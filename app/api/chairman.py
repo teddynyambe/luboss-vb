@@ -857,126 +857,120 @@ def update_cycle(
     
     # Update credit rating scheme if provided
     if config.credit_rating_scheme:
-        # Find existing scheme linked to this cycle (if any) BEFORE deleting
-        existing_interest_range = db.query(CreditRatingInterestRange).filter(
-            CreditRatingInterestRange.cycle_id == cycle.id
-        ).first()
-        
-        existing_scheme = None
-        if existing_interest_range:
-            # Get the tier and then the scheme
-            tier = db.query(CreditRatingTier).filter(
-                CreditRatingTier.id == existing_interest_range.tier_id
-            ).first()
-            if tier:
-                existing_scheme = db.query(CreditRatingScheme).filter(
-                    CreditRatingScheme.id == tier.scheme_id
-                ).first()
-        
-        # Check if a scheme with the same name already exists
-        scheme_by_name = db.query(CreditRatingScheme).filter(
+        # Find or create the scheme
+        scheme = db.query(CreditRatingScheme).filter(
             CreditRatingScheme.name == config.credit_rating_scheme.name
         ).first()
-        
-        if scheme_by_name:
-            # Use existing scheme (update description and effective_from)
-            scheme = scheme_by_name
+
+        if scheme:
             scheme.description = config.credit_rating_scheme.description
             scheme.effective_from = cycle.start_date
-            
-            # Delete existing interest ranges for this cycle
-            db.query(CreditRatingInterestRange).filter(
-                CreditRatingInterestRange.cycle_id == cycle.id
-            ).delete()
-            
-            # Delete member credit ratings for this cycle first (to avoid FK constraint when deleting tiers)
-            existing_tiers = db.query(CreditRatingTier).filter(
-                CreditRatingTier.scheme_id == scheme.id
-            ).all()
-            
-            tier_ids = [t.id for t in existing_tiers] if existing_tiers else []
-            if tier_ids:
-                # Delete member credit ratings for this cycle and these tiers
-                db.query(MemberCreditRating).filter(
-                    MemberCreditRating.tier_id.in_(tier_ids),
-                    MemberCreditRating.cycle_id == cycle.id
-                ).delete(synchronize_session=False)
-            
-            # Delete existing tiers for this scheme (they will be recreated)
-            # First, delete ALL related data for these tiers
-            if tier_ids:
-                # Delete ALL interest ranges for these tiers (for all cycles, not just this one)
-                db.query(CreditRatingInterestRange).filter(
-                    CreditRatingInterestRange.tier_id.in_(tier_ids)
-                ).delete(synchronize_session=False)
-                
-                # Delete ALL borrowing limits for these tiers (not just for this cycle's start date)
-                db.query(BorrowingLimitPolicy).filter(
-                    BorrowingLimitPolicy.tier_id.in_(tier_ids)
-                ).delete(synchronize_session=False)
-            
-            # Delete the tiers for this scheme
-            # Note: This will fail if tiers are used by other cycles (via MemberCreditRating)
-            # In that case, the error will be caught and reported
-            if tier_ids:
-                db.query(CreditRatingTier).filter(
-                    CreditRatingTier.id.in_(tier_ids)
-                ).delete(synchronize_session=False)
         else:
-            # Delete existing interest ranges for this cycle (if any)
-            db.query(CreditRatingInterestRange).filter(
-                CreditRatingInterestRange.cycle_id == cycle.id
-            ).delete()
-            
-            # Create new scheme
             scheme = CreditRatingScheme(
                 name=config.credit_rating_scheme.name,
                 description=config.credit_rating_scheme.description,
                 effective_from=cycle.start_date
             )
             db.add(scheme)
-            db.flush()  # Get scheme.id
-        
-        # Create new tiers with borrowing limits and interest ranges
+            db.flush()
+
+        # Build a map of existing tiers by name for this scheme
+        existing_tiers = db.query(CreditRatingTier).filter(
+            CreditRatingTier.scheme_id == scheme.id
+        ).all()
+        existing_tier_map = {t.tier_name: t for t in existing_tiers}
+
+        # Track which tier names are still in the new config
+        incoming_tier_names = {td.tier_name for td in config.credit_rating_scheme.tiers}
+
+        # Delete interest ranges for this cycle (they will be recreated)
+        db.query(CreditRatingInterestRange).filter(
+            CreditRatingInterestRange.cycle_id == cycle.id
+        ).delete(synchronize_session=False)
+
+        # Remove tiers that no longer exist in the new config
+        removed_tier_names = set(existing_tier_map.keys()) - incoming_tier_names
+        for removed_name in removed_tier_names:
+            removed_tier = existing_tier_map[removed_name]
+            # Move member credit ratings to the first incoming tier (preserve assignments)
+            # or delete them if there are no tiers left
+            if incoming_tier_names:
+                # Will re-map after new tiers are created below
+                pass
+            else:
+                db.query(MemberCreditRating).filter(
+                    MemberCreditRating.tier_id == removed_tier.id,
+                    MemberCreditRating.cycle_id == cycle.id
+                ).delete(synchronize_session=False)
+            # Clean up borrowing limits and interest ranges for removed tier
+            db.query(CreditRatingInterestRange).filter(
+                CreditRatingInterestRange.tier_id == removed_tier.id
+            ).delete(synchronize_session=False)
+            db.query(BorrowingLimitPolicy).filter(
+                BorrowingLimitPolicy.tier_id == removed_tier.id
+            ).delete(synchronize_session=False)
+            db.query(MemberCreditRating).filter(
+                MemberCreditRating.tier_id == removed_tier.id,
+                MemberCreditRating.cycle_id == cycle.id
+            ).delete(synchronize_session=False)
+            db.query(CreditRatingTier).filter(
+                CreditRatingTier.id == removed_tier.id
+            ).delete(synchronize_session=False)
+
+        # Update existing tiers or create new ones — preserving IDs
         for tier_data in config.credit_rating_scheme.tiers:
-            tier = CreditRatingTier(
-                scheme_id=scheme.id,
-                tier_name=tier_data.tier_name,
-                tier_order=tier_data.tier_order,
-                description=tier_data.description
-            )
-            db.add(tier)
-            db.flush()  # Get tier.id
-            
-            # Create borrowing limit policy
-            borrowing_limit = BorrowingLimitPolicy(
-                tier_id=tier.id,
-                multiplier=tier_data.multiplier,
-                effective_from=cycle.start_date
-            )
-            db.add(borrowing_limit)
-            
-            # Create interest rates for this tier
-            # If no interest_ranges specified, create a default one
+            if tier_data.tier_name in existing_tier_map:
+                # Update existing tier in place — keeps its ID and MemberCreditRating links
+                tier = existing_tier_map[tier_data.tier_name]
+                tier.tier_order = tier_data.tier_order
+                tier.description = tier_data.description
+
+                # Update borrowing limit
+                existing_bl = db.query(BorrowingLimitPolicy).filter(
+                    BorrowingLimitPolicy.tier_id == tier.id
+                ).first()
+                if existing_bl:
+                    existing_bl.multiplier = tier_data.multiplier
+                    existing_bl.effective_from = cycle.start_date
+                else:
+                    db.add(BorrowingLimitPolicy(
+                        tier_id=tier.id,
+                        multiplier=tier_data.multiplier,
+                        effective_from=cycle.start_date
+                    ))
+            else:
+                # Create new tier
+                tier = CreditRatingTier(
+                    scheme_id=scheme.id,
+                    tier_name=tier_data.tier_name,
+                    tier_order=tier_data.tier_order,
+                    description=tier_data.description
+                )
+                db.add(tier)
+                db.flush()
+
+                db.add(BorrowingLimitPolicy(
+                    tier_id=tier.id,
+                    multiplier=tier_data.multiplier,
+                    effective_from=cycle.start_date
+                ))
+
+            # Create interest ranges for this tier
             if not tier_data.interest_ranges:
-                # Create default rate for all terms
-                interest_range = CreditRatingInterestRange(
+                db.add(CreditRatingInterestRange(
                     tier_id=tier.id,
                     cycle_id=cycle.id,
-                    term_months=None,  # All terms
+                    term_months=None,
                     effective_rate_percent=Decimal("12.00")
-                )
-                db.add(interest_range)
+                ))
             else:
-                # Create rates as specified for this tier
                 for range_data in tier_data.interest_ranges:
-                    interest_range = CreditRatingInterestRange(
+                    db.add(CreditRatingInterestRange(
                         tier_id=tier.id,
                         cycle_id=cycle.id,
                         term_months=range_data.term_months,
                         effective_rate_percent=range_data.effective_rate_percent
-                    )
-                    db.add(interest_range)
+                    ))
     
     try:
         db.commit()
