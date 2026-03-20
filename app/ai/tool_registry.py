@@ -93,6 +93,7 @@ def initialize_tools():
         get_policy_answer,
         get_member_info,
         get_member_personal_details,
+        get_member_account_details,
         get_penalty_information,
         get_group_info
     )
@@ -231,6 +232,31 @@ def initialize_tools():
             "required": ["search_term"]
         },
         function=get_member_personal_details
+    )
+
+    register_tool(
+        name="get_member_account_details",
+        description=(
+            "Get a member's full financial details including savings balance, loan balance, "
+            "active loans, pending penalties, and recent declarations. "
+            "Only available to chairman and treasurer. "
+            "Use this tool when a chairman or treasurer asks about a specific member's account status, "
+            "savings, loan status, loan balance, penalties, declarations, financial standing, "
+            "or any financial information about another member. "
+            "Examples: 'What is the account status for Musonda Bwale', 'How much savings does John have', "
+            "'Does Mary have any pending loans', 'Show me penalties for James'."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "search_term": {
+                    "type": "string",
+                    "description": "Member name or email to search for."
+                }
+            },
+            "required": ["search_term"]
+        },
+        function=get_member_account_details
     )
 
 

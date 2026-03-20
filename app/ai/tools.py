@@ -276,6 +276,144 @@ def get_my_credit_rating(
     }
 
 
+def get_member_account_details(
+    db: Session,
+    search_term: str = None,
+    user_role: str = None,
+) -> Dict:
+    """
+    Get a member's full financial details including savings balance, loan balance,
+    active loans, pending penalties, and recent declarations.
+    Restricted to chairman and treasurer roles only.
+    Use this when a chairman or treasurer asks about a member's account, savings,
+    loan status, penalties, declarations, or financial standing.
+    """
+    from app.models.member import MemberProfile
+    from app.models.user import User
+    from app.models.transaction import PenaltyRecord, PenaltyType, PenaltyRecordStatus
+    from app.models.policy import MemberCreditRating, CreditRatingTier
+    from app.services.cycle import get_current_cycle
+    from sqlalchemy import or_, func
+
+    ALLOWED_ROLES = {"chairman", "treasurer"}
+    if not user_role or user_role.lower() not in ALLOWED_ROLES:
+        return {"error": "Access denied. Only chairman and treasurer can view member financial details."}
+
+    if not search_term or not search_term.strip():
+        return {"error": "Please provide a member name or email to look up."}
+
+    # Find the member
+    query = db.query(MemberProfile).join(User, MemberProfile.user_id == User.id).filter(
+        or_(
+            User.first_name.ilike(f"%{search_term}%"),
+            User.last_name.ilike(f"%{search_term}%"),
+            User.email.ilike(f"%{search_term}%"),
+            func.concat(User.first_name, " ", User.last_name).ilike(f"%{search_term}%"),
+        )
+    )
+    members = query.all()
+
+    if not members:
+        return {"members": [], "count": 0, "message": "No members found matching that search."}
+
+    current_cycle = None
+    try:
+        current_cycle = get_current_cycle(db)
+    except Exception:
+        pass
+
+    results = []
+    for member in members:
+        user = member.user
+        member_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+
+        # Balances
+        savings_balance = get_member_savings_balance(db, member.id)
+        loan_balance = get_member_loan_balance(db, member.id)
+
+        # Active loans
+        loans = db.query(Loan).filter(Loan.member_id == member.id).all()
+        loans_list = [
+            {
+                "amount": float(loan.loan_amount),
+                "interest_rate": float(loan.percentage_interest),
+                "status": loan.loan_status.value,
+                "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+                "term_months": loan.number_of_instalments,
+            }
+            for loan in loans
+        ]
+
+        # Penalties
+        penalties = db.query(PenaltyRecord).filter(
+            PenaltyRecord.member_id == member.id
+        ).all()
+        penalties_list = []
+        for p in penalties:
+            info = {
+                "date_issued": p.date_issued.isoformat(),
+                "status": p.status.value,
+                "notes": p.notes or "",
+            }
+            try:
+                if p.penalty_type:
+                    info["penalty_type"] = p.penalty_type.name
+                    info["fee_amount"] = float(p.penalty_type.fee_amount)
+            except Exception:
+                pass
+            penalties_list.append(info)
+
+        # Recent declarations (last 6)
+        declarations = db.query(Declaration).filter(
+            Declaration.member_id == member.id
+        ).order_by(Declaration.effective_month.desc()).limit(6).all()
+        declarations_list = [
+            {
+                "effective_month": d.effective_month.isoformat(),
+                "status": d.status.value,
+                "savings_declared": float(d.declared_savings_amount or 0),
+                "social_fund": float(d.declared_social_fund or 0),
+                "admin_fund": float(d.declared_admin_fund or 0),
+                "penalties": float(d.declared_penalties or 0),
+                "loan_repayment": float(d.declared_loan_repayment or 0),
+                "interest_on_loan": float(d.declared_interest_on_loan or 0),
+            }
+            for d in declarations
+        ]
+
+        # Credit tier
+        credit_tier = None
+        try:
+            if current_cycle:
+                cr = db.query(MemberCreditRating).filter(
+                    MemberCreditRating.member_id == member.id,
+                    MemberCreditRating.cycle_id == current_cycle.id,
+                ).first()
+                if cr:
+                    tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == cr.tier_id).first()
+                    if tier:
+                        credit_tier = tier.tier_name
+        except Exception:
+            pass
+
+        results.append({
+            "member_id": str(member.id),
+            "name": member_name,
+            "email": user.email,
+            "phone": user.phone_number,
+            "status": member.status.value,
+            "credit_tier": credit_tier,
+            "savings_balance": float(savings_balance),
+            "loan_balance": float(loan_balance),
+            "loans": loans_list,
+            "penalties": penalties_list,
+            "active_penalties_count": sum(1 for p in penalties_list if p["status"] in ["pending", "approved"]),
+            "recent_declarations": declarations_list,
+        })
+
+    return {"members": results, "count": len(results)}
+
+
 def get_policy_answer(
     db: Session,
     query: str

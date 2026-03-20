@@ -136,9 +136,11 @@ Your role is to assist members with:
 **Administrative Access ({user_role.title()})**:
 - You have elevated access as a {user_role.title()}.
 - You can use `get_member_personal_details` to retrieve a member's NRC number, bank account, bank name, bank branch, physical address, and next-of-kin information.
-- Use this tool when you are asked about a member's NRC, bank details, address, next of kin, or other personal/sensitive information.
-- Always confirm which member you are returning details for by name before displaying sensitive fields.
-- This tool requires a search term (name, email, or NRC number)."""
+- You can use `get_member_account_details` to retrieve a member's full financial details including savings balance, loan balance, active loans, penalties, and recent declarations.
+- Use `get_member_account_details` when asked about a member's account status, savings, loan status, financial standing, penalties, or declarations.
+- Use `get_member_personal_details` when asked about a member's NRC, bank details, address, or next of kin.
+- Always confirm which member you are returning details for by name.
+- These tools require a search term (name or email)."""
     
     messages = [
         {"role": "system", "content": system_prompt},
@@ -269,6 +271,7 @@ Your role is to assist members with:
                 get_policy_answer,
                 get_member_info,
                 get_member_personal_details,
+                get_member_account_details,
             )
 
             query_lower = query.lower()
@@ -297,8 +300,19 @@ Your role is to assist members with:
                 "members of the group", "group members", "village banking members", "luboss members",
                 "who are all", "show all", "list all", "everyone", "people in", "who belongs"
             ])
-            
-            if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query or is_personal_details_query):
+
+            # Detect when chairman/treasurer asks about another member's financial data
+            is_member_account_query = False
+            if user_role and user_role.lower() in {"chairman", "treasurer"}:
+                # Check if query mentions a person's name along with financial keywords
+                financial_keywords = ["account", "savings", "loan", "balance", "penalties", "declaration", "status", "financial", "owe", "owing"]
+                name_indicators = ["for ", "of ", "'s ", "about "]
+                has_financial = any(kw in query_lower for kw in financial_keywords)
+                has_name_ref = any(ni in query_lower for ni in name_indicators)
+                if has_financial and has_name_ref:
+                    is_member_account_query = True
+
+            if not (is_account_query or is_credit_rating_query or is_policy_query or is_member_info_query or is_personal_details_query or is_member_account_query):
                 is_policy_query = True
             
             context = ""
@@ -396,6 +410,38 @@ Your role is to assist members with:
                     except:
                         pass
                     tool_calls.append({"tool": "get_member_personal_details", "result": {"error": str(e)}})
+
+            # Handle member account/financial queries (chairman/treasurer only)
+            if is_member_account_query:
+                try:
+                    # Extract member name from the query
+                    acct_search_term = None
+                    acct_patterns = [
+                        r"(?:account|savings|loan|balance|penalties|declaration|status|financial)\s+(?:for|of|about)\s+(?:member\s+)?(.+?)(?:\?|$)",
+                        r"(?:for|of|about)\s+(?:member\s+)?(.+?)(?:'s)?\s+(?:account|savings|loan|balance|penalties|declaration|status|financial)",
+                        r"(.+?)'s\s+(?:account|savings|loan|balance|penalties|declaration|status|financial)",
+                        r"(?:what is|what are|get|find|show|check)\s+(?:the\s+)?(?:account|savings|loan|balance|status)\s+(?:for|of)\s+(?:member\s+)?(.+?)(?:\?|$)",
+                    ]
+                    for pattern in acct_patterns:
+                        match = re.search(pattern, query_lower, re.IGNORECASE)
+                        if match:
+                            candidate = match.group(1).strip()
+                            if candidate and candidate not in ["the", "a", "an", "member", "this", "that", "my"]:
+                                acct_search_term = candidate
+                                break
+
+                    if acct_search_term:
+                        member_account = get_member_account_details(
+                            db, search_term=acct_search_term, user_role=user_role
+                        )
+                        tool_calls.append({"tool": "get_member_account_details", "result": member_account})
+                        context += f"Member account details: {member_account}\n"
+                except Exception as e:
+                    try:
+                        db.rollback()
+                    except:
+                        pass
+                    tool_calls.append({"tool": "get_member_account_details", "result": {"error": str(e)}})
 
             # Handle member information queries (non-financial)
             if is_member_info_query:

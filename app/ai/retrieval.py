@@ -1,11 +1,21 @@
 """RAG retrieval service."""
 import json
+import math
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 from app.models.ai import DocumentChunk, DocumentEmbedding
 from typing import List, Dict, Any
 from openai import OpenAI
 from app.core.config import settings
+
+
+def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
 
 
 def retrieve_relevant_chunks(
@@ -15,7 +25,8 @@ def retrieve_relevant_chunks(
     document_name: str = None
 ) -> List[Dict[str, Any]]:
     """
-    Retrieve relevant document chunks using MySQL VEC_DISTANCE_COSINE similarity.
+    Retrieve relevant document chunks using cosine similarity.
+    Embeddings are stored as JSON text; similarity is computed in Python.
     """
     if not settings.OPENAI_API_KEY:
         return []
@@ -27,45 +38,52 @@ def retrieve_relevant_chunks(
     )
     query_embedding = query_response.data[0].embedding
 
-    query_sql = """
-        SELECT
-            dc.id,
-            dc.document_name,
-            dc.version,
-            dc.chunk_text,
-            dc.page_number,
-            dc.metadata,
-            1 - VEC_DISTANCE_COSINE(de.embedding, VEC_FROM_TEXT(:query_embedding)) AS similarity
-        FROM document_chunk dc
-        JOIN document_embedding de ON dc.id = de.chunk_id
-        WHERE de.model_name = :model_name
-    """
-    params: Dict[str, Any] = {
-        "query_embedding": json.dumps(query_embedding),
-        "model_name": settings.EMBEDDING_MODEL,
-        "top_k": top_k,
-    }
-    if document_name:
-        query_sql += " AND dc.document_name = :document_name"
-        params["document_name"] = document_name
-
-    query_sql += " ORDER BY similarity DESC LIMIT :top_k"
-
+    # Fetch all chunks with embeddings
     try:
-        rows = db.execute(text(query_sql), params).fetchall()
+        q = db.query(DocumentChunk, DocumentEmbedding).join(
+            DocumentEmbedding, DocumentChunk.id == DocumentEmbedding.chunk_id
+        ).filter(DocumentEmbedding.model_name == settings.EMBEDDING_MODEL)
+
+        if document_name:
+            q = q.filter(DocumentChunk.document_name == document_name)
+
+        rows = q.all()
     except Exception:
         return []
 
+    if not rows:
+        return []
+
+    # Compute similarity for each chunk
+    scored = []
+    for chunk, emb in rows:
+        # Parse embedding from JSON string or list
+        embedding_data = emb.embedding
+        if isinstance(embedding_data, str):
+            try:
+                embedding_data = json.loads(embedding_data)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if not isinstance(embedding_data, (list, tuple)):
+            continue
+
+        similarity = _cosine_similarity(query_embedding, embedding_data)
+        scored.append((chunk, similarity))
+
+    # Sort by similarity descending and take top_k
+    scored.sort(key=lambda x: x[1], reverse=True)
+    top = scored[:top_k]
+
     results = []
-    for row in rows:
+    for chunk, similarity in top:
         results.append({
-            "id": str(row.id),
-            "document_name": row.document_name,
-            "version": row.version,
-            "chunk_text": row.chunk_text,
-            "page_number": row.page_number,
-            "metadata": row.metadata,
-            "similarity": float(row.similarity) if row.similarity is not None else 0,
+            "id": str(chunk.id),
+            "document_name": chunk.document_name,
+            "version": chunk.version,
+            "chunk_text": chunk.chunk_text,
+            "page_number": chunk.page_number,
+            "metadata": chunk.chunk_metadata,
+            "similarity": similarity,
         })
     return results
 

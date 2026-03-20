@@ -1,12 +1,9 @@
 """Document ingestion service for RAG."""
 import json
 import PyPDF2
-import uuid
 from typing import List, Dict
 from app.models.ai import DocumentChunk, DocumentEmbedding
-from app.models.system import ConstitutionDocumentVersion
 from sqlalchemy.orm import Session
-from sqlalchemy import text
 from openai import OpenAI
 from app.core.config import settings
 
@@ -91,17 +88,14 @@ def ingest_document(
         # Generate embedding
         embedding_vector = generate_embeddings(chunk_data["text"])
 
-        # Insert embedding using raw SQL — MySQL VECTOR column requires VEC_FROM_TEXT()
-        embedding_id = uuid.uuid4()
-        db.execute(text("""
-            INSERT INTO document_embedding (id, chunk_id, embedding, model_name, created_at)
-            VALUES (:id, :chunk_id, VEC_FROM_TEXT(:embedding), :model_name, NOW())
-        """), {
-            'id': str(embedding_id),
-            'chunk_id': str(chunk.id),
-            'embedding': json.dumps(embedding_vector),
-            'model_name': settings.EMBEDDING_MODEL,
-        })
+        # Insert embedding as JSON text
+        embedding_record = DocumentEmbedding(
+            chunk_id=chunk.id,
+            embedding=embedding_vector,
+            model_name=settings.EMBEDDING_MODEL,
+        )
+        db.add(embedding_record)
+        db.flush()
 
         document_chunks.append(chunk)
 
@@ -155,16 +149,13 @@ def ingest_text_content(
         # Generate embedding
         embedding_vector = generate_embeddings(chunk_data["text"])
 
-        embedding_id = uuid.uuid4()
-        db.execute(text("""
-            INSERT INTO document_embedding (id, chunk_id, embedding, model_name, created_at)
-            VALUES (:id, :chunk_id, VEC_FROM_TEXT(:embedding), :model_name, NOW())
-        """), {
-            'id': str(embedding_id),
-            'chunk_id': str(chunk.id),
-            'embedding': json.dumps(embedding_vector),
-            'model_name': settings.EMBEDDING_MODEL,
-        })
+        embedding_record = DocumentEmbedding(
+            chunk_id=chunk.id,
+            embedding=embedding_vector,
+            model_name=settings.EMBEDDING_MODEL,
+        )
+        db.add(embedding_record)
+        db.flush()
 
         document_chunks.append(chunk)
 

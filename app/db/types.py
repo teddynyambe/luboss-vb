@@ -1,17 +1,17 @@
-"""Custom SQLAlchemy types for MySQL 9.0+."""
+"""Custom SQLAlchemy types."""
 import json
-from sqlalchemy.types import UserDefinedType
+from sqlalchemy.types import UserDefinedType, Text
 
 
 class MySQLVector(UserDefinedType):
-    """MySQL 9.0 native VECTOR(N) column type for float embeddings."""
+    """Store vector embeddings as JSON text (compatible with all MySQL versions)."""
     cache_ok = True
 
     def __init__(self, dim: int):
         self.dim = dim
 
     def get_col_spec(self, **kw) -> str:
-        return f"VECTOR({self.dim})"
+        return "LONGTEXT"
 
     def bind_processor(self, dialect):
         def process(value):
@@ -24,5 +24,12 @@ class MySQLVector(UserDefinedType):
 
     def result_processor(self, dialect, coltype):
         def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                try:
+                    return json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    return value
             return value
         return process
