@@ -1024,6 +1024,12 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                               Penalties
                             </th>
                             <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Loan Repayment
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                              Loan Interest
+                            </th>
+                            <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
                               Status
                             </th>
                             <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
@@ -1070,6 +1076,16 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                                 <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
                                   {declaration.declared_penalties !== null && declaration.declared_penalties !== undefined && declaration.declared_penalties > 0
                                     ? `K${declaration.declared_penalties.toLocaleString()}`
+                                    : '-'}
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {declaration.declared_loan_repayment !== null && declaration.declared_loan_repayment !== undefined && declaration.declared_loan_repayment > 0
+                                    ? `K${declaration.declared_loan_repayment.toLocaleString()}`
+                                    : '-'}
+                                </td>
+                                <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                                  {declaration.declared_interest_on_loan !== null && declaration.declared_interest_on_loan !== undefined && declaration.declared_interest_on_loan > 0
+                                    ? `K${declaration.declared_interest_on_loan.toLocaleString()}`
                                     : '-'}
                                 </td>
                                 <td className="p-3 md:p-4">
@@ -1130,6 +1146,12 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                             </td>
                             <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
                               K{allDeclarations.reduce((sum, d) => sum + (d.declared_penalties || 0), 0).toLocaleString()}
+                            </td>
+                            <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                              K{allDeclarations.reduce((sum, d) => sum + (d.declared_loan_repayment || 0), 0).toLocaleString()}
+                            </td>
+                            <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                              K{allDeclarations.reduce((sum, d) => sum + (d.declared_interest_on_loan || 0), 0).toLocaleString()}
                             </td>
                             <td colSpan={3}></td>
                           </tr>
