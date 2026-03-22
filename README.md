@@ -214,40 +214,169 @@ npm run dev
 
 The UI will be available at `http://localhost:3000`
 
-## Key Features Documentation
+## Key Workflows
+
+### 1. Member Registration and Activation
+
+```
+Person registers on the app
+  → Account created as "Pending"
+  → Chairman reviews and approves
+  → Member becomes "Active" and can participate
+```
+
+### 2. Monthly Declaration and Deposit Flow
+
+Each month, members declare how much they are contributing and then prove they deposited it.
+
+```
+Member creates a Declaration for the month
+  (Savings, Social Fund, Admin Fund, Penalties, Loan Repayment, Interest)
+  → Status: Pending
+
+Member uploads Deposit Proof (bank slip / screenshot)
+  → Treasurer reviews the proof
+  → If valid: Treasurer approves → funds posted to member's account
+  → If invalid: Treasurer rejects with comment → member can resubmit
+```
+
+**Key rules:**
+- One declaration per member per month
+- Declarations can be edited while still pending
+- Savings balance only reflects approved deposits, not pending declarations
+- The Chairman/Treasurer can also enter declarations via Reconciliation for backdating
+
+### 3. Loan Flow
+
+There are two ways a loan gets created:
+
+**Path A — Member applies (normal flow):**
+```
+Member submits a Loan Application
+  (amount, term, cycle)
+  → System checks: credit rating, savings × multiplier = max allowed
+  → Status: Pending
+
+Treasurer reviews the application
+  → Approves: Loan is created and money disbursed immediately
+  → Rejects: Application marked rejected with reason
+
+Member can also:
+  → Edit a pending application (change amount/term)
+  → Withdraw a pending application
+```
+
+**Path B — Treasurer reconciliation (backlog/corrections):**
+```
+Treasurer enters loan details directly via Reconciliation
+  → Loan created immediately (no application needed)
+  → Disbursement date set to the reconciliation month
+```
+
+**Repayment:**
+```
+Member declares loan_repayment (principal) and interest_on_loan each month
+  → These are tracked through approved declarations
+  → Outstanding balance = Loan Amount - Total Principal Paid
+
+When fully paid (principal + interest both covered):
+  → Loan automatically marked as "Paid Off"
+  → Treasurer notified by email
+```
+
+**Loan auto-closure** happens in three ways:
+- A background job runs every 5 minutes checking all active loans
+- When the Treasurer views the active loans list
+- When the Member views their current loan
+
+### 4. Cycle Management
+
+A cycle represents one financial year for the group.
+
+```
+Chairman creates a Cycle
+  (year, start date, phases, credit rating scheme)
+  → Phases define when declarations, loan applications, and deposits are allowed
+  → Each phase has date ranges and optional automatic penalties
+
+Chairman activates the Cycle
+  → Only one cycle can be active at a time
+  → All member activity happens within the active cycle
+
+Chairman assigns Credit Ratings to members
+  → Each rating tier has a borrowing multiplier and interest rates
+  → Example: "Low Risk A+" with 4x multiplier means max loan = 4 × savings
+
+Chairman can close the Cycle when the year ends
+```
+
+### 5. Credit Rating and Loan Eligibility
+
+```
+Chairman assigns a Credit Rating tier to each member for the cycle
+  → Tier determines:
+     - Borrowing multiplier (e.g. 2x, 3x, 4x savings)
+     - Available loan terms (1, 2, 3, or 4 months)
+     - Interest rate per term
+
+When a member applies for a loan:
+  Maximum Loan = Savings Balance × Multiplier
+  Interest = Loan Amount × Rate (flat, not compounding)
+```
+
+### 6. Penalty Management
+
+```
+Penalties can be applied:
+  → Automatically: when a member acts outside allowed phase dates
+    (late declaration, late deposit, late loan application)
+  → Manually: by the Compliance Officer for other violations
+
+Penalties go through:
+  Created → Approved by Treasurer → Paid (via declaration)
+```
+
+### 7. Reconciliation (Backdating)
+
+The Chairman or Treasurer can enter historical data for any past month.
+
+```
+Select a member + month → Load existing data (if any)
+  → Enter: Savings, Social Fund, Admin Fund, Penalties,
+           Loan Repayment, Interest, Loan Amount
+  → Save: Declaration created, deposit approved, and posted to ledger
+  → All entries are backdated to the selected month
+
+Declarations can also be moved to a different month if entered incorrectly.
+```
+
+### 8. AI Assistant
+
+```
+Members can chat with the AI assistant to:
+  → Ask about their account (savings, loans, penalties)
+  → Ask about constitution rules and policies
+  → Get help navigating the app
+
+Chairman and Treasurer get additional access:
+  → Look up any member's financial details (savings, loans, penalties)
+  → Look up member personal details (NRC, bank info, address)
+```
+
+### 9. Automated Background Tasks
+
+The system runs automatic tasks every 5 minutes:
+
+- **Auto-close paid loans** — Loans where principal and interest are fully paid get marked as "Paid Off"
+- **Transfer excess contributions** — If a member overpays Social Fund or Admin Fund beyond the cycle requirement, the excess is transferred to their Savings
+- **Email notification** — Treasurers receive an email listing any loans closed or funds transferred
+
+---
+
+## Detailed Documentation
 
 ### Chart of Accounts and System Rules
-- **Chart of Accounts**: Complete documentation of account structure, account types, and dynamic account creation
-- **System Rules**: Comprehensive list of all business rules and validations enforced by the system
-- See `docs/accounting_and_rules.md` for detailed information
-
-### Loan Management
-- Members can apply for loans with notes
-- Loan eligibility calculated based on savings and credit rating
-- Treasurer approves and disburses loans in one step
-- Loan status tracking: Pending → Active → Paid Off
-- Full repayment history with principal/interest breakdown
-- Loan balance calculation from actual loan records
-
-### Member Declarations
-- Monthly declarations (15th-20th of month)
-- Declarations can be edited before 20th of month
-- Deposit proof upload required
-- Treasurer approval workflow with comments
-- Automatic ledger posting upon approval
-
-### Cycle Management
-- Annual financial cycles
-- Configurable phases (deposits, payout, shareout)
-- Social Fund and Admin Fund requirements per cycle
-- Credit rating schemes per cycle
-- Cycle activation/deactivation by Chairman
-
-### Credit Rating System
-- Tiered credit ratings (A, B, C, etc.)
-- Borrowing multipliers per tier
-- Interest rate ranges per tier and loan term
-- Assignment to members per cycle
+- See `docs/accounting_and_rules.md` for the complete account structure and business rules
 
 ## API Endpoints
 
