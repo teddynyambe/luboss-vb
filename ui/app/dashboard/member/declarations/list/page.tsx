@@ -214,6 +214,9 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                         Admin Fund
                       </th>
                       <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
+                        Penalties
+                      </th>
+                      <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
                         Status
                       </th>
                       <th className="text-left p-3 md:p-4 text-sm md:text-base font-semibold text-blue-900">
@@ -255,6 +258,11 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                           <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
                             {declaration.declared_admin_fund !== null && declaration.declared_admin_fund !== undefined
                               ? `K${declaration.declared_admin_fund.toLocaleString()}`
+                              : '-'}
+                          </td>
+                          <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
+                            {declaration.declared_penalties !== null && declaration.declared_penalties !== undefined && declaration.declared_penalties > 0
+                              ? `K${declaration.declared_penalties.toLocaleString()}`
                               : '-'}
                           </td>
                           <td className="p-3 md:p-4">
@@ -301,6 +309,24 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       );
                     })}
                   </tbody>
+                  <tfoot>
+                    <tr className="bg-blue-100 border-t-2 border-blue-300">
+                      <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">Totals</td>
+                      <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                        K{declarations.reduce((sum, d) => sum + (d.declared_savings_amount || 0), 0).toLocaleString()}
+                      </td>
+                      <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                        K{declarations.reduce((sum, d) => sum + (d.declared_social_fund || 0), 0).toLocaleString()}
+                      </td>
+                      <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                        K{declarations.reduce((sum, d) => sum + (d.declared_admin_fund || 0), 0).toLocaleString()}
+                      </td>
+                      <td className="p-3 md:p-4 text-sm md:text-base font-bold text-blue-900">
+                        K{declarations.reduce((sum, d) => sum + (d.declared_penalties || 0), 0).toLocaleString()}
+                      </td>
+                      <td colSpan={3}></td>
+                    </tr>
+                  </tfoot>
                 </table>
               </div>
 
