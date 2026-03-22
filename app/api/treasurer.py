@@ -764,6 +764,19 @@ def get_active_loans(
             rate = float(loan.percentage_interest or 0)
             # Interest is a flat charge on the principal (not compounded per month)
             total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
+
+            # Auto-close fully-paid loans in real-time
+            interest_expected_dec = Decimal(str(total_interest_expected)) if total_interest_expected else Decimal("0.00")
+            if (outstanding_balance <= Decimal("0.01")
+                    and total_interest_paid >= interest_expected_dec
+                    and loan.loan_status != LoanStatus.CLOSED):
+                loan.loan_status = LoanStatus.CLOSED
+                db.commit()
+                db.refresh(loan)
+                # Skip this loan from the active list since it's now closed
+                if loan_filter != "paid":
+                    continue
+
             status_val = loan.loan_status.value if hasattr(loan.loan_status, "value") else str(loan.loan_status)
 
             # Compute maturity date from disbursement + term months

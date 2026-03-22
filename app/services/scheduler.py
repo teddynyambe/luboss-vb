@@ -33,7 +33,7 @@ def _close_paid_off_loans(db) -> List[dict]:
     Returns a list of dicts describing each closed loan (for the report email).
     """
     open_loans = db.query(Loan).filter(
-        Loan.loan_status == LoanStatus.OPEN,
+        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
     ).all()
 
     closed_loans: List[dict] = []

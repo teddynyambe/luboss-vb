@@ -1794,7 +1794,7 @@ def post_reconcile(
         declaration.declared_penalties = Decimal(str(body.penalties))
         declaration.declared_interest_on_loan = Decimal(str(body.interest_on_loan))
         declaration.declared_loan_repayment = Decimal(str(body.loan_repayment))
-        declaration.status = DeclarationStatus.PENDING
+        declaration.status = DeclarationStatus.APPROVED
         db.flush()
     else:
         declaration = Declaration(
@@ -1807,7 +1807,7 @@ def post_reconcile(
             declared_penalties=Decimal(str(body.penalties)),
             declared_interest_on_loan=Decimal(str(body.interest_on_loan)),
             declared_loan_repayment=Decimal(str(body.loan_repayment)),
-            status=DeclarationStatus.PENDING,
+            status=DeclarationStatus.APPROVED,
         )
         db.add(declaration)
         db.flush()
