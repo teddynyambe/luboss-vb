@@ -1657,11 +1657,22 @@ def get_account_transactions(
                 })
             
             # Add declarations as debit entries (informational - shows when member declared savings)
-            declarations = db.query(Declaration).filter(
-                Declaration.member_id == member_profile.id,
-                Declaration.declared_savings_amount.isnot(None),
-                Declaration.declared_savings_amount > 0
-            ).order_by(Declaration.created_at.desc()).all()
+            # Only include declarations that have been approved (have an approved, non-reversed deposit)
+            approved_declaration_ids = set()
+            for da in deposit_approvals:
+                dep = da.deposit_proof
+                if dep and dep.declaration_id:
+                    approved_declaration_ids.add(dep.declaration_id)
+
+            if approved_declaration_ids:
+                declarations = db.query(Declaration).filter(
+                    Declaration.member_id == member_profile.id,
+                    Declaration.declared_savings_amount.isnot(None),
+                    Declaration.declared_savings_amount > 0,
+                    Declaration.id.in_(approved_declaration_ids)
+                ).order_by(Declaration.created_at.desc()).all()
+            else:
+                declarations = []
             
             for declaration in declarations:
                 transactions.append({
