@@ -648,6 +648,39 @@ export default function LoanApplicationPage() {
                   </div>
                 </div>
 
+                {/* Borrowing Date & Maturity Date (computed, read-only) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
+                  <div>
+                    <label className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Borrowing Date
+                    </label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
+                      className="w-full bg-gray-100 border-2 border-gray-300 rounded-xl px-4 py-2 text-blue-900 cursor-not-allowed"
+                    />
+                    <p className="mt-1 text-xs text-blue-600 italic">Set to the date the loan is approved and disbursed</p>
+                  </div>
+                  <div>
+                    <label className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
+                      Maturity Date
+                    </label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={(() => {
+                        const today = new Date();
+                        const months = parseInt(formData.term_months) || 1;
+                        const maturity = new Date(today.getFullYear(), today.getMonth() + months, today.getDate());
+                        return maturity.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+                      })()}
+                      className="w-full bg-gray-100 border-2 border-gray-300 rounded-xl px-4 py-2 text-blue-900 cursor-not-allowed"
+                    />
+                    <p className="mt-1 text-xs text-blue-600 italic">Borrowing date + {formData.term_months} {parseInt(formData.term_months) === 1 ? 'month' : 'months'}</p>
+                  </div>
+                </div>
+
                 <div>
                   <label htmlFor="modal_amount" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
                     Loan Amount (K) *
