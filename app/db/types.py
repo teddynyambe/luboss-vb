@@ -1,17 +1,26 @@
 """Custom SQLAlchemy types."""
 import json
-from sqlalchemy.types import UserDefinedType, Text
+from sqlalchemy import func
+from sqlalchemy.types import UserDefinedType
 
 
 class MySQLVector(UserDefinedType):
-    """Store vector embeddings as JSON text (compatible with all MySQL versions)."""
+    """Store vector embeddings using MySQL native VECTOR type."""
     cache_ok = True
 
     def __init__(self, dim: int):
         self.dim = dim
 
     def get_col_spec(self, **kw) -> str:
-        return "LONGTEXT"
+        return f"VECTOR({self.dim})"
+
+    def bind_expression(self, bindvalue):
+        """Wrap bound value with STRING_TO_VECTOR() for INSERT/UPDATE."""
+        return func.STRING_TO_VECTOR(bindvalue)
+
+    def column_expression(self, col):
+        """Wrap column with VECTOR_TO_STRING() for SELECT."""
+        return func.VECTOR_TO_STRING(col)
 
     def bind_processor(self, dialect):
         def process(value):
