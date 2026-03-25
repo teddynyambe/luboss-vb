@@ -196,6 +196,10 @@ export default function TreasurerDashboard() {
   const [declarationsReport, setDeclarationsReport] = useState<DeclarationReportMember[]>([]);
   const [loansReport, setLoansReport] = useState<LoanReportItem[]>([]);
   const [loadingReports, setLoadingReports] = useState(false);
+  const [totalDeclared, setTotalDeclared] = useState(0);
+  const [totalDeposited, setTotalDeposited] = useState(0);
+  const [totalLoansApplied, setTotalLoansApplied] = useState(0);
+  const [totalLoansDisbursed, setTotalLoansDisbursed] = useState(0);
   const [showDeclarationDetailsModal, setShowDeclarationDetailsModal] = useState(false);
   const [declarationDetails, setDeclarationDetails] = useState<DeclarationDetailsReport | null>(null);
   const [loadingDeclarationDetails, setLoadingDeclarationDetails] = useState(false);
@@ -246,16 +250,20 @@ export default function TreasurerDashboard() {
     setLoadingReports(true);
     try {
       const [declarationsRes, loansRes, stmtsRes] = await Promise.all([
-        api.get<{ month: string; members: DeclarationReportMember[] }>(`/api/treasurer/reports/declarations?month=${selectedReportMonth}`),
-        api.get<{ loans: LoanReportItem[] }>(`/api/treasurer/reports/loans?month=${selectedReportMonth}`),
+        api.get<{ month: string; members: DeclarationReportMember[]; total_declared: number; total_deposited: number }>(`/api/treasurer/reports/declarations?month=${selectedReportMonth}`),
+        api.get<{ loans: LoanReportItem[]; total_applied: number; total_disbursed: number }>(`/api/treasurer/reports/loans?month=${selectedReportMonth}`),
         api.get<{ statements: BankStatementItem[] }>('/api/treasurer/bank-statements'),
       ]);
 
       if (declarationsRes.data) {
         setDeclarationsReport(declarationsRes.data.members);
+        setTotalDeclared(declarationsRes.data.total_declared ?? 0);
+        setTotalDeposited(declarationsRes.data.total_deposited ?? 0);
       }
       if (loansRes.data) {
         setLoansReport(loansRes.data.loans);
+        setTotalLoansApplied(loansRes.data.total_applied ?? 0);
+        setTotalLoansDisbursed(loansRes.data.total_disbursed ?? 0);
       }
       if (stmtsRes.data) {
         setBankStatements(stmtsRes.data.statements);
@@ -1029,6 +1037,16 @@ export default function TreasurerDashboard() {
                           Copy
                         </button>
                       </div>
+                      <div className="flex gap-4 mb-3 text-xs">
+                        <div className="flex-1 bg-blue-50 rounded-lg px-3 py-2">
+                          <span className="text-blue-600">Total Declared</span>
+                          <p className="text-blue-900 font-bold text-sm">K{totalDeclared.toLocaleString()}</p>
+                        </div>
+                        <div className="flex-1 bg-green-50 rounded-lg px-3 py-2">
+                          <span className="text-green-600">Total Deposited</span>
+                          <p className="text-green-900 font-bold text-sm">K{totalDeposited.toLocaleString()}</p>
+                        </div>
+                      </div>
                       <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
                         {declarationsReport.length === 0 ? (
                           <p className="text-blue-700 text-center py-4">No members for this month</p>
@@ -1069,6 +1087,16 @@ export default function TreasurerDashboard() {
                         >
                           Copy
                         </button>
+                      </div>
+                      <div className="flex gap-4 mb-3 text-xs">
+                        <div className="flex-1 bg-green-50 rounded-lg px-3 py-2">
+                          <span className="text-green-600">Total Applied</span>
+                          <p className="text-green-900 font-bold text-sm">K{totalLoansApplied.toLocaleString()}</p>
+                        </div>
+                        <div className="flex-1 bg-green-50 rounded-lg px-3 py-2">
+                          <span className="text-green-600">Total Disbursed</span>
+                          <p className="text-green-900 font-bold text-sm">K{totalLoansDisbursed.toLocaleString()}</p>
+                        </div>
                       </div>
                       <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
                         {loansReport.length === 0 ? (

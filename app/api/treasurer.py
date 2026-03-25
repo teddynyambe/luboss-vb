@@ -1153,10 +1153,15 @@ def get_declarations_report(
     
     # Sort by surname (last word of name)
     result.sort(key=lambda x: (x["member_name"].rsplit(" ", 1)[-1].lower(), x["member_name"].rsplit(" ", 1)[0].lower()))
-    
+
+    total_declared = sum(m["declaration_amount"] or 0 for m in result)
+    total_deposited = sum(m["declaration_amount"] or 0 for m in result if m["is_paid"])
+
     return {
         "month": target_date.isoformat(),
-        "members": result
+        "members": result,
+        "total_declared": total_declared,
+        "total_deposited": total_deposited,
     }
 
 
@@ -1332,7 +1337,14 @@ def get_loans_report(
 
     result.sort(key=lambda x: (x["member_name"].rsplit(" ", 1)[-1].lower(), x["member_name"].rsplit(" ", 1)[0].lower()))
 
-    return {"loans": result}
+    total_applied = sum(item["loan_amount"] for item in result)
+    total_disbursed = sum(item["loan_amount"] for item in result if item["is_disbursed"])
+
+    return {
+        "loans": result,
+        "total_applied": total_applied,
+        "total_disbursed": total_disbursed,
+    }
 
 
 # ---------------------------------------------------------------------------
