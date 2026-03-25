@@ -1274,6 +1274,9 @@ def get_loans_report(
         extract("month", Loan.disbursement_date) == target_month,
     ).order_by(Loan.disbursement_date.asc()).all()
 
+    # Track member IDs that already have disbursed loans to avoid duplicates
+    disbursed_member_ids = set()
+
     result = []
     for loan in loans:
         member = db.query(MemberProfile).filter(MemberProfile.id == loan.member_id).first()
@@ -1285,6 +1288,7 @@ def get_loans_report(
         if not member_name:
             continue
 
+        disbursed_member_ids.add(loan.member_id)
         result.append({
             "loan_id": str(loan.id),
             "member_id": str(loan.member_id),
@@ -1293,6 +1297,37 @@ def get_loans_report(
             "is_approved": True,
             "is_disbursed": True,
             "is_paid": True,
+        })
+
+    # Also include pending loan applications for the target month that haven't been disbursed yet
+    pending_apps = db.query(LoanApplication).filter(
+        LoanApplication.status == LoanApplicationStatus.PENDING,
+        extract("year", LoanApplication.application_date) == target_year,
+        extract("month", LoanApplication.application_date) == target_month,
+    ).order_by(LoanApplication.application_date.asc()).all()
+
+    for app in pending_apps:
+        # Skip if this member already has a disbursed loan this month
+        if app.member_id in disbursed_member_ids:
+            continue
+
+        member = db.query(MemberProfile).filter(MemberProfile.id == app.member_id).first()
+        user = db.query(UserModel).filter(UserModel.id == member.user_id).first() if member else None
+        if not user:
+            continue
+
+        member_name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
+        if not member_name:
+            continue
+
+        result.append({
+            "loan_id": str(app.id),
+            "member_id": str(app.member_id),
+            "member_name": member_name,
+            "loan_amount": float(app.amount),
+            "is_approved": False,
+            "is_disbursed": False,
+            "is_paid": False,
         })
 
     result.sort(key=lambda x: (x["member_name"].rsplit(" ", 1)[-1].lower(), x["member_name"].rsplit(" ", 1)[0].lower()))
