@@ -14,7 +14,15 @@ interface ChatMessage {
 }
 
 function renderMarkdown(text: string) {
-  const lines = text.split('\n');
+  // Strip HTML tags and clean up formatting artifacts from the LLM
+  const cleaned = text
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\|[-]+\|[-]+\|/g, '')  // Remove markdown table separator rows
+    .replace(/^\|(.+)\|$/gm, (_, content) => {  // Convert table rows to plain text
+      return content.split('|').map((cell: string) => cell.trim()).filter(Boolean).join(' — ');
+    });
+  const lines = cleaned.split('\n');
   const elements: ReactElement[] = [];
   let currentList: ReactElement[] = [];
   let listType: 'ul' | 'ol' | null = null;
