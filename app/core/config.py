@@ -29,7 +29,9 @@ class Settings(BaseSettings):
     REPLY_TO_EMAIL: Optional[str] = None
     
     # AI
-    LLM_PROVIDER: str = "groq"
+    LLM_PROVIDER: str = "groq"  # "groq", "openai", or "local"
+    LLM_BASE_URL: Optional[str] = None  # For local models, e.g. "http://localhost:11434/v1"
+    LLM_API_KEY: Optional[str] = None  # API key for local/custom providers (use "ollama" for Ollama)
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     EMBEDDING_MODEL: str = "text-embedding-3-small"

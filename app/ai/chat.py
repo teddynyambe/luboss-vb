@@ -2,12 +2,29 @@
 from sqlalchemy.orm import Session
 from uuid import UUID
 from typing import Dict, List, Optional
-from groq import Groq
 import json
 import re
 from app.core.config import settings
 from app.ai.tool_registry import get_tool_schemas, execute_tool
 from app.models.ai import AIAuditLog
+
+
+def _get_llm_client():
+    """Create an LLM client based on the configured provider."""
+    provider = (settings.LLM_PROVIDER or "groq").lower()
+
+    if provider == "local" and settings.LLM_BASE_URL:
+        from openai import OpenAI
+        return OpenAI(
+            base_url=settings.LLM_BASE_URL,
+            api_key=settings.LLM_API_KEY or "not-needed",
+        )
+    elif provider == "openai":
+        from openai import OpenAI
+        return OpenAI(api_key=settings.OPENAI_API_KEY)
+    else:
+        from groq import Groq
+        return Groq(api_key=settings.GROQ_API_KEY)
 
 
 def process_ai_query(
@@ -22,7 +39,7 @@ def process_ai_query(
     Process AI query with function calling - LLM dynamically selects which tools to use.
     Enforces constraints: rules/policies only + member's own account status.
     """
-    client = Groq(api_key=settings.GROQ_API_KEY)
+    client = _get_llm_client()
     tool_calls = []
     citations = []
     max_iterations = 3  # Prevent infinite loops
@@ -581,18 +598,21 @@ Your role is to assist members with:
         except:
             pass  # Ignore rollback errors
         
-        # Check if error is related to tool calling and provide a clearer message
+        # Return user-friendly messages instead of raw API errors
         error_message = str(e)
-        if "tool" in error_message.lower() and ("400" in error_message or "invalid_request" in error_message.lower()):
-            # Model tried to use tools when they're disabled
-            return {
-                "response": "I apologize, but I encountered an issue while processing your request. Please try rephrasing your question, and I'll answer based on the information available.",
-                "citations": None,
-                "tool_calls": tool_calls
-            }
-        
+        error_lower = error_message.lower()
+
+        if "rate_limit" in error_lower or "413" in error_message or "429" in error_message or "too large" in error_lower or "tokens per minute" in error_lower:
+            friendly = "I'm currently experiencing high demand. Please try again in a moment, or try a shorter question."
+        elif "tool" in error_lower and ("400" in error_message or "invalid_request" in error_lower):
+            friendly = "I apologize, but I encountered an issue while processing your request. Please try rephrasing your question."
+        else:
+            friendly = "I'm sorry, I'm having trouble processing your request right now. Please try again shortly."
+            import logging
+            logging.error(f"AI chat error: {error_message}")
+
         return {
-            "response": f"Error processing query: {error_message}",
+            "response": friendly,
             "citations": None,
             "tool_calls": tool_calls
         }
