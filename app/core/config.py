@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
     EMBEDDING_MODEL: str = "text-embedding-3-small"
-    LLM_MODEL: str = "llama3-groq-70b-8192-tool-use"
+    LLM_MODEL: str = "llama-3.3-70b-versatile"
     
     # Feature Flags
     ENABLE_AI_CHAT: bool = True
