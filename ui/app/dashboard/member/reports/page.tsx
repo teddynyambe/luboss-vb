@@ -10,11 +10,13 @@ interface MemberRow {
   member_id?: string;
   name: string;
   savings_bf: number;
-  social_admin_bf: number;
+  social_fund_bf: number;
+  admin_fund_bf: number;
   interest_bf: number;
   loan_bf: number;
   savings_declared: number;
-  social_admin_declared: number;
+  social_fund_declared: number;
+  admin_fund_declared: number;
   penalty: number;
   loan_repayment: number;
   interest_on_loan_paid: number;
@@ -32,12 +34,14 @@ interface GroupSummary {
 
 const COLS: { key: keyof MemberRow; label: string; title: string }[] = [
   { key: 'savings_bf',             label: 'Savings B/F',       title: 'Savings brought forward from previous month' },
-  { key: 'social_admin_bf',        label: 'Social & Admin B/F',title: 'Social & Admin fund accumulated to date' },
+  { key: 'social_fund_bf',         label: 'Social Fund B/F',   title: 'Social fund accumulated to date' },
+  { key: 'admin_fund_bf',          label: 'Admin Fund B/F',    title: 'Admin fund accumulated to date' },
   { key: 'interest_bf',            label: 'Interest B/F',      title: 'Proportional interest earned in previous months' },
   { key: 'loan_bf',                label: 'Loan B/F',          title: 'Outstanding loan balance at month start' },
   { key: 'savings_declared',       label: 'Savings Amount',    title: 'Savings amount declared this month' },
-  { key: 'social_admin_declared',  label: 'Social & Admin',    title: 'Social & Admin contribution declared this month' },
-  { key: 'penalty',                label: 'Penalty',           title: 'Approved penalties this month' },
+  { key: 'social_fund_declared',   label: 'Social Fund',       title: 'Social fund contribution declared this month' },
+  { key: 'admin_fund_declared',    label: 'Admin Fund',        title: 'Admin fund contribution declared this month' },
+  { key: 'penalty',                label: 'Penalty',           title: 'Penalties charged this month' },
   { key: 'loan_repayment',         label: 'Loan Repayment',    title: 'Principal repaid this month' },
   { key: 'interest_on_loan_paid',  label: 'Interest Paid',     title: 'Loan interest paid this month' },
   { key: 'total_deposited',        label: 'Declaration Amount', title: 'Total declaration including Savings, Social Fund, Admin Fund, Penalty, Interest on Loan, and Loan Repayment' },
@@ -156,13 +160,13 @@ export default function GroupReportPage() {
                     <th className="sticky left-7 z-10 bg-blue-700 px-3 py-2 text-left font-bold border-r border-blue-500 min-w-[140px]" rowSpan={2}>
                       Name
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={4}>
+                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={5}>
                       Brought Forward
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={5}>
+                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={7}>
                       This Month
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold" colSpan={4}>
+                    <th className="px-2 py-1.5 text-center font-semibold" colSpan={3}>
                       Month End
                     </th>
                   </tr>

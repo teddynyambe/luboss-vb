@@ -2696,8 +2696,8 @@ def get_group_summary_report(
         name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
 
         savings_bf      = _member_val(savings_accs, sav_bf_map,    member.id)
-        social_admin_bf = (_member_val(social_accs, social_bf_map, member.id) +
-                           _member_val(admin_accs,  admin_bf_map,  member.id))
+        social_fund_bf  = _member_val(social_accs, social_bf_map, member.id)
+        admin_fund_bf   = _member_val(admin_accs,  admin_bf_map,  member.id)
 
         interest_bf = round((savings_bf / total_savings_bf) * total_interest_bf, 2) \
             if total_savings_bf > 0 else 0.0
@@ -2707,8 +2707,8 @@ def get_group_summary_report(
 
         decl = declarations.get(mid)
         savings_declared      = float(decl.declared_savings_amount or 0) if decl else 0.0
-        social_admin_declared = (float(decl.declared_social_fund or 0) +
-                                 float(decl.declared_admin_fund   or 0)) if decl else 0.0
+        social_fund_declared  = float(decl.declared_social_fund or 0) if decl else 0.0
+        admin_fund_declared   = float(decl.declared_admin_fund  or 0) if decl else 0.0
 
         penalty_total = sum(
             float(penalty_types_map[str(p.penalty_type_id)].fee_amount)
@@ -2737,11 +2737,13 @@ def get_group_summary_report(
             "member_id":                str(member.id),
             "name":                     name,
             "savings_bf":               round(savings_bf, 2),
-            "social_admin_bf":          round(social_admin_bf, 2),
+            "social_fund_bf":           round(social_fund_bf, 2),
+            "admin_fund_bf":            round(admin_fund_bf, 2),
             "interest_bf":              round(interest_bf, 2),
             "loan_bf":                  round(loan_bf, 2),
             "savings_declared":         round(savings_declared, 2),
-            "social_admin_declared":    round(social_admin_declared, 2),
+            "social_fund_declared":     round(social_fund_declared, 2),
+            "admin_fund_declared":      round(admin_fund_declared, 2),
             "penalty":                  round(penalty_total, 2),
             "loan_repayment":           round(repayment_principal, 2),
             "interest_on_loan_paid":    round(repayment_interest, 2),
@@ -2754,8 +2756,8 @@ def get_group_summary_report(
     rows.sort(key=lambda x: (x["name"].rsplit(" ", 1)[-1].lower(), x["name"].rsplit(" ", 1)[0].lower()))
 
     num_keys = [
-        "savings_bf", "social_admin_bf", "interest_bf", "loan_bf",
-        "savings_declared", "social_admin_declared", "penalty",
+        "savings_bf", "social_fund_bf", "admin_fund_bf", "interest_bf", "loan_bf",
+        "savings_declared", "social_fund_declared", "admin_fund_declared", "penalty",
         "loan_repayment", "interest_on_loan_paid", "total_deposited",
         "interest_earned", "loan_applied", "interest_on_loan_applied",
     ]
