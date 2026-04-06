@@ -65,3 +65,4 @@ alembic/__pycache__/
 *.swp
 # ssh
 *.sh
+CLAUDE.md
