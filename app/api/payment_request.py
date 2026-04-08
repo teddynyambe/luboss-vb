@@ -92,18 +92,64 @@ def get_account_balances(
     current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
 ):
-    """Return current balances for the fund accounts used as payment sources."""
-    codes = ["ADMIN_FUND", "SOCIAL_FUND", "BANK_CASH"]
-    result = {}
-    for code in codes:
-        acc = db.query(LedgerAccount).filter(
-            LedgerAccount.account_code == code,
-            LedgerAccount.member_id.is_(None),
+    """Return current balances for the fund accounts used as payment sources.
+
+    Social Fund / Admin Fund: summed from all member-specific accounts
+    (MEM_SOC_*, MEM_ADM_*) which track actual member contributions.
+    Bank Cash: total member savings + interest earned (the pool available
+    for end-of-year payouts), not the raw bank account balance.
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    from sqlalchemy import func as sqlfunc
+
+    result: dict = {}
+
+    # Helper: net balance (credits - debits) across a set of accounts,
+    # excluding reversed journal entries.  This gives "contributed minus paid out".
+    def _net_credits(account_ids: list) -> Decimal:
+        if not account_ids:
+            return Decimal("0")
+        row = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(JournalLine.credit_amount), 0),
+            sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
+        ).join(JournalEntry).filter(
+            JournalLine.ledger_account_id.in_(account_ids),
+            JournalEntry.reversed_by.is_(None),
         ).first()
-        if acc:
-            result[code] = float(get_account_balance(db, acc.id))
-        else:
-            result[code] = 0.0
+        return Decimal(str(row[0])) - Decimal(str(row[1]))
+
+    # ── Social Fund: net across all member social-fund accounts ──────────
+    # Credits = member contributions received, Debits = payments made out
+    social_ids = [a.id for a in db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("MEM_SOC_%"),
+        LedgerAccount.member_id.isnot(None),
+    ).all()]
+    result["SOCIAL_FUND"] = float(_net_credits(social_ids))
+
+    # ── Admin Fund: net across all member admin-fund accounts ────────────
+    admin_ids = [a.id for a in db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("MEM_ADM_%"),
+        LedgerAccount.member_id.isnot(None),
+    ).all()]
+    result["ADMIN_FUND"] = float(_net_credits(admin_ids))
+
+    # ── Savings + Interest pool (for end-of-year payouts) ────────────────
+    # Net savings = credits - debits on all MEM_SAV_* (contributions minus payouts)
+    savings_ids = [a.id for a in db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("MEM_SAV_%"),
+        LedgerAccount.member_id.isnot(None),
+    ).all()]
+    savings_net = _net_credits(savings_ids)
+
+    # Net interest = balance of INTEREST_INCOME (income account: credits - debits)
+    interest_acc = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME",
+        LedgerAccount.member_id.is_(None),
+    ).first()
+    interest_net = get_account_balance(db, interest_acc.id) if interest_acc else Decimal("0")
+
+    result["BANK_CASH"] = float(savings_net + interest_net)
+
     return result
 
 
