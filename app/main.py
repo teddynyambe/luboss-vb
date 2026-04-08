@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api import auth, admin, chairman, treasurer, compliance, member, ai
+from app.api import auth, admin, chairman, treasurer, compliance, member, ai, payment_request
 from app.services.scheduler import start_scheduler, stop_scheduler
 import logging
 
@@ -50,6 +50,7 @@ app.include_router(treasurer.router)
 app.include_router(compliance.router)
 app.include_router(member.router)
 app.include_router(ai.router)
+app.include_router(payment_request.router)
 
 
 @app.get("/")

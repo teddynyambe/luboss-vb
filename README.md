@@ -310,7 +310,47 @@ When fully paid (principal + interest both covered):
 - When the Treasurer views the active loans list
 - When the Member views their current loan
 
-### 5. Cycle Management
+### 5. Payment Requests & Expenses
+
+The system supports a 3-step approval workflow for all payments and disbursements:
+
+```
+Step 1 — Initiation (Vice-Chairman or Chairman):
+  → Creates a payment request with:
+     - Amount
+     - Description
+     - Category (Committee Payment, Social Support, Admin Cost, End-of-Year Payout)
+     - Beneficiary (person, entity, or member for payouts)
+  → Source account is automatically determined by category
+
+Step 2 — Approval (Chairman):
+  → Reviews the request
+  → Approves → proceeds to Treasurer
+  → OR Rejects → returns with reason
+
+Step 3 — Execution (Treasurer):
+  → Verifies sufficient balance in source account
+  → Marks payment as executed
+  → Journal entry posted (debit source fund, credit bank cash)
+  → Records payment reference (bank ref, receipt number)
+```
+
+**Payment Categories and Source Accounts:**
+
+| Category | Source Account | Use Case |
+|---|---|---|
+| Committee Payment | Admin Fund | Honoraria, committee expenses |
+| Social Support | Social Fund | Funerals, member emergencies |
+| Administrative Cost | Admin Fund | Hosting, subscriptions, operational costs |
+| End-of-Year Payout | Member Savings | Annual savings + interest distribution |
+
+**Key rules:**
+- Source accounts cannot be overdrawn — balance is validated before execution
+- End-of-year payouts debit the specific member's savings account
+- Full audit trail: who initiated, approved, and executed each payment
+- Only the initiator can cancel a pending request
+
+### 6. Cycle Management
 
 A cycle represents one financial year for the group.
 
@@ -331,7 +371,7 @@ Chairman assigns Credit Ratings to members
 Chairman can close the Cycle when the year ends
 ```
 
-### 6. Credit Rating and Loan Eligibility
+### 7. Credit Rating and Loan Eligibility
 
 ```
 Chairman assigns a Credit Rating tier to each member for the cycle
@@ -345,7 +385,7 @@ When a member applies for a loan:
   Interest = Loan Amount × Rate (flat, not compounding)
 ```
 
-### 7. Penalty Management
+### 8. Penalty Management
 
 ```
 Penalties can be applied:
@@ -357,7 +397,7 @@ Penalties go through:
   Created → Approved by Treasurer → Paid (via declaration)
 ```
 
-### 8. Reconciliation (Backdating)
+### 9. Reconciliation (Backdating)
 
 The Chairman or Treasurer can enter historical data for any past month.
 
@@ -371,7 +411,7 @@ Select a member + month → Load existing data (if any)
 Declarations can also be moved to a different month if entered incorrectly.
 ```
 
-### 9. AI Assistant
+### 10. AI Assistant
 
 ```
 Members can chat with the AI assistant to:
@@ -384,7 +424,7 @@ Chairman and Treasurer get additional access:
   → Look up member personal details (NRC, bank info, address)
 ```
 
-### 10. Automated Background Tasks
+### 11. Automated Background Tasks
 
 The system runs automatic tasks on two schedules:
 
@@ -461,6 +501,15 @@ The system runs automatic tasks on two schedules:
 ### Admin
 - `GET /api/admin/settings` - Get system settings
 - `PUT /api/admin/settings` - Update system settings
+
+### Payment Requests
+- `POST /api/payment-requests/` - Create payment request (Vice-Chairman, Chairman)
+- `GET /api/payment-requests/` - List payment requests with optional status filter
+- `GET /api/payment-requests/{id}` - Get payment request detail
+- `PUT /api/payment-requests/{id}/approve` - Chairman approves
+- `PUT /api/payment-requests/{id}/reject` - Chairman rejects with reason
+- `PUT /api/payment-requests/{id}/execute` - Treasurer executes and posts journal entry
+- `PUT /api/payment-requests/{id}/cancel` - Cancel pending request (initiator only)
 
 ### AI Chat
 - `POST /api/ai/chat` - AI chat endpoint (RAG with constitution/policies)

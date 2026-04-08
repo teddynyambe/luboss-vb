@@ -37,6 +37,7 @@ from app.models.policy import (
 )
 from app.models.system import SystemSettings, VBGroup, CommitteeAssignment, ConstitutionDocumentVersion
 from app.models.ai import DocumentChunk, DocumentEmbedding, AIAuditLog
+from app.models.payment_request import PaymentRequest, PaymentRequestStatus, PaymentCategory
 from app.models.migration import (
     IdMapUser,
     IdMapMember,
@@ -89,6 +90,9 @@ __all__ = [
     "DocumentChunk",
     "DocumentEmbedding",
     "AIAuditLog",
+    "PaymentRequest",
+    "PaymentRequestStatus",
+    "PaymentCategory",
     "IdMapUser",
     "IdMapMember",
     "IdMapLoan",

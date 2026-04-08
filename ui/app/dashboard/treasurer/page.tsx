@@ -147,6 +147,24 @@ export default function TreasurerDashboard() {
   const [bankStmtDesc, setBankStmtDesc] = useState('');
   const [uploadingStmt, setUploadingStmt] = useState(false);
 
+  // Payment Requests state
+  interface ApprovedPaymentRequest {
+    id: string;
+    amount: number;
+    description: string;
+    category: string;
+    source_account_code: string;
+    beneficiary_name: string;
+    initiator_name?: string;
+    approver_name?: string;
+    approved_at?: string;
+    status: string;
+  }
+  const [approvedPayments, setApprovedPayments] = useState<ApprovedPaymentRequest[]>([]);
+  const [executingPaymentId, setExecutingPaymentId] = useState<string | null>(null);
+  const [paymentReference, setPaymentReference] = useState('');
+  const [executingPayment, setExecutingPayment] = useState(false);
+
   // Reports state
   interface DeclarationReportMember {
     member_id: string;
@@ -228,11 +246,12 @@ export default function TreasurerDashboard() {
   };
 
   const loadData = async () => {
-    const [depositsRes, penaltiesRes, loansRes, activeLoansRes] = await Promise.all([
+    const [depositsRes, penaltiesRes, loansRes, activeLoansRes, paymentsRes] = await Promise.all([
       api.get<PendingDeposit[]>('/api/treasurer/deposits/pending'),
       api.get<PendingPenalty[]>('/api/treasurer/penalties/pending'),
       api.get<PendingLoanApplication[]>('/api/treasurer/loans/pending'),
       api.get<ActiveLoan[]>('/api/treasurer/loans/active?loan_filter=active'),
+      api.get<ApprovedPaymentRequest[]>('/api/payment-requests/?status=approved'),
     ]);
 
     if (depositsRes.data) setPendingDeposits(depositsRes.data);
@@ -243,6 +262,7 @@ export default function TreasurerDashboard() {
     } else if (activeLoansRes.error) {
       console.error('Active loans fetch error:', activeLoansRes.error);
     }
+    if (paymentsRes.data) setApprovedPayments(paymentsRes.data);
     setLoading(false);
   };
 
@@ -1129,6 +1149,96 @@ export default function TreasurerDashboard() {
                             </div>
                           ))
                         )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Approved Payment Requests */}
+                {approvedPayments.length > 0 && (
+                  <div className="bg-white border-2 border-green-200 rounded-lg p-4">
+                    <h3 className="text-base font-bold text-green-900 mb-3">
+                      Approved Payment Requests ({approvedPayments.length})
+                    </h3>
+                    <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                      {approvedPayments.map(pr => (
+                        <div key={pr.id} className="border border-green-100 rounded-lg p-3 bg-green-50">
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1">
+                                <span className="text-base font-bold text-green-900">
+                                  K{pr.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                </span>
+                                <span className="text-xs bg-green-200 text-green-800 px-2 py-0.5 rounded-full">
+                                  {pr.category.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                </span>
+                              </div>
+                              <p className="text-sm text-green-800">{pr.description}</p>
+                              <p className="text-xs text-green-600 mt-0.5">
+                                To: <span className="font-semibold">{pr.beneficiary_name}</span>
+                                {' · '}From: {pr.source_account_code.replace(/_/g, ' ')}
+                              </p>
+                              <p className="text-xs text-green-500">
+                                Approved by {pr.approver_name || 'Chairman'}
+                                {pr.approved_at && ` on ${new Date(pr.approved_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}`}
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => { setExecutingPaymentId(pr.id); setPaymentReference(''); }}
+                              className="px-3 py-1.5 bg-green-600 text-white rounded-lg text-xs font-semibold hover:bg-green-700 transition-colors shrink-0"
+                            >
+                              Execute
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Execute Payment Modal */}
+                {executingPaymentId && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+                    <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
+                      <h3 className="text-lg font-bold text-green-900 mb-3">Execute Payment</h3>
+                      <p className="text-sm text-blue-700 mb-4">
+                        This will deduct the amount from the source account and record the journal entry.
+                      </p>
+                      <div className="mb-4">
+                        <label className="block text-sm font-semibold text-blue-900 mb-1">Payment Reference (optional)</label>
+                        <input
+                          type="text"
+                          value={paymentReference}
+                          onChange={e => setPaymentReference(e.target.value)}
+                          className="w-full"
+                          placeholder="Bank reference, receipt number..."
+                          autoFocus
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          onClick={() => setExecutingPaymentId(null)}
+                          className="px-4 py-2 bg-gray-200 rounded-lg text-sm font-semibold"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          disabled={executingPayment}
+                          onClick={async () => {
+                            setExecutingPayment(true);
+                            const res = await api.put(`/api/payment-requests/${executingPaymentId}/execute`, {
+                              payment_reference: paymentReference || null,
+                            });
+                            setExecutingPayment(false);
+                            if (res.data) {
+                              setExecutingPaymentId(null);
+                              loadData();
+                            }
+                          }}
+                          className="px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        >
+                          {executingPayment ? 'Processing...' : 'Confirm & Execute'}
+                        </button>
                       </div>
                     </div>
                   </div>
