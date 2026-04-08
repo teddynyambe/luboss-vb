@@ -67,7 +67,7 @@ function fmtDate(s: string) {
 
 export default function PaymentRequestsPage() {
   const { user } = useAuth();
-  const isChairman = user?.role === 'chairman';
+  const isChairman = user?.roles?.some(r => r.toLowerCase() === 'chairman') ?? false;
 
   const [requests, setRequests] = useState<PaymentRequest[]>([]);
   const [loading, setLoading] = useState(true);
