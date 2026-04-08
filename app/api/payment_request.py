@@ -104,51 +104,85 @@ def get_account_balances(
 
     result: dict = {}
 
-    # Helper: net balance (credits - debits) across a set of accounts,
-    # excluding reversed journal entries.  This gives "contributed minus paid out".
-    def _net_credits(account_ids: list) -> Decimal:
+    # Helper: sum only credits from deposit approvals on member accounts.
+    # Debits on member accounts are "required amount" bookkeeping, not cash.
+    # Actual cash contributions = credits where source_type = 'deposit_approval'.
+    def _total_contributed(account_ids: list) -> Decimal:
         if not account_ids:
             return Decimal("0")
-        row = db.query(
+        val = db.query(
             sqlfunc.coalesce(sqlfunc.sum(JournalLine.credit_amount), 0),
-            sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
         ).join(JournalEntry).filter(
             JournalLine.ledger_account_id.in_(account_ids),
+            JournalEntry.source_type == "deposit_approval",
             JournalEntry.reversed_by.is_(None),
-        ).first()
-        return Decimal(str(row[0])) - Decimal(str(row[1]))
+        ).scalar()
+        return Decimal(str(val))
 
-    # ── Social Fund: net across all member social-fund accounts ──────────
-    # Credits = member contributions received, Debits = payments made out
+    # Helper: sum debits on org-level fund account from executed payment requests.
+    def _total_spent(account_code: str) -> Decimal:
+        org_acc = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == account_code,
+            LedgerAccount.member_id.is_(None),
+        ).first()
+        if not org_acc:
+            return Decimal("0")
+        val = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
+        ).join(JournalEntry).filter(
+            JournalLine.ledger_account_id == org_acc.id,
+            JournalEntry.source_type == "payment_request",
+            JournalEntry.reversed_by.is_(None),
+        ).scalar()
+        return Decimal(str(val))
+
+    # ── Social Fund: contributed by members minus paid out ───────────────
     social_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_SOC_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
-    result["SOCIAL_FUND"] = float(_net_credits(social_ids))
+    result["SOCIAL_FUND"] = float(
+        _total_contributed(social_ids) - _total_spent("SOCIAL_FUND")
+    )
 
-    # ── Admin Fund: net across all member admin-fund accounts ────────────
+    # ── Admin Fund: contributed by members minus paid out ────────────────
     admin_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_ADM_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
-    result["ADMIN_FUND"] = float(_net_credits(admin_ids))
+    result["ADMIN_FUND"] = float(
+        _total_contributed(admin_ids) - _total_spent("ADMIN_FUND")
+    )
 
     # ── Savings + Interest pool (for end-of-year payouts) ────────────────
-    # Net savings = credits - debits on all MEM_SAV_* (contributions minus payouts)
     savings_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_SAV_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
-    savings_net = _net_credits(savings_ids)
+    savings_contributed = _total_contributed(savings_ids)
 
-    # Net interest = balance of INTEREST_INCOME (income account: credits - debits)
+    # Subtract any savings already paid out via payment requests
+    savings_spent = Decimal("0")
+    # Payouts debit member savings accounts directly (not org-level),
+    # so sum debits from payment_request source on MEM_SAV_* accounts
+    if savings_ids:
+        val = db.query(
+            sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
+        ).join(JournalEntry).filter(
+            JournalLine.ledger_account_id.in_(savings_ids),
+            JournalEntry.source_type == "payment_request",
+            JournalEntry.reversed_by.is_(None),
+        ).scalar()
+        savings_spent = Decimal(str(val))
+
+    # Interest earned (income account balance)
     interest_acc = db.query(LedgerAccount).filter(
         LedgerAccount.account_code == "INTEREST_INCOME",
         LedgerAccount.member_id.is_(None),
     ).first()
     interest_net = get_account_balance(db, interest_acc.id) if interest_acc else Decimal("0")
 
-    result["BANK_CASH"] = float(savings_net + interest_net)
+    result["BANK_CASH"] = float(savings_contributed - savings_spent + interest_net)
 
     return result
 
