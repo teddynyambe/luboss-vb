@@ -102,12 +102,14 @@ def get_account_balances(
     from app.models.ledger import JournalLine, JournalEntry
     from sqlalchemy import func as sqlfunc
 
+    from app.models.ledger import JournalLine, JournalEntry
+    from app.models.transaction import Loan
+    from sqlalchemy import func as sqlfunc
+
     result: dict = {}
 
-    # Helper: sum only credits from deposit approvals on member accounts.
-    # Debits on member accounts are "required amount" bookkeeping, not cash.
-    # Actual cash contributions = credits where source_type = 'deposit_approval'.
-    def _total_contributed(account_ids: list) -> Decimal:
+    # Helper: sum credits from deposit approvals only (actual member payments).
+    def _deposit_credits(account_ids: list) -> Decimal:
         if not account_ids:
             return Decimal("0")
         val = db.query(
@@ -119,18 +121,14 @@ def get_account_balances(
         ).scalar()
         return Decimal(str(val))
 
-    # Helper: sum debits on org-level fund account from executed payment requests.
-    def _total_spent(account_code: str) -> Decimal:
-        org_acc = db.query(LedgerAccount).filter(
-            LedgerAccount.account_code == account_code,
-            LedgerAccount.member_id.is_(None),
-        ).first()
-        if not org_acc:
+    # Helper: sum debits from executed payment requests on given accounts.
+    def _payment_debits(account_ids: list) -> Decimal:
+        if not account_ids:
             return Decimal("0")
         val = db.query(
             sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
         ).join(JournalEntry).filter(
-            JournalLine.ledger_account_id == org_acc.id,
+            JournalLine.ledger_account_id.in_(account_ids),
             JournalEntry.source_type == "payment_request",
             JournalEntry.reversed_by.is_(None),
         ).scalar()
@@ -142,7 +140,7 @@ def get_account_balances(
         LedgerAccount.member_id.isnot(None),
     ).all()]
     result["SOCIAL_FUND"] = float(
-        _total_contributed(social_ids) - _total_spent("SOCIAL_FUND")
+        _deposit_credits(social_ids) - _payment_debits(social_ids)
     )
 
     # ── Admin Fund: contributed by members minus paid out ────────────────
@@ -151,38 +149,27 @@ def get_account_balances(
         LedgerAccount.member_id.isnot(None),
     ).all()]
     result["ADMIN_FUND"] = float(
-        _total_contributed(admin_ids) - _total_spent("ADMIN_FUND")
+        _deposit_credits(admin_ids) - _payment_debits(admin_ids)
     )
 
     # ── Savings + Interest pool (for end-of-year payouts) ────────────────
+
+    # Savings = deposit approval credits on MEM_SAV_* minus any payouts
     savings_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_SAV_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
-    savings_contributed = _total_contributed(savings_ids)
+    savings_total = _deposit_credits(savings_ids) - _payment_debits(savings_ids)
 
-    # Subtract any savings already paid out via payment requests
-    savings_spent = Decimal("0")
-    # Payouts debit member savings accounts directly (not org-level),
-    # so sum debits from payment_request source on MEM_SAV_* accounts
-    if savings_ids:
-        val = db.query(
-            sqlfunc.coalesce(sqlfunc.sum(JournalLine.debit_amount), 0),
-        ).join(JournalEntry).filter(
-            JournalLine.ledger_account_id.in_(savings_ids),
-            JournalEntry.source_type == "payment_request",
-            JournalEntry.reversed_by.is_(None),
-        ).scalar()
-        savings_spent = Decimal(str(val))
-
-    # Interest earned (income account balance)
+    # Interest = actual interest payments received (credits on INTEREST_INCOME
+    # from deposit approvals), not a theoretical calculation.
     interest_acc = db.query(LedgerAccount).filter(
         LedgerAccount.account_code == "INTEREST_INCOME",
         LedgerAccount.member_id.is_(None),
     ).first()
-    interest_net = get_account_balance(db, interest_acc.id) if interest_acc else Decimal("0")
+    interest_total = _deposit_credits([interest_acc.id]) if interest_acc else Decimal("0")
 
-    result["BANK_CASH"] = float(savings_contributed - savings_spent + interest_net)
+    result["BANK_CASH"] = float(savings_total + interest_total)
 
     return result
 
