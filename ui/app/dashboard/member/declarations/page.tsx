@@ -80,15 +80,53 @@ export default function DeclarationsPage() {
     interest_on_loan_due?: number;
   } | null>(null);
 
+  // ── Declaration window logic ─────────────────────────────────────────────
+  // Declarations for a given month are allowed between the 15th of that month
+  // and the 5th of the following month.
+  const getDeclarationWindow = () => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const day = today.getDate();
+    const month = today.getMonth(); // 0-indexed
+    const year = today.getFullYear();
+
+    // If today is between the 1st and 5th, the open window is for the *previous* month
+    if (day >= 1 && day <= 5) {
+      const prevMonth = month === 0 ? 11 : month - 1;
+      const prevYear  = month === 0 ? year - 1 : year;
+      const windowOpen  = new Date(prevYear, prevMonth, 15);
+      const windowClose = new Date(year, month, 5);
+      const effectiveMonth = `${prevYear}-${String(prevMonth + 1).padStart(2, '0')}-01`;
+      return { isOpen: true, effectiveMonth, windowOpen, windowClose };
+    }
+
+    // If today is between the 15th and end of month, the window is for the current month
+    if (day >= 15) {
+      const nextMonth = month === 11 ? 0 : month + 1;
+      const nextYear  = month === 11 ? year + 1 : year;
+      const windowOpen  = new Date(year, month, 15);
+      const windowClose = new Date(nextYear, nextMonth, 5);
+      const effectiveMonth = `${year}-${String(month + 1).padStart(2, '0')}-01`;
+      return { isOpen: true, effectiveMonth, windowOpen, windowClose };
+    }
+
+    // Between the 6th and 14th — no declaration window is open
+    // Show when the next window opens (15th of current month)
+    const nextWindowOpen = new Date(year, month, 15);
+    return { isOpen: false, effectiveMonth: null, windowOpen: nextWindowOpen, windowClose: null };
+  };
+
+  const declarationWindow = getDeclarationWindow();
+
   useEffect(() => {
     loadCycles();
     loadMemberStatus();
-    // Set current month as default (first day of current month)
-    const now = new Date();
-    const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
-    setEffectiveMonth(currentMonth);
-    setFormData({ ...formData, effective_month: currentMonth });
-    
+    // Set effective month based on the declaration window
+    if (declarationWindow.isOpen && declarationWindow.effectiveMonth) {
+      setEffectiveMonth(declarationWindow.effectiveMonth);
+      setFormData(prev => ({ ...prev, effective_month: declarationWindow.effectiveMonth! }));
+    }
+
     // Check if we're editing a specific declaration from URL params
     const checkEditParam = () => {
       if (typeof window !== 'undefined') {
@@ -105,7 +143,7 @@ export default function DeclarationsPage() {
         }
       }
     };
-    
+
     // Delay to ensure cycles are loaded first
     setTimeout(checkEditParam, 500);
     loadCurrentMonthDeclaration();
@@ -678,6 +716,17 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   </div>
                 ) : null}
 
+                {!declarationWindow.isOpen && !isEditing && (
+                  <div className="mb-4 p-4 bg-orange-50 border-2 border-orange-300 rounded-xl text-orange-800">
+                    <p className="font-semibold">Declaration window is currently closed</p>
+                    <p className="text-sm mt-1">
+                      The next declaration window opens on{' '}
+                      {declarationWindow.windowOpen.toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })}.
+                      Declarations can be made from the 15th of the month to the 5th of the following month.
+                    </p>
+                  </div>
+                )}
+
                 {(!currentMonthDeclaration || isEditing) && (
                 <form onSubmit={handleSubmit} className="space-y-4 md:space-y-6">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
@@ -710,19 +759,25 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
 
                 <div>
                   <label htmlFor="effective_month" className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
-                    Effective Month *
+                    Declaration Month *
                   </label>
                   <input
-                    type="date"
+                    type="text"
                     id="effective_month"
                     name="effective_month"
-                    value={effectiveMonth}
-                    onChange={handleChange}
-                    required
-                    className="w-full"
-                    placeholder="YYYY-MM-01"
+                    value={effectiveMonth ? new Date(effectiveMonth + 'T00:00:00').toLocaleDateString('en-US', { year: 'numeric', month: 'long' }) : ''}
+                    readOnly
+                    className="w-full bg-gray-100 cursor-not-allowed"
                   />
-                  <p className="mt-2 text-sm md:text-base text-blue-700">Select the first day of the month</p>
+                  {declarationWindow.isOpen && declarationWindow.windowClose ? (
+                    <p className="mt-2 text-sm md:text-base text-green-700">
+                      Declaration window open until {declarationWindow.windowClose.toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })}
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-sm md:text-base text-orange-600">
+                      Declaration window opens on the 15th of each month
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -900,7 +955,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                           </button>
                           <button
                             type="submit"
-                            disabled={loading}
+                            disabled={loading || !declarationWindow.isOpen}
                             className="btn-primary disabled:opacity-50"
                           >
                             {loading ? 'Updating...' : 'Update Declaration'}
@@ -916,7 +971,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                           </Link>
                           <button
                             type="submit"
-                            disabled={loading}
+                            disabled={loading || !declarationWindow.isOpen}
                             className="btn-primary disabled:opacity-50"
                           >
                             {loading ? 'Submitting...' : 'Submit Declaration'}

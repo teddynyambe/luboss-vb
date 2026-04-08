@@ -1,11 +1,14 @@
-"""Background scheduler for automatic loan closure and excess fund transfers."""
+"""Background scheduler for automatic loan closure, excess fund transfers,
+and activity-window email notifications."""
 
 import logging
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import List
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import or_
 
 from app.core.config import settings
@@ -179,6 +182,129 @@ def run_scheduled_tasks() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job 3: Activity-window email notifications
+# ---------------------------------------------------------------------------
+
+# Dealing dates each month:
+#   Declaration period:             15th – 5th of the next month
+#   Loan application period:        21st – 25th
+#   Deposit & loan repayment period: 25th – 5th of the next month
+#
+# On each opening day we email every active member once.
+
+_ACTIVITY_WINDOWS = [
+    {
+        "trigger_day": 15,
+        "name": "Declaration Period",
+        "description": (
+            "You can now submit your monthly declaration (savings, social fund, "
+            "admin fund, penalties, interest, and loan repayment)."
+        ),
+        "close_day_offset": "next_month_5",
+        "path": "/dashboard/member/declarations",
+    },
+    {
+        "trigger_day": 21,
+        "name": "Loan Application Period",
+        "description": (
+            "The loan application window is now open. "
+            "Check your eligibility and apply for a loan if needed."
+        ),
+        "close_day_offset": "same_month_25",
+        "path": "/dashboard/member",
+    },
+    {
+        "trigger_day": 25,
+        "name": "Deposit & Loan Repayment Period",
+        "description": (
+            "The deposit and loan repayment window is now open. "
+            "Please make your payments and upload proof of deposit."
+        ),
+        "close_day_offset": "next_month_5",
+        "path": "/dashboard/member/deposits",
+    },
+]
+
+
+def _closing_date(today: date, offset_type: str) -> date:
+    """Calculate the window closing date based on offset type."""
+    if offset_type == "next_month_5":
+        if today.month == 12:
+            return date(today.year + 1, 1, 5)
+        return date(today.year, today.month + 1, 5)
+    elif offset_type == "same_month_25":
+        return date(today.year, today.month, 25)
+    return today
+
+
+def send_activity_window_notifications() -> None:
+    """Check if today is a trigger day for any activity window and email all
+    active members.  Designed to run once daily (via cron trigger)."""
+    today = date.today()
+    day = today.day
+
+    windows_to_notify = [w for w in _ACTIVITY_WINDOWS if w["trigger_day"] == day]
+    if not windows_to_notify:
+        return
+
+    db = SessionLocal()
+    try:
+        # Fetch all active members with their user (for name + email)
+        members_users = (
+            db.query(MemberProfile, User)
+            .join(User, MemberProfile.user_id == User.id)
+            .filter(
+                MemberProfile.status == MemberStatus.ACTIVE,
+                User.role != UserRoleEnum.ADMIN,
+            )
+            .all()
+        )
+
+        if not members_users:
+            return
+
+        from app.core.email import send_activity_window_email
+        frontend_url = settings.FRONTEND_URL.rstrip("/")
+
+        for window in windows_to_notify:
+            close_date = _closing_date(today, window["close_day_offset"])
+            open_str = today.strftime("%d %B %Y")
+            close_str = close_date.strftime("%d %B %Y")
+            action_url = f"{frontend_url}{window['path']}"
+
+            sent = 0
+            for member, user in members_users:
+                if not user.email:
+                    continue
+                first_name = (user.first_name or "Member").strip().title()
+                try:
+                    send_activity_window_email(
+                        to_email=user.email,
+                        first_name=first_name,
+                        activity_name=window["name"],
+                        activity_description=window["description"],
+                        window_open_date=open_str,
+                        window_close_date=close_str,
+                        action_url=action_url,
+                    )
+                    sent += 1
+                except Exception:
+                    logger.exception(
+                        "Failed to send %s notification to %s",
+                        window["name"], user.email,
+                    )
+
+            logger.info(
+                "Activity window '%s' notifications sent to %d member(s)",
+                window["name"], sent,
+            )
+    except Exception:
+        logger.exception("Error in activity window notification job")
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # Scheduler lifecycle helpers
 # ---------------------------------------------------------------------------
 
@@ -193,6 +319,14 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(minutes=interval),
         id="run_scheduled_tasks",
         name="Auto-close loans & transfer excess contributions",
+        replace_existing=True,
+    )
+    # Daily job at 07:00 to send activity-window email notifications
+    scheduler.add_job(
+        send_activity_window_notifications,
+        trigger=CronTrigger(hour=7, minute=0),
+        id="activity_window_notifications",
+        name="Send activity window email notifications to members",
         replace_existing=True,
     )
     scheduler.start()

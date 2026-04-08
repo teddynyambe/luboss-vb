@@ -187,15 +187,31 @@ def create_declaration_endpoint(
     member_profile = get_member_profile_by_user_id(db, current_user.id)
     if not member_profile:
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail="Member profile not found. Please contact administrator to set up your member profile."
         )
     if member_profile.status != MemberStatus.ACTIVE:
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail=f"Member account is not active. Current status: {member_profile.status.value}"
         )
-    
+
+    # ── Enforce declaration window: 15th of the month to 5th of the next month ──
+    today = date.today()
+    eff = declaration_data.effective_month
+    # Determine the valid window for the declared effective month
+    window_open  = date(eff.year, eff.month, 15)
+    if eff.month == 12:
+        window_close = date(eff.year + 1, 1, 5)
+    else:
+        window_close = date(eff.year, eff.month + 1, 5)
+    if not (window_open <= today <= window_close):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Declarations for {eff.strftime('%B %Y')} can only be made between "
+                   f"{window_open.strftime('%d %B %Y')} and {window_close.strftime('%d %B %Y')}."
+        )
+
     try:
         declaration = create_declaration(
             db=db,
@@ -729,18 +745,20 @@ def get_current_month_declaration(
 def _can_edit_declaration(effective_month: date) -> bool:
     """Check if a declaration can still be edited.
 
-    Members can now edit declarations anytime for the current month (removed 20th day restriction).
-    The one-declaration-per-month rule still applies.
+    Declarations can only be created/edited between the 15th of the effective
+    month and the 5th of the following month.
     """
     from datetime import date
     today = date.today()
 
-    # Cannot edit declarations from previous months (only current month can be edited)
-    if today.year > effective_month.year or (today.year == effective_month.year and today.month > effective_month.month):
-        return False
+    # Determine the valid editing window for this effective month
+    window_open = date(effective_month.year, effective_month.month, 15)
+    if effective_month.month == 12:
+        window_close = date(effective_month.year + 1, 1, 5)
+    else:
+        window_close = date(effective_month.year, effective_month.month + 1, 5)
 
-    # Allow editing current month declarations anytime (removed 20th day restriction)
-    return True
+    return window_open <= today <= window_close
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +870,23 @@ def update_declaration_endpoint(
     ).first()
     if rejected_proof:
         allow_rejected_edit = True
-    
+
+    # ── Enforce declaration window (unless editing after rejection) ──
+    if not allow_rejected_edit:
+        today = date.today()
+        eff = declaration_data.effective_month
+        window_open = date(eff.year, eff.month, 15)
+        if eff.month == 12:
+            window_close = date(eff.year + 1, 1, 5)
+        else:
+            window_close = date(eff.year, eff.month + 1, 5)
+        if not (window_open <= today <= window_close):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Declarations for {eff.strftime('%B %Y')} can only be edited between "
+                       f"{window_open.strftime('%d %B %Y')} and {window_close.strftime('%d %B %Y')}."
+            )
+
     try:
         updated_declaration = update_declaration(
             db=db,

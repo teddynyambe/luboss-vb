@@ -225,7 +225,28 @@ Person registers on the app
   → Member becomes "Active" and can participate
 ```
 
-### 2. Monthly Declaration and Deposit Flow
+### 2. Monthly Dealing Dates (Activity Schedule)
+
+Each month follows a fixed schedule of activity windows. Members receive an email notification when each window opens.
+
+| Activity | Opens | Closes | Description |
+|---|---|---|---|
+| **Declaration Period** | 15th of the month | 5th of the next month | Members submit monthly declarations (savings, social fund, admin fund, penalties, interest, loan repayment) |
+| **Loan Application Period** | 21st of the month | 25th of the month | Members can apply for new loans. Loan applications remain open throughout the month. |
+| **Deposit & Loan Repayment Period** | 25th of the month | 5th of the next month | Members make payments to the bank account and upload proof of deposit |
+
+**Example for March 2026:**
+- Declaration: 15 March – 5 April
+- Loan Application: 21 March – 25 March
+- Deposit & Repayment: 25 March – 5 April
+
+**Important notes:**
+- Declarations can only be created or edited within the declaration window (15th to 5th)
+- Loan applications and repayments are open throughout the month
+- Members are notified by email at 07:00 on each opening day
+- The system enforces these windows — declarations outside the window are rejected
+
+### 3. Monthly Declaration and Deposit Flow
 
 Each month, members declare how much they are contributing and then prove they deposited it.
 
@@ -242,11 +263,11 @@ Member uploads Deposit Proof (bank slip / screenshot)
 
 **Key rules:**
 - One declaration per member per month
-- Declarations can be edited while still pending
+- Declarations can be edited within the declaration window (15th to 5th of next month)
 - Savings balance only reflects approved deposits, not pending declarations
 - The Chairman/Treasurer can also enter declarations via Reconciliation for backdating
 
-### 3. Loan Flow
+### 4. Loan Flow
 
 There are two ways a loan gets created:
 
@@ -289,7 +310,7 @@ When fully paid (principal + interest both covered):
 - When the Treasurer views the active loans list
 - When the Member views their current loan
 
-### 4. Cycle Management
+### 5. Cycle Management
 
 A cycle represents one financial year for the group.
 
@@ -310,7 +331,7 @@ Chairman assigns Credit Ratings to members
 Chairman can close the Cycle when the year ends
 ```
 
-### 5. Credit Rating and Loan Eligibility
+### 6. Credit Rating and Loan Eligibility
 
 ```
 Chairman assigns a Credit Rating tier to each member for the cycle
@@ -324,7 +345,7 @@ When a member applies for a loan:
   Interest = Loan Amount × Rate (flat, not compounding)
 ```
 
-### 6. Penalty Management
+### 7. Penalty Management
 
 ```
 Penalties can be applied:
@@ -336,7 +357,7 @@ Penalties go through:
   Created → Approved by Treasurer → Paid (via declaration)
 ```
 
-### 7. Reconciliation (Backdating)
+### 8. Reconciliation (Backdating)
 
 The Chairman or Treasurer can enter historical data for any past month.
 
@@ -350,7 +371,7 @@ Select a member + month → Load existing data (if any)
 Declarations can also be moved to a different month if entered incorrectly.
 ```
 
-### 8. AI Assistant
+### 9. AI Assistant
 
 ```
 Members can chat with the AI assistant to:
@@ -363,13 +384,19 @@ Chairman and Treasurer get additional access:
   → Look up member personal details (NRC, bank info, address)
 ```
 
-### 9. Automated Background Tasks
+### 10. Automated Background Tasks
 
-The system runs automatic tasks every 5 minutes:
+The system runs automatic tasks on two schedules:
 
+**Every 5 minutes:**
 - **Auto-close paid loans** — Loans where principal and interest are fully paid get marked as "Paid Off"
 - **Transfer excess contributions** — If a member overpays Social Fund or Admin Fund beyond the cycle requirement, the excess is transferred to their Savings
-- **Email notification** — Treasurers receive an email listing any loans closed or funds transferred
+- **Treasurer notification** — Treasurers receive an email listing any loans closed or funds transferred
+
+**Daily at 07:00 (activity window notifications):**
+- **15th of each month** — All active members emailed that the Declaration Period is open
+- **21st of each month** — All active members emailed that the Loan Application Period is open
+- **25th of each month** — All active members emailed that the Deposit & Loan Repayment Period is open
 
 ---
 

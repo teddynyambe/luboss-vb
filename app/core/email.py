@@ -203,3 +203,66 @@ def send_scheduler_report(
             logger.info("Scheduler report email sent to %s", email_addr)
         except Exception:
             logger.exception("Failed to send scheduler report to %s", email_addr)
+
+
+def send_activity_window_email(
+    to_email: str,
+    first_name: str,
+    activity_name: str,
+    activity_description: str,
+    window_open_date: str,
+    window_close_date: str,
+    action_url: str,
+) -> None:
+    """Notify a member that an activity window has opened.
+
+    activity_name: e.g. "Declaration Period", "Loan Application Period",
+                   "Deposit & Loan Repayment Period"
+    """
+    subject = f"Luboss95 VB — {activity_name} is Now Open"
+
+    plain_text = (
+        f"Hello {first_name},\n\n"
+        f"The {activity_name} is now open.\n\n"
+        f"{activity_description}\n\n"
+        f"Window: {window_open_date} to {window_close_date}\n\n"
+        f"Log in to take action: {action_url}\n\n"
+        f"Luboss95 Village Banking"
+    )
+
+    html_text = f"""
+    <html>
+    <body style="font-family: Arial, sans-serif; color: #1e3a5f; background: #f0f4ff; padding: 24px;">
+      <div style="max-width: 500px; margin: 0 auto; background: #ffffff; border-radius: 12px;
+                  border: 2px solid #bfdbfe; padding: 32px;">
+        <h2 style="color: #1d4ed8; margin-bottom: 8px;">{activity_name} is Now Open</h2>
+        <p>Hello {first_name},</p>
+        <p>{activity_description}</p>
+        <table style="width: 100%; margin: 16px 0; font-size: 14px;">
+          <tr>
+            <td style="padding: 8px 12px; background: #eff6ff; border-radius: 6px;">
+              <strong>Opens:</strong> {window_open_date}<br/>
+              <strong>Closes:</strong> {window_close_date}
+            </td>
+          </tr>
+        </table>
+        <p style="margin: 24px 0;">
+          <a href="{action_url}"
+             style="background: #2563eb; color: #ffffff; padding: 12px 24px; border-radius: 8px;
+                    text-decoration: none; font-weight: bold; display: inline-block;">
+            Log In Now
+          </a>
+        </p>
+        <p style="font-size: 12px; color: #94a3b8;">
+          This is an automated reminder from the Luboss95 Village Banking system.
+        </p>
+      </div>
+    </body>
+    </html>
+    """
+
+    try:
+        _send_email(to_email, subject, plain_text, html_text)
+        logger.info("Activity window email (%s) sent to %s", activity_name, to_email)
+    except Exception:
+        logger.exception("Failed to send activity window email (%s) to %s", activity_name, to_email)
