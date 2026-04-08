@@ -58,13 +58,6 @@ export default function ChairmanDashboard() {
                 <p className="text-sm md:text-base text-blue-100">Enter backlog data for members</p>
               </Link>
               <Link
-                href="/dashboard/chairman/payment-requests"
-                className="block p-5 md:p-6 bg-gradient-to-br from-green-500 to-green-600 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-green-700"
-              >
-                <h3 className="font-bold text-lg md:text-xl mb-2">Payment Requests</h3>
-                <p className="text-sm md:text-base text-green-100">Create and manage expense & payout requests</p>
-              </Link>
-              <Link
                 href="/dashboard/chairman/audit"
                 className="block p-5 md:p-6 bg-gradient-to-br from-blue-400 to-blue-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-600"
               >

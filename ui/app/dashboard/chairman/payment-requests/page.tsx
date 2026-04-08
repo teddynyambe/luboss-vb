@@ -85,6 +85,29 @@ export default function PaymentRequestsPage() {
   const [formMemberId, setFormMemberId] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
+  // Account balances
+  const [accountBalances, setAccountBalances] = useState<Record<string, number>>({});
+
+  // Active tab
+  const [activeTab, setActiveTab] = useState<'requests' | 'reports'>('requests');
+
+  // Reports state
+  const [reportMonth, setReportMonth] = useState(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  });
+  const [reportSummary, setReportSummary] = useState<{
+    total_requests: number;
+    total_amount: number;
+    executed_amount: number;
+    by_status: Record<string, { count: number; total: number }>;
+    by_category: Record<string, { count: number; total: number }>;
+  } | null>(null);
+  const [reportTransactions, setReportTransactions] = useState<PaymentRequest[]>([]);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportCategoryFilter, setReportCategoryFilter] = useState('all');
+  const [reportStatusFilter, setReportStatusFilter] = useState('all');
+
   // Reject modal
   const [rejectingId, setRejectingId] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
@@ -95,6 +118,7 @@ export default function PaymentRequestsPage() {
   useEffect(() => {
     loadRequests();
     loadMembers();
+    loadAccountBalances();
   }, []);
 
   const loadRequests = async () => {
@@ -104,6 +128,27 @@ export default function PaymentRequestsPage() {
     else setError(res.error || 'Failed to load payment requests');
     setLoading(false);
   };
+
+  const loadAccountBalances = async () => {
+    const res = await api.get<Record<string, number>>('/api/payment-requests/account-balances');
+    if (res.data) setAccountBalances(res.data);
+  };
+
+  const loadReports = async () => {
+    setReportLoading(true);
+    const monthParam = `${reportMonth}-01`;
+    const [summaryRes, txnRes] = await Promise.all([
+      api.get<typeof reportSummary>(`/api/payment-requests/reports/summary?month=${monthParam}`),
+      api.get<{ transactions: PaymentRequest[] }>(`/api/payment-requests/reports/transactions?month=${monthParam}`),
+    ]);
+    if (summaryRes.data) setReportSummary(summaryRes.data);
+    if (txnRes.data) setReportTransactions(txnRes.data.transactions || []);
+    setReportLoading(false);
+  };
+
+  useEffect(() => {
+    if (activeTab === 'reports') loadReports();
+  }, [activeTab, reportMonth]);
 
   const loadMembers = async () => {
     const res = await api.get<{ id: string; user_id: string; first_name: string; last_name: string; status: string }[]>('/api/chairman/members');
@@ -224,6 +269,23 @@ export default function PaymentRequestsPage() {
           </div>
         )}
 
+        {/* Tabs */}
+        <div className="mb-4 flex gap-1 border-b-2 border-blue-200">
+          <button
+            onClick={() => setActiveTab('requests')}
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors ${activeTab === 'requests' ? 'bg-white text-blue-800 border-2 border-blue-200 border-b-white -mb-[2px]' : 'text-blue-600 hover:bg-blue-50'}`}
+          >
+            Requests
+          </button>
+          <button
+            onClick={() => setActiveTab('reports')}
+            className={`px-4 py-2 text-sm font-semibold rounded-t-lg transition-colors ${activeTab === 'reports' ? 'bg-white text-blue-800 border-2 border-blue-200 border-b-white -mb-[2px]' : 'text-blue-600 hover:bg-blue-50'}`}
+          >
+            Reports
+          </button>
+        </div>
+
+        {activeTab === 'requests' && (<>
         {/* Create button */}
         <div className="mb-4 flex items-center justify-between">
           <div className="flex gap-2 flex-wrap">
@@ -262,12 +324,14 @@ export default function PaymentRequestsPage() {
                     className="w-full"
                     required
                   >
-                    <option value="committee_payment">Committee Payment (Admin Fund)</option>
-                    <option value="social_support">Social Support (Social Fund)</option>
-                    <option value="admin_cost">Administrative Cost (Admin Fund)</option>
-                    <option value="end_of_year_payout">End-of-Year Payout (Savings)</option>
+                    <option value="committee_payment">Committee Payment — Admin Fund ({fmtK(accountBalances['ADMIN_FUND'] || 0)})</option>
+                    <option value="social_support">Social Support — Social Fund ({fmtK(accountBalances['SOCIAL_FUND'] || 0)})</option>
+                    <option value="admin_cost">Administrative Cost — Admin Fund ({fmtK(accountBalances['ADMIN_FUND'] || 0)})</option>
+                    <option value="end_of_year_payout">End-of-Year Payout — Bank Cash ({fmtK(accountBalances['BANK_CASH'] || 0)})</option>
                   </select>
-                  <p className="mt-1 text-xs text-blue-600">Source: {CATEGORY_SOURCE[formCategory]}</p>
+                  <p className="mt-1 text-xs text-blue-600">
+                    Available in {CATEGORY_SOURCE[formCategory].replace(/_/g, ' ')}: <span className="font-semibold">{fmtK(accountBalances[CATEGORY_SOURCE[formCategory]] || 0)}</span>
+                  </p>
                 </div>
 
                 <div>
@@ -430,6 +494,7 @@ export default function PaymentRequestsPage() {
         )}
 
         {/* Reject modal */}
+        {/* Reject modal */}
         {rejectingId && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
             <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
@@ -455,6 +520,202 @@ export default function PaymentRequestsPage() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+        </>)}
+
+        {/* ── Reports Tab ─────────────────────────────────────────────── */}
+        {activeTab === 'reports' && (
+          <div className="space-y-4">
+            {/* Controls */}
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                type="month"
+                value={reportMonth}
+                onChange={e => setReportMonth(e.target.value)}
+                className="px-3 py-1.5 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <select
+                value={reportCategoryFilter}
+                onChange={e => setReportCategoryFilter(e.target.value)}
+                className="px-3 py-1.5 border-2 border-blue-300 rounded-lg text-sm"
+              >
+                <option value="all">All Categories</option>
+                <option value="committee_payment">Committee Payment</option>
+                <option value="social_support">Social Support</option>
+                <option value="admin_cost">Administrative Cost</option>
+                <option value="end_of_year_payout">End-of-Year Payout</option>
+              </select>
+              <select
+                value={reportStatusFilter}
+                onChange={e => setReportStatusFilter(e.target.value)}
+                className="px-3 py-1.5 border-2 border-blue-300 rounded-lg text-sm"
+              >
+                <option value="all">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="approved">Approved</option>
+                <option value="executed">Executed</option>
+                <option value="rejected">Rejected</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+              <button
+                onClick={() => window.print()}
+                className="ml-auto px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 print:hidden"
+              >
+                Print
+              </button>
+            </div>
+
+            {reportLoading ? (
+              <div className="text-center py-16">
+                <div className="animate-spin rounded-full h-14 w-14 border-4 border-blue-200 border-t-blue-600 mx-auto" />
+                <p className="mt-4 text-blue-700">Loading report...</p>
+              </div>
+            ) : (
+              <>
+                {/* Summary cards */}
+                {reportSummary && (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="card text-center">
+                      <p className="text-xs text-blue-600 font-semibold">Total Requests</p>
+                      <p className="text-2xl font-bold text-blue-900">{reportSummary.total_requests}</p>
+                    </div>
+                    <div className="card text-center">
+                      <p className="text-xs text-blue-600 font-semibold">Total Amount</p>
+                      <p className="text-2xl font-bold text-blue-900">{fmtK(reportSummary.total_amount)}</p>
+                    </div>
+                    <div className="card text-center">
+                      <p className="text-xs text-green-600 font-semibold">Executed</p>
+                      <p className="text-2xl font-bold text-green-700">{fmtK(reportSummary.executed_amount)}</p>
+                    </div>
+                    <div className="card text-center">
+                      <p className="text-xs text-orange-600 font-semibold">Pending</p>
+                      <p className="text-2xl font-bold text-orange-700">
+                        {fmtK(reportSummary.by_status?.pending?.total || 0)}
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Breakdown by category */}
+                {reportSummary && Object.keys(reportSummary.by_category).length > 0 && (
+                  <div className="card">
+                    <h3 className="text-base font-bold text-blue-900 mb-3">By Category</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b-2 border-blue-200 text-left text-blue-700">
+                            <th className="py-2 px-3">Category</th>
+                            <th className="py-2 px-3 text-right">Count</th>
+                            <th className="py-2 px-3 text-right">Total Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(reportSummary.by_category).map(([cat, data]) => (
+                            <tr key={cat} className="border-b border-blue-100">
+                              <td className="py-2 px-3 font-medium">{CATEGORY_LABELS[cat] || cat}</td>
+                              <td className="py-2 px-3 text-right">{data.count}</td>
+                              <td className="py-2 px-3 text-right font-semibold">{fmtK(data.total)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Breakdown by status */}
+                {reportSummary && Object.keys(reportSummary.by_status).length > 0 && (
+                  <div className="card">
+                    <h3 className="text-base font-bold text-blue-900 mb-3">By Status</h3>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b-2 border-blue-200 text-left text-blue-700">
+                            <th className="py-2 px-3">Status</th>
+                            <th className="py-2 px-3 text-right">Count</th>
+                            <th className="py-2 px-3 text-right">Total Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.entries(reportSummary.by_status).map(([st, data]) => (
+                            <tr key={st} className="border-b border-blue-100">
+                              <td className="py-2 px-3">
+                                <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${STATUS_STYLES[st] || 'bg-gray-100'}`}>
+                                  {st.charAt(0).toUpperCase() + st.slice(1)}
+                                </span>
+                              </td>
+                              <td className="py-2 px-3 text-right">{data.count}</td>
+                              <td className="py-2 px-3 text-right font-semibold">{fmtK(data.total)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Transaction list */}
+                <div className="card">
+                  <h3 className="text-base font-bold text-blue-900 mb-3">
+                    Transactions ({(() => {
+                      let txns = reportTransactions;
+                      if (reportCategoryFilter !== 'all') txns = txns.filter(t => t.category === reportCategoryFilter);
+                      if (reportStatusFilter !== 'all') txns = txns.filter(t => t.status === reportStatusFilter);
+                      return txns.length;
+                    })()})
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs whitespace-nowrap">
+                      <thead>
+                        <tr className="border-b-2 border-blue-200 text-left text-blue-700">
+                          <th className="py-2 px-2">#</th>
+                          <th className="py-2 px-2">Date</th>
+                          <th className="py-2 px-2">Category</th>
+                          <th className="py-2 px-2">Description</th>
+                          <th className="py-2 px-2">Beneficiary</th>
+                          <th className="py-2 px-2 text-right">Amount</th>
+                          <th className="py-2 px-2">Status</th>
+                          <th className="py-2 px-2">Initiated By</th>
+                          <th className="py-2 px-2">Approved By</th>
+                          <th className="py-2 px-2">Executed By</th>
+                          <th className="py-2 px-2">Reference</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(() => {
+                          let txns = reportTransactions;
+                          if (reportCategoryFilter !== 'all') txns = txns.filter(t => t.category === reportCategoryFilter);
+                          if (reportStatusFilter !== 'all') txns = txns.filter(t => t.status === reportStatusFilter);
+                          if (txns.length === 0) return (
+                            <tr><td colSpan={11} className="py-8 text-center text-blue-500">No transactions found for this period.</td></tr>
+                          );
+                          return txns.map((t, i) => (
+                            <tr key={t.id} className={`border-b border-blue-50 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}`}>
+                              <td className="py-1.5 px-2 text-blue-500">{i + 1}</td>
+                              <td className="py-1.5 px-2">{new Date(t.initiated_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</td>
+                              <td className="py-1.5 px-2">{CATEGORY_LABELS[t.category] || t.category}</td>
+                              <td className="py-1.5 px-2 max-w-[200px] truncate" title={t.description}>{t.description}</td>
+                              <td className="py-1.5 px-2">{t.beneficiary_name}</td>
+                              <td className="py-1.5 px-2 text-right font-semibold">{fmtK(t.amount)}</td>
+                              <td className="py-1.5 px-2">
+                                <span className={`px-1.5 py-0.5 rounded-full text-xs font-semibold ${STATUS_STYLES[t.status]}`}>
+                                  {t.status.charAt(0).toUpperCase() + t.status.slice(1)}
+                                </span>
+                              </td>
+                              <td className="py-1.5 px-2">{t.initiator_name || '-'}</td>
+                              <td className="py-1.5 px-2">{t.approver_name || '-'}</td>
+                              <td className="py-1.5 px-2">{t.executor_name || '-'}</td>
+                              <td className="py-1.5 px-2">{t.payment_reference || '-'}</td>
+                            </tr>
+                          ));
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
       </main>

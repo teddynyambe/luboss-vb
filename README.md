@@ -344,11 +344,30 @@ Step 3 — Execution (Treasurer):
 | Administrative Cost | Admin Fund | Hosting, subscriptions, operational costs |
 | End-of-Year Payout | Member Savings | Annual savings + interest distribution |
 
+**Role Responsibilities:**
+
+| Role | Can Do | Cannot Do |
+|---|---|---|
+| **Vice-Chairman** | Create requests, cancel own pending requests | Approve, reject, or execute |
+| **Chairman** | Create requests, approve or reject pending requests | Execute payments |
+| **Treasurer** | View approved requests, execute payments (post journal entry, record bank ref) | Create, approve, or reject |
+
+All three roles access Payment Requests from the main welcome dashboard.
+
 **Key rules:**
 - Source accounts cannot be overdrawn — balance is validated before execution
+- Each category dropdown shows the current balance of the source fund
 - End-of-year payouts debit the specific member's savings account
 - Full audit trail: who initiated, approved, and executed each payment
 - Only the initiator can cancel a pending request
+
+**Reports:**
+The Payment Requests page includes a Reports tab with:
+- Monthly summary cards (total requests, total amount, executed amount, pending amount)
+- Breakdown by category (count and total per category)
+- Breakdown by status (count and total per status)
+- Full transaction list with filters by category and status, showing date, description, beneficiary, amount, status, and audit trail (initiated by, approved by, executed by, payment reference)
+- Print support for physical records
 
 ### 6. Cycle Management
 
@@ -510,6 +529,9 @@ The system runs automatic tasks on two schedules:
 - `PUT /api/payment-requests/{id}/reject` - Chairman rejects with reason
 - `PUT /api/payment-requests/{id}/execute` - Treasurer executes and posts journal entry
 - `PUT /api/payment-requests/{id}/cancel` - Cancel pending request (initiator only)
+- `GET /api/payment-requests/account-balances` - Get fund balances (Admin Fund, Social Fund, Bank Cash)
+- `GET /api/payment-requests/reports/summary` - Monthly summary (totals by status and category)
+- `GET /api/payment-requests/reports/transactions` - Detailed transaction list with audit trail
 
 ### AI Chat
 - `POST /api/ai/chat` - AI chat endpoint (RAG with constitution/policies)

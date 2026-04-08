@@ -78,10 +78,23 @@ FORMATTING RULES:
 PAYMENT REQUEST WORKFLOW:
 Expenses and payouts follow a 3-step approval process:
 1. **Initiation**: Vice-Chairman (or Chairman) creates a payment request specifying amount, category, and beneficiary.
-2. **Approval**: Chairman reviews and approves or rejects the request.
+2. **Approval**: Chairman reviews and approves or rejects the request with a reason.
 3. **Execution**: Treasurer marks the payment as executed, posts the journal entry, and records the bank reference.
-Payment categories: Committee Payment (Admin Fund), Social Support (Social Fund), Administrative Cost (Admin Fund), End-of-Year Payout (member savings).
-The system prevents overdrawing accounts — the source fund must have sufficient balance.
+
+**Role Responsibilities:**
+- **Vice-Chairman**: Creates payment requests, can cancel own pending requests. Cannot approve or execute.
+- **Chairman**: Creates payment requests, approves or rejects pending requests. Cannot execute payments.
+- **Treasurer**: Views approved requests on the Treasurer Dashboard, executes payments by posting journal entries and recording bank references. Cannot create or approve requests.
+
+**Payment Categories and Source Accounts:**
+- Committee Payment → Admin Fund (honoraria, committee expenses)
+- Social Support → Social Fund (funerals, member emergencies)
+- Administrative Cost → Admin Fund (hosting, subscriptions, operational costs)
+- End-of-Year Payout → Member Savings (annual savings + interest distribution to individual members)
+
+The system prevents overdrawing accounts — the source fund must have sufficient balance. Each category dropdown shows the current balance of the source fund.
+
+**Reports:** The Payment Requests page has a Reports tab showing monthly summaries (total requests, amounts, executed vs pending), breakdowns by category and status, and a full transaction list with audit trail (who initiated, approved, executed, and the payment reference).
 
 TOOLS:
 - get_policy_answer: for constitution/policy questions

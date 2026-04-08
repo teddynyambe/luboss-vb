@@ -4,10 +4,13 @@ Workflow:  Vice-Chairman creates → Chairman approves → Treasurer executes.
 """
 
 import logging
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import extract, func
 from sqlalchemy.orm import Session
 
 from app.core.dependencies import (
@@ -17,7 +20,7 @@ from app.core.dependencies import (
     require_treasurer,
 )
 from app.db.base import get_db
-from app.models.payment_request import PaymentRequestStatus
+from app.models.payment_request import PaymentCategory, PaymentRequest as PaymentRequestModel, PaymentRequestStatus
 from app.models.user import User
 from app.schemas.payment_request import (
     PaymentRequestCreate,
@@ -33,6 +36,9 @@ from app.services.payment_request import (
     get_payment_requests,
     reject_payment_request,
 )
+
+from app.models.ledger import LedgerAccount
+from app.services.accounting import get_account_balance
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +81,30 @@ def _enrich(pr, db: Session) -> dict:
         else:
             data[field] = None
     return data
+
+
+# ---------------------------------------------------------------------------
+# Account balances (for the create form dropdown)
+# ---------------------------------------------------------------------------
+
+@router.get("/account-balances")
+def get_account_balances(
+    current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Return current balances for the fund accounts used as payment sources."""
+    codes = ["ADMIN_FUND", "SOCIAL_FUND", "BANK_CASH"]
+    result = {}
+    for code in codes:
+        acc = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == code,
+            LedgerAccount.member_id.is_(None),
+        ).first()
+        if acc:
+            result[code] = float(get_account_balance(db, acc.id))
+        else:
+            result[code] = 0.0
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -211,3 +241,113 @@ def cancel_request(
         return _enrich(pr, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Reports
+# ---------------------------------------------------------------------------
+
+@router.get("/reports/summary")
+def report_summary(
+    month: Optional[str] = Query(None, description="YYYY-MM-DD (first of month)"),
+    current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Monthly summary of payment requests — totals by status and category."""
+    q = db.query(PaymentRequestModel)
+
+    if month:
+        try:
+            target = datetime.strptime(month, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+        q = q.filter(
+            extract("year", PaymentRequestModel.initiated_at) == target.year,
+            extract("month", PaymentRequestModel.initiated_at) == target.month,
+        )
+
+    requests = q.order_by(PaymentRequestModel.initiated_at.desc()).all()
+
+    # Totals by status
+    by_status: dict = {}
+    for pr in requests:
+        s = pr.status.value
+        by_status.setdefault(s, {"count": 0, "total": Decimal("0")})
+        by_status[s]["count"] += 1
+        by_status[s]["total"] += pr.amount
+    for v in by_status.values():
+        v["total"] = float(v["total"])
+
+    # Totals by category
+    by_category: dict = {}
+    for pr in requests:
+        c = pr.category.value
+        by_category.setdefault(c, {"count": 0, "total": Decimal("0")})
+        by_category[c]["count"] += 1
+        by_category[c]["total"] += pr.amount
+    for v in by_category.values():
+        v["total"] = float(v["total"])
+
+    total_amount = float(sum(pr.amount for pr in requests))
+    executed_amount = float(sum(pr.amount for pr in requests if pr.status == PaymentRequestStatus.EXECUTED))
+
+    return {
+        "month": month,
+        "total_requests": len(requests),
+        "total_amount": total_amount,
+        "executed_amount": executed_amount,
+        "by_status": by_status,
+        "by_category": by_category,
+    }
+
+
+@router.get("/reports/transactions")
+def report_transactions(
+    month: Optional[str] = Query(None, description="YYYY-MM-DD (first of month)"),
+    category: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
+    current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Detailed transaction list with full audit trail for each payment request."""
+    q = db.query(PaymentRequestModel)
+
+    if month:
+        try:
+            target = datetime.strptime(month, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid month format. Use YYYY-MM-DD")
+        q = q.filter(
+            extract("year", PaymentRequestModel.initiated_at) == target.year,
+            extract("month", PaymentRequestModel.initiated_at) == target.month,
+        )
+
+    if category:
+        try:
+            cat_enum = PaymentCategory(category)
+            q = q.filter(PaymentRequestModel.category == cat_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
+
+    if status:
+        try:
+            status_enum = PaymentRequestStatus(status)
+            q = q.filter(PaymentRequestModel.status == status_enum)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid status: {status}")
+
+    requests = q.order_by(PaymentRequestModel.initiated_at.desc()).all()
+
+    transactions = []
+    for pr in requests:
+        transactions.append(_enrich(pr, db))
+
+    total = float(sum(pr.amount for pr in requests))
+
+    return {
+        "month": month,
+        "filters": {"category": category, "status": status},
+        "count": len(transactions),
+        "total_amount": total,
+        "transactions": transactions,
+    }
