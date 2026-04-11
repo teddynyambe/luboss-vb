@@ -2754,11 +2754,21 @@ def get_group_summary_report(
         repayment_principal = float(approved_decl.declared_loan_repayment or 0) if approved_decl else 0.0
         repayment_interest  = float(approved_decl.declared_interest_on_loan or 0) if approved_decl else 0.0
 
-        total_deposited = _member_val(savings_accs, sav_month_map, member.id)
+        # Declaration Amount = sum of all declared components for the month
+        # (Savings + Social Fund + Admin Fund + Penalty + Interest paid + Loan Repayment)
+        total_deposited = (
+            savings_declared
+            + social_fund_declared
+            + admin_fund_declared
+            + penalty_total
+            + repayment_principal
+            + repayment_interest
+        )
 
         # Interest earned = member's share of this month's loan interest income,
-        # weighted by their approved deposit (not savings B/F)
-        interest_earned = round((total_deposited / total_group_deposited) * total_interest_month, 2) \
+        # weighted by their savings deposit for the month (not the full declaration)
+        savings_deposited = _member_val(savings_accs, sav_month_map, member.id)
+        interest_earned = round((savings_deposited / total_group_deposited) * total_interest_month, 2) \
             if total_group_deposited > 0 else 0.0
 
         loan_applied = interest_on_loan_applied = 0.0
