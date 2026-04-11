@@ -312,16 +312,16 @@ When fully paid (principal + interest both covered):
 
 ### 5. Payment Requests & Expenses
 
-The system supports a 3-step approval workflow for all payments and disbursements:
+The system supports a 3-step approval workflow for all expenses and disbursements:
 
 ```
 Step 1 — Initiation (Vice-Chairman or Chairman):
-  → Creates a payment request with:
+  → Raises a payment request with:
      - Amount
-     - Description
-     - Category (Committee Payment, Social Support, Admin Cost, End-of-Year Payout)
-     - Beneficiary (person, entity, or member for payouts)
-  → Source account is automatically determined by category
+     - Source account to charge (one of 4)
+     - Paid To (person or entity receiving the money)
+     - Description / Purpose (free text — allowances, funerals,
+       court, fuel, venue hire, etc.)
 
 Step 2 — Approval (Chairman):
   → Reviews the request
@@ -331,18 +331,20 @@ Step 2 — Approval (Chairman):
 Step 3 — Execution (Treasurer):
   → Verifies sufficient balance in source account
   → Marks payment as executed
-  → Journal entry posted (debit source fund, credit bank cash)
+  → Journal entry posted (debit source account, credit bank cash)
   → Records payment reference (bank ref, receipt number)
 ```
 
-**Payment Categories and Source Accounts:**
+**Source Accounts (expenses can be charged to any of these 4):**
 
-| Category | Source Account | Use Case |
-|---|---|---|
-| Committee Payment | Admin Fund | Honoraria, committee expenses |
-| Social Support | Social Fund | Funerals, member emergencies |
-| Administrative Cost | Admin Fund | Hosting, subscriptions, operational costs |
-| End-of-Year Payout | Member Savings | Annual savings + interest distribution |
+| Source Account | What it holds |
+|---|---|
+| **Admin Fund** | Money collected from members for administration |
+| **Social Fund** | Money collected from members for social support |
+| **Savings + Interest** | Total member savings plus interest earned on loans |
+| **Penalties** | Money collected from penalties |
+
+Expenses are **not predefined** — the person raising the request describes the purpose in free text. Common purposes include allowances, funeral support, fuel, court fees, venue hire, refreshments, stationery, and other operational expenses.
 
 **Role Responsibilities:**
 
@@ -356,17 +358,17 @@ All three roles access Payment Requests from the main welcome dashboard.
 
 **Key rules:**
 - Source accounts cannot be overdrawn — balance is validated before execution
-- Each category dropdown shows the current balance of the source fund
-- End-of-year payouts debit the specific member's savings account
+- Each source account dropdown shows the current balance next to the label
+- Each balance = contributions received minus payments already executed
 - Full audit trail: who initiated, approved, and executed each payment
 - Only the initiator can cancel a pending request
 
 **Reports:**
 The Payment Requests page includes a Reports tab with:
 - Monthly summary cards (total requests, total amount, executed amount, pending amount)
-- Breakdown by category (count and total per category)
+- Breakdown by source account (count and total per source)
 - Breakdown by status (count and total per status)
-- Full transaction list with filters by category and status, showing date, description, beneficiary, amount, status, and audit trail (initiated by, approved by, executed by, payment reference)
+- Full transaction list with filters by source account and status, showing date, source, description, beneficiary, amount, status, and audit trail (initiated by, approved by, executed by, payment reference)
 - Print support for physical records
 
 ### 6. Cycle Management

@@ -92,23 +92,17 @@ def get_account_balances(
     current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
 ):
-    """Return current balances for the fund accounts used as payment sources.
+    """Return current balances for the 4 source accounts expenses can be
+    charged to: Admin Fund, Social Fund, Savings + Interest, and Penalties.
 
-    Social Fund / Admin Fund: summed from all member-specific accounts
-    (MEM_SOC_*, MEM_ADM_*) which track actual member contributions.
-    Bank Cash: total member savings + interest earned (the pool available
-    for end-of-year payouts), not the raw bank account balance.
+    Each balance = contributions received minus payments already executed.
     """
     from app.models.ledger import JournalLine, JournalEntry
     from sqlalchemy import func as sqlfunc
 
-    from app.models.ledger import JournalLine, JournalEntry
-    from app.models.transaction import Loan
-    from sqlalchemy import func as sqlfunc
-
     result: dict = {}
 
-    # Helper: sum credits from deposit approvals only (actual member payments).
+    # Helper: sum credits from deposit approvals (actual member payments in).
     def _deposit_credits(account_ids: list) -> Decimal:
         if not account_ids:
             return Decimal("0")
@@ -121,7 +115,7 @@ def get_account_balances(
         ).scalar()
         return Decimal(str(val))
 
-    # Helper: sum debits from executed payment requests on given accounts.
+    # Helper: sum debits from executed payment requests (money paid out).
     def _payment_debits(account_ids: list) -> Decimal:
         if not account_ids:
             return Decimal("0")
@@ -134,42 +128,65 @@ def get_account_balances(
         ).scalar()
         return Decimal(str(val))
 
-    # ── Social Fund: contributed by members minus paid out ───────────────
-    social_ids = [a.id for a in db.query(LedgerAccount).filter(
-        LedgerAccount.account_code.like("MEM_SOC_%"),
-        LedgerAccount.member_id.isnot(None),
-    ).all()]
-    result["SOCIAL_FUND"] = float(
-        _deposit_credits(social_ids) - _payment_debits(social_ids)
-    )
-
-    # ── Admin Fund: contributed by members minus paid out ────────────────
+    # ── Admin Fund: member contributions minus executed payments ─────────
     admin_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_ADM_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
+    admin_org = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "ADMIN_FUND",
+        LedgerAccount.member_id.is_(None),
+    ).first()
+    admin_org_ids = [admin_org.id] if admin_org else []
     result["ADMIN_FUND"] = float(
-        _deposit_credits(admin_ids) - _payment_debits(admin_ids)
+        _deposit_credits(admin_ids) - _payment_debits(admin_ids) - _payment_debits(admin_org_ids)
     )
 
-    # ── Savings + Interest pool (for end-of-year payouts) ────────────────
+    # ── Social Fund: member contributions minus executed payments ────────
+    social_ids = [a.id for a in db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("MEM_SOC_%"),
+        LedgerAccount.member_id.isnot(None),
+    ).all()]
+    social_org = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "SOCIAL_FUND",
+        LedgerAccount.member_id.is_(None),
+    ).first()
+    social_org_ids = [social_org.id] if social_org else []
+    result["SOCIAL_FUND"] = float(
+        _deposit_credits(social_ids) - _payment_debits(social_ids) - _payment_debits(social_org_ids)
+    )
 
-    # Savings = deposit approval credits on MEM_SAV_* minus any payouts
+    # ── Savings + Interest: member savings + interest earned ─────────────
     savings_ids = [a.id for a in db.query(LedgerAccount).filter(
         LedgerAccount.account_code.like("MEM_SAV_%"),
         LedgerAccount.member_id.isnot(None),
     ).all()]
     savings_total = _deposit_credits(savings_ids) - _payment_debits(savings_ids)
 
-    # Interest = actual interest payments received (credits on INTEREST_INCOME
-    # from deposit approvals), not a theoretical calculation.
     interest_acc = db.query(LedgerAccount).filter(
         LedgerAccount.account_code == "INTEREST_INCOME",
         LedgerAccount.member_id.is_(None),
     ).first()
-    interest_total = _deposit_credits([interest_acc.id]) if interest_acc else Decimal("0")
+    interest_ids = [interest_acc.id] if interest_acc else []
+    interest_total = _deposit_credits(interest_ids) - _payment_debits(interest_ids)
 
-    result["BANK_CASH"] = float(savings_total + interest_total)
+    result["INTEREST_INCOME"] = float(savings_total + interest_total)
+
+    # ── Penalties: penalty payments received minus executed payments ─────
+    penalty_acc = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "PENALTY_INCOME",
+        LedgerAccount.member_id.is_(None),
+    ).first()
+    penalty_ids = [penalty_acc.id] if penalty_acc else []
+    # Include member-level penalty payable accounts too (PEN_PAY_*)
+    mem_penalty_ids = [a.id for a in db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("PEN_PAY_%"),
+        LedgerAccount.member_id.isnot(None),
+    ).all()]
+    all_penalty_ids = penalty_ids + mem_penalty_ids
+    result["PENALTY_INCOME"] = float(
+        _deposit_credits(all_penalty_ids) - _payment_debits(all_penalty_ids)
+    )
 
     return result
 
@@ -189,9 +206,8 @@ def create_request(
             db,
             amount=body.amount,
             description=body.description,
-            category=body.category,
+            source_account_code=body.source_account_code,
             beneficiary_name=body.beneficiary_name,
-            beneficiary_member_id=body.beneficiary_member_id,
             cycle_id=body.cycle_id,
             initiated_by=current_user.id,
         )
@@ -345,14 +361,14 @@ def report_summary(
     for v in by_status.values():
         v["total"] = float(v["total"])
 
-    # Totals by category
-    by_category: dict = {}
+    # Totals by source account
+    by_source: dict = {}
     for pr in requests:
-        c = pr.category.value
-        by_category.setdefault(c, {"count": 0, "total": Decimal("0")})
-        by_category[c]["count"] += 1
-        by_category[c]["total"] += pr.amount
-    for v in by_category.values():
+        s = pr.source_account_code
+        by_source.setdefault(s, {"count": 0, "total": Decimal("0")})
+        by_source[s]["count"] += 1
+        by_source[s]["total"] += pr.amount
+    for v in by_source.values():
         v["total"] = float(v["total"])
 
     total_amount = float(sum(pr.amount for pr in requests))
@@ -364,14 +380,14 @@ def report_summary(
         "total_amount": total_amount,
         "executed_amount": executed_amount,
         "by_status": by_status,
-        "by_category": by_category,
+        "by_source": by_source,
     }
 
 
 @router.get("/reports/transactions")
 def report_transactions(
     month: Optional[str] = Query(None, description="YYYY-MM-DD (first of month)"),
-    category: Optional[str] = Query(None),
+    source: Optional[str] = Query(None, description="Source account code filter"),
     status: Optional[str] = Query(None),
     current_user: User = Depends(require_any_role("Vice-Chairman", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
@@ -389,12 +405,8 @@ def report_transactions(
             extract("month", PaymentRequestModel.initiated_at) == target.month,
         )
 
-    if category:
-        try:
-            cat_enum = PaymentCategory(category)
-            q = q.filter(PaymentRequestModel.category == cat_enum)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid category: {category}")
+    if source:
+        q = q.filter(PaymentRequestModel.source_account_code == source)
 
     if status:
         try:
@@ -413,7 +425,7 @@ def report_transactions(
 
     return {
         "month": month,
-        "filters": {"category": category, "status": status},
+        "filters": {"source": source, "status": status},
         "count": len(transactions),
         "total_amount": total,
         "transactions": transactions,

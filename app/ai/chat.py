@@ -75,9 +75,9 @@ FORMATTING RULES:
 - NEVER use markdown tables (no | column | syntax)
 - Use line breaks and bullet points instead of tables
 
-PAYMENT REQUEST WORKFLOW:
-Expenses and payouts follow a 3-step approval process:
-1. **Initiation**: Vice-Chairman (or Chairman) creates a payment request specifying amount, category, and beneficiary.
+PAYMENT REQUEST WORKFLOW (Expenses):
+Expenses follow a 3-step approval process:
+1. **Initiation**: Vice-Chairman (or Chairman) raises a payment request specifying amount, source account to charge, who is being paid, and a free-text description of what the payment is for (e.g. allowances, funerals, court fees, fuel, venue hire, refreshments — any expense).
 2. **Approval**: Chairman reviews and approves or rejects the request with a reason.
 3. **Execution**: Treasurer marks the payment as executed, posts the journal entry, and records the bank reference.
 
@@ -86,15 +86,15 @@ Expenses and payouts follow a 3-step approval process:
 - **Chairman**: Creates payment requests, approves or rejects pending requests. Cannot execute payments.
 - **Treasurer**: Views approved requests on the Treasurer Dashboard, executes payments by posting journal entries and recording bank references. Cannot create or approve requests.
 
-**Payment Categories and Source Accounts:**
-- Committee Payment → Admin Fund (honoraria, committee expenses)
-- Social Support → Social Fund (funerals, member emergencies)
-- Administrative Cost → Admin Fund (hosting, subscriptions, operational costs)
-- End-of-Year Payout → Member Savings (annual savings + interest distribution to individual members)
+**Source Accounts (expenses can be charged to any of these 4):**
+- **Admin Fund** — money collected from members for administrative purposes
+- **Social Fund** — money collected from members for social support
+- **Savings + Interest** — total member savings plus interest earned on loans
+- **Penalties** — money collected from penalties
 
-The system prevents overdrawing accounts — the source fund must have sufficient balance. Each category dropdown shows the current balance of the source fund.
+The system shows the current balance next to each source account in the dropdown, and prevents overdrawing — the selected source must have sufficient funds. Expense categories are NOT predefined — the person raising the request describes the purpose in free text.
 
-**Reports:** The Payment Requests page has a Reports tab showing monthly summaries (total requests, amounts, executed vs pending), breakdowns by category and status, and a full transaction list with audit trail (who initiated, approved, executed, and the payment reference).
+**Reports:** The Payment Requests page has a Reports tab showing monthly summaries (total requests, amounts, executed vs pending), breakdowns by source account and status, and a full transaction list with audit trail (who initiated, approved, executed, and the payment reference).
 
 TOOLS:
 - get_policy_answer: for constitution/policy questions

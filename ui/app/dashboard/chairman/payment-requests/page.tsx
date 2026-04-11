@@ -30,23 +30,25 @@ interface PaymentRequest {
   journal_entry_id?: string;
 }
 
-interface MemberOption {
-  id: string;
-  name: string;
-}
+// Source accounts that expenses can be charged to
+const SOURCE_ACCOUNTS: { code: string; label: string }[] = [
+  { code: 'ADMIN_FUND',      label: 'Admin Fund' },
+  { code: 'SOCIAL_FUND',     label: 'Social Fund' },
+  { code: 'INTEREST_INCOME', label: 'Savings + Interest' },
+  { code: 'PENALTY_INCOME',  label: 'Penalties' },
+];
 
+const SOURCE_LABELS: Record<string, string> = Object.fromEntries(
+  SOURCE_ACCOUNTS.map(s => [s.code, s.label])
+);
+
+// Legacy category labels (for rows created before the UI change)
 const CATEGORY_LABELS: Record<string, string> = {
   committee_payment: 'Committee Payment',
   social_support: 'Social Support',
   admin_cost: 'Administrative Cost',
   end_of_year_payout: 'End-of-Year Payout',
-};
-
-const CATEGORY_SOURCE: Record<string, string> = {
-  committee_payment: 'ADMIN_FUND',
-  social_support: 'SOCIAL_FUND',
-  admin_cost: 'ADMIN_FUND',
-  end_of_year_payout: 'BANK_CASH',
+  general_expense: 'Expense',
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -74,15 +76,13 @@ export default function PaymentRequestsPage() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [members, setMembers] = useState<MemberOption[]>([]);
 
   // Create form
   const [showForm, setShowForm] = useState(false);
   const [formAmount, setFormAmount] = useState('');
   const [formDescription, setFormDescription] = useState('');
-  const [formCategory, setFormCategory] = useState('committee_payment');
+  const [formSource, setFormSource] = useState('ADMIN_FUND');
   const [formBeneficiary, setFormBeneficiary] = useState('');
-  const [formMemberId, setFormMemberId] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
   // Account balances
@@ -101,11 +101,11 @@ export default function PaymentRequestsPage() {
     total_amount: number;
     executed_amount: number;
     by_status: Record<string, { count: number; total: number }>;
-    by_category: Record<string, { count: number; total: number }>;
+    by_source: Record<string, { count: number; total: number }>;
   } | null>(null);
   const [reportTransactions, setReportTransactions] = useState<PaymentRequest[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
-  const [reportCategoryFilter, setReportCategoryFilter] = useState('all');
+  const [reportSourceFilter, setReportSourceFilter] = useState('all');
   const [reportStatusFilter, setReportStatusFilter] = useState('all');
 
   // Reject modal
@@ -117,7 +117,6 @@ export default function PaymentRequestsPage() {
 
   useEffect(() => {
     loadRequests();
-    loadMembers();
     loadAccountBalances();
   }, []);
 
@@ -150,16 +149,6 @@ export default function PaymentRequestsPage() {
     if (activeTab === 'reports') loadReports();
   }, [activeTab, reportMonth]);
 
-  const loadMembers = async () => {
-    const res = await api.get<{ id: string; user_id: string; first_name: string; last_name: string; status: string }[]>('/api/chairman/members');
-    if (res.data) {
-      setMembers(res.data.map((m: { id: string; first_name?: string; last_name?: string }) => ({
-        id: m.id,
-        name: `${(m.first_name || '').trim()} ${(m.last_name || '').trim()}`.trim(),
-      })).sort((a: MemberOption, b: MemberOption) => a.name.localeCompare(b.name)));
-    }
-  };
-
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
@@ -169,12 +158,9 @@ export default function PaymentRequestsPage() {
     const body: Record<string, unknown> = {
       amount: parseFloat(formAmount),
       description: formDescription,
-      category: formCategory,
+      source_account_code: formSource,
       beneficiary_name: formBeneficiary,
     };
-    if (formCategory === 'end_of_year_payout' && formMemberId) {
-      body.beneficiary_member_id = formMemberId;
-    }
 
     const res = await api.post<PaymentRequest>('/api/payment-requests/', body);
     if (res.data) {
@@ -182,10 +168,10 @@ export default function PaymentRequestsPage() {
       setShowForm(false);
       setFormAmount('');
       setFormDescription('');
-      setFormCategory('committee_payment');
+      setFormSource('ADMIN_FUND');
       setFormBeneficiary('');
-      setFormMemberId('');
       loadRequests();
+      loadAccountBalances();
     } else {
       setError(res.error || 'Failed to create payment request');
     }
@@ -314,23 +300,21 @@ export default function PaymentRequestsPage() {
             <form onSubmit={handleCreate} className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-semibold text-blue-900 mb-1">Category *</label>
+                  <label className="block text-sm font-semibold text-blue-900 mb-1">Charge to Account *</label>
                   <select
-                    value={formCategory}
-                    onChange={e => {
-                      setFormCategory(e.target.value);
-                      if (e.target.value === 'end_of_year_payout') setFormBeneficiary('');
-                    }}
+                    value={formSource}
+                    onChange={e => setFormSource(e.target.value)}
                     className="w-full"
                     required
                   >
-                    <option value="committee_payment">Committee Payment — Admin Fund ({fmtK(accountBalances['ADMIN_FUND'] || 0)})</option>
-                    <option value="social_support">Social Support — Social Fund ({fmtK(accountBalances['SOCIAL_FUND'] || 0)})</option>
-                    <option value="admin_cost">Administrative Cost — Admin Fund ({fmtK(accountBalances['ADMIN_FUND'] || 0)})</option>
-                    <option value="end_of_year_payout">End-of-Year Payout — Bank Cash ({fmtK(accountBalances['BANK_CASH'] || 0)})</option>
+                    {SOURCE_ACCOUNTS.map(s => (
+                      <option key={s.code} value={s.code}>
+                        {s.label} ({fmtK(accountBalances[s.code] || 0)})
+                      </option>
+                    ))}
                   </select>
                   <p className="mt-1 text-xs text-blue-600">
-                    Available in {CATEGORY_SOURCE[formCategory].replace(/_/g, ' ')}: <span className="font-semibold">{fmtK(accountBalances[CATEGORY_SOURCE[formCategory]] || 0)}</span>
+                    Available: <span className="font-semibold">{fmtK(accountBalances[formSource] || 0)}</span>
                   </p>
                 </div>
 
@@ -348,47 +332,26 @@ export default function PaymentRequestsPage() {
                   />
                 </div>
 
-                {formCategory === 'end_of_year_payout' ? (
-                  <div>
-                    <label className="block text-sm font-semibold text-blue-900 mb-1">Beneficiary Member *</label>
-                    <select
-                      value={formMemberId}
-                      onChange={e => {
-                        setFormMemberId(e.target.value);
-                        const m = members.find(m => m.id === e.target.value);
-                        if (m) setFormBeneficiary(m.name);
-                      }}
-                      className="w-full"
-                      required
-                    >
-                      <option value="">Select member...</option>
-                      {members.map(m => (
-                        <option key={m.id} value={m.id}>{m.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-sm font-semibold text-blue-900 mb-1">Beneficiary Name *</label>
-                    <input
-                      type="text"
-                      value={formBeneficiary}
-                      onChange={e => setFormBeneficiary(e.target.value)}
-                      className="w-full"
-                      placeholder="Person or entity receiving payment"
-                      required
-                    />
-                  </div>
-                )}
+                <div>
+                  <label className="block text-sm font-semibold text-blue-900 mb-1">Paid To *</label>
+                  <input
+                    type="text"
+                    value={formBeneficiary}
+                    onChange={e => setFormBeneficiary(e.target.value)}
+                    className="w-full"
+                    placeholder="Person or entity receiving payment"
+                    required
+                  />
+                </div>
 
                 <div className="md:col-span-2">
-                  <label className="block text-sm font-semibold text-blue-900 mb-1">Description *</label>
+                  <label className="block text-sm font-semibold text-blue-900 mb-1">Description / Purpose *</label>
                   <textarea
                     value={formDescription}
                     onChange={e => setFormDescription(e.target.value)}
                     className="w-full"
                     rows={2}
-                    placeholder="Reason for payment..."
+                    placeholder="e.g. Allowance, funeral support, fuel, court fees, venue hire..."
                     required
                   />
                 </div>
@@ -429,14 +392,13 @@ export default function PaymentRequestsPage() {
                         {pr.status.charAt(0).toUpperCase() + pr.status.slice(1)}
                       </span>
                       <span className="text-xs text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
-                        {CATEGORY_LABELS[pr.category] || pr.category}
+                        {SOURCE_LABELS[pr.source_account_code] || pr.source_account_code}
                       </span>
                       <span className="text-lg font-bold text-blue-900">{fmtK(pr.amount)}</span>
                     </div>
                     <p className="text-sm text-blue-800 font-medium">{pr.description}</p>
                     <p className="text-xs text-blue-600 mt-1">
-                      To: <span className="font-semibold">{pr.beneficiary_name}</span>
-                      {' · '}From: {pr.source_account_code.replace('_', ' ')}
+                      Paid to: <span className="font-semibold">{pr.beneficiary_name}</span>
                     </p>
                     <p className="text-xs text-blue-500 mt-0.5">
                       Created by {pr.initiator_name || 'Unknown'} on {fmtDate(pr.initiated_at)}
@@ -536,15 +498,14 @@ export default function PaymentRequestsPage() {
                 className="px-3 py-1.5 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
               <select
-                value={reportCategoryFilter}
-                onChange={e => setReportCategoryFilter(e.target.value)}
+                value={reportSourceFilter}
+                onChange={e => setReportSourceFilter(e.target.value)}
                 className="px-3 py-1.5 border-2 border-blue-300 rounded-lg text-sm"
               >
-                <option value="all">All Categories</option>
-                <option value="committee_payment">Committee Payment</option>
-                <option value="social_support">Social Support</option>
-                <option value="admin_cost">Administrative Cost</option>
-                <option value="end_of_year_payout">End-of-Year Payout</option>
+                <option value="all">All Source Accounts</option>
+                {SOURCE_ACCOUNTS.map(s => (
+                  <option key={s.code} value={s.code}>{s.label}</option>
+                ))}
               </select>
               <select
                 value={reportStatusFilter}
@@ -597,23 +558,23 @@ export default function PaymentRequestsPage() {
                   </div>
                 )}
 
-                {/* Breakdown by category */}
-                {reportSummary && Object.keys(reportSummary.by_category).length > 0 && (
+                {/* Breakdown by source account */}
+                {reportSummary && Object.keys(reportSummary.by_source).length > 0 && (
                   <div className="card">
-                    <h3 className="text-base font-bold text-blue-900 mb-3">By Category</h3>
+                    <h3 className="text-base font-bold text-blue-900 mb-3">By Source Account</h3>
                     <div className="overflow-x-auto">
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b-2 border-blue-200 text-left text-blue-700">
-                            <th className="py-2 px-3">Category</th>
+                            <th className="py-2 px-3">Source Account</th>
                             <th className="py-2 px-3 text-right">Count</th>
                             <th className="py-2 px-3 text-right">Total Amount</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {Object.entries(reportSummary.by_category).map(([cat, data]) => (
-                            <tr key={cat} className="border-b border-blue-100">
-                              <td className="py-2 px-3 font-medium">{CATEGORY_LABELS[cat] || cat}</td>
+                          {Object.entries(reportSummary.by_source).map(([src, data]) => (
+                            <tr key={src} className="border-b border-blue-100">
+                              <td className="py-2 px-3 font-medium">{SOURCE_LABELS[src] || src}</td>
                               <td className="py-2 px-3 text-right">{data.count}</td>
                               <td className="py-2 px-3 text-right font-semibold">{fmtK(data.total)}</td>
                             </tr>
@@ -660,7 +621,7 @@ export default function PaymentRequestsPage() {
                   <h3 className="text-base font-bold text-blue-900 mb-3">
                     Transactions ({(() => {
                       let txns = reportTransactions;
-                      if (reportCategoryFilter !== 'all') txns = txns.filter(t => t.category === reportCategoryFilter);
+                      if (reportSourceFilter !== 'all') txns = txns.filter(t => t.source_account_code === reportSourceFilter);
                       if (reportStatusFilter !== 'all') txns = txns.filter(t => t.status === reportStatusFilter);
                       return txns.length;
                     })()})
@@ -671,9 +632,9 @@ export default function PaymentRequestsPage() {
                         <tr className="border-b-2 border-blue-200 text-left text-blue-700">
                           <th className="py-2 px-2">#</th>
                           <th className="py-2 px-2">Date</th>
-                          <th className="py-2 px-2">Category</th>
+                          <th className="py-2 px-2">Source</th>
                           <th className="py-2 px-2">Description</th>
-                          <th className="py-2 px-2">Beneficiary</th>
+                          <th className="py-2 px-2">Paid To</th>
                           <th className="py-2 px-2 text-right">Amount</th>
                           <th className="py-2 px-2">Status</th>
                           <th className="py-2 px-2">Initiated By</th>
@@ -685,7 +646,7 @@ export default function PaymentRequestsPage() {
                       <tbody>
                         {(() => {
                           let txns = reportTransactions;
-                          if (reportCategoryFilter !== 'all') txns = txns.filter(t => t.category === reportCategoryFilter);
+                          if (reportSourceFilter !== 'all') txns = txns.filter(t => t.source_account_code === reportSourceFilter);
                           if (reportStatusFilter !== 'all') txns = txns.filter(t => t.status === reportStatusFilter);
                           if (txns.length === 0) return (
                             <tr><td colSpan={11} className="py-8 text-center text-blue-500">No transactions found for this period.</td></tr>
@@ -694,7 +655,7 @@ export default function PaymentRequestsPage() {
                             <tr key={t.id} className={`border-b border-blue-50 ${i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}`}>
                               <td className="py-1.5 px-2 text-blue-500">{i + 1}</td>
                               <td className="py-1.5 px-2">{new Date(t.initiated_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</td>
-                              <td className="py-1.5 px-2">{CATEGORY_LABELS[t.category] || t.category}</td>
+                              <td className="py-1.5 px-2">{SOURCE_LABELS[t.source_account_code] || t.source_account_code}</td>
                               <td className="py-1.5 px-2 max-w-[200px] truncate" title={t.description}>{t.description}</td>
                               <td className="py-1.5 px-2">{t.beneficiary_name}</td>
                               <td className="py-1.5 px-2 text-right font-semibold">{fmtK(t.amount)}</td>

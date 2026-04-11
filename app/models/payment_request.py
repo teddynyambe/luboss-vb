@@ -21,13 +21,26 @@ class PaymentRequestStatus(str, enum.Enum):
 
 
 class PaymentCategory(str, enum.Enum):
-    COMMITTEE_PAYMENT = "committee_payment"    # Admin Fund source
-    SOCIAL_SUPPORT = "social_support"          # Social Fund source
-    ADMIN_COST = "admin_cost"                  # Admin Fund source
-    END_OF_YEAR_PAYOUT = "end_of_year_payout"  # Bank Cash → member savings
+    # Legacy categories (kept for backward compat with any existing rows)
+    COMMITTEE_PAYMENT = "committee_payment"
+    SOCIAL_SUPPORT = "social_support"
+    ADMIN_COST = "admin_cost"
+    END_OF_YEAR_PAYOUT = "end_of_year_payout"
+    # Generic expense — user picks the source account directly
+    GENERAL_EXPENSE = "general_expense"
 
 
-# Category → default source account code mapping
+# Allowed source account codes for payment requests.
+# The journal entry debits the chosen source account and credits BANK_CASH.
+ALLOWED_SOURCE_ACCOUNTS = {
+    "ADMIN_FUND":      "Admin Fund",
+    "SOCIAL_FUND":     "Social Fund",
+    "INTEREST_INCOME": "Savings + Interest",
+    "PENALTY_INCOME":  "Penalties",
+}
+
+
+# Legacy: Category → default source account code mapping
 CATEGORY_SOURCE_MAP = {
     PaymentCategory.COMMITTEE_PAYMENT: "ADMIN_FUND",
     PaymentCategory.SOCIAL_SUPPORT: "SOCIAL_FUND",

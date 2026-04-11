@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.models.ledger import LedgerAccount
 from app.models.member import MemberProfile
 from app.models.payment_request import (
-    CATEGORY_SOURCE_MAP,
+    ALLOWED_SOURCE_ACCOUNTS,
     PaymentCategory,
     PaymentRequest,
     PaymentRequestStatus,
@@ -50,36 +50,36 @@ def create_payment_request(
     *,
     amount: Decimal,
     description: str,
-    category: PaymentCategory,
+    source_account_code: str,
     beneficiary_name: str,
-    beneficiary_member_id: Optional[UUID],
     cycle_id: Optional[UUID],
     initiated_by: UUID,
 ) -> PaymentRequest:
-    """Create a new payment request (Step 1 — Vice-Chairman / Chairman)."""
+    """Create a new payment request (Step 1 — Vice-Chairman / Chairman).
+
+    The person raising the expense picks one of the allowed source accounts
+    (Admin Fund, Social Fund, Savings + Interest, Penalties) and describes
+    what the expense is for.
+    """
     if amount <= 0:
         raise ValueError("Amount must be greater than zero")
 
-    source_code = CATEGORY_SOURCE_MAP[category]
+    if source_account_code not in ALLOWED_SOURCE_ACCOUNTS:
+        raise ValueError(
+            f"Invalid source account '{source_account_code}'. "
+            f"Allowed: {', '.join(ALLOWED_SOURCE_ACCOUNTS.keys())}"
+        )
 
-    # End-of-year payouts require a beneficiary member
-    if category == PaymentCategory.END_OF_YEAR_PAYOUT:
-        if not beneficiary_member_id:
-            raise ValueError("End-of-year payouts require a beneficiary member")
-        member = db.query(MemberProfile).filter(MemberProfile.id == beneficiary_member_id).first()
-        if not member:
-            raise ValueError("Beneficiary member not found")
-
-    # Validate the source account exists
-    _resolve_source_account(db, source_code)
+    # Validate the source account exists in the ledger
+    _resolve_source_account(db, source_account_code)
 
     pr = PaymentRequest(
         amount=amount,
         description=description,
-        category=category,
-        source_account_code=source_code,
+        category=PaymentCategory.GENERAL_EXPENSE,
+        source_account_code=source_account_code,
         beneficiary_name=beneficiary_name,
-        beneficiary_member_id=beneficiary_member_id,
+        beneficiary_member_id=None,
         cycle_id=cycle_id,
         status=PaymentRequestStatus.PENDING,
         initiated_by=initiated_by,
@@ -94,7 +94,7 @@ def create_payment_request(
         user_name=_user_display_name(initiator) if initiator else "Unknown",
         user_role="vice-chairman",
         action="Payment request created",
-        details=f"amount=K{amount:,.2f}, category={category.value}, beneficiary={beneficiary_name}",
+        details=f"amount=K{amount:,.2f}, source={source_account_code}, beneficiary={beneficiary_name}, description={description}",
     )
 
     logger.info("Payment request %s created by %s", pr.id, initiated_by)
@@ -183,47 +183,16 @@ def execute_payment_request(
 
     amount = Decimal(str(pr.amount))
 
-    # Resolve source account & check balance
+    # Resolve source and bank cash accounts
     source_acc = _resolve_source_account(db, pr.source_account_code)
-    balance = get_account_balance(db, source_acc.id)
-    if balance < amount:
-        raise ValueError(
-            f"Insufficient balance in {pr.source_account_code}. "
-            f"Available: K{balance:,.2f}, Requested: K{amount:,.2f}"
-        )
-
-    # Resolve bank cash account (always the cash outflow side)
     bank_acc = _resolve_source_account(db, "BANK_CASH")
 
-    # Build journal lines based on category
+    # Journal entry: debit source account, credit bank cash
     description = f"Payment: {pr.description} — {pr.beneficiary_name}"
-
-    if pr.category == PaymentCategory.END_OF_YEAR_PAYOUT:
-        # Payout: debit member savings (liability ↓), credit bank cash (asset ↓)
-        member_savings = db.query(LedgerAccount).filter(
-            LedgerAccount.member_id == pr.beneficiary_member_id,
-            LedgerAccount.account_name.ilike("%savings%"),
-        ).first()
-        if not member_savings:
-            raise ValueError("Beneficiary member does not have a savings account")
-
-        sav_balance = get_account_balance(db, member_savings.id)
-        if sav_balance < amount:
-            raise ValueError(
-                f"Member savings balance (K{sav_balance:,.2f}) is less than "
-                f"payout amount (K{amount:,.2f})"
-            )
-
-        lines = [
-            {"account_id": member_savings.id, "debit_amount": amount, "credit_amount": Decimal("0"), "description": description},
-            {"account_id": bank_acc.id,        "debit_amount": Decimal("0"), "credit_amount": amount, "description": description},
-        ]
-    else:
-        # Normal expense: debit source fund (liability ↓), credit bank cash (asset ↓)
-        lines = [
-            {"account_id": source_acc.id, "debit_amount": amount, "credit_amount": Decimal("0"), "description": description},
-            {"account_id": bank_acc.id,   "debit_amount": Decimal("0"), "credit_amount": amount, "description": description},
-        ]
+    lines = [
+        {"account_id": source_acc.id, "debit_amount": amount, "credit_amount": Decimal("0"), "description": description},
+        {"account_id": bank_acc.id,   "debit_amount": Decimal("0"), "credit_amount": amount, "description": description},
+    ]
 
     journal_entry = create_journal_entry(
         db=db,

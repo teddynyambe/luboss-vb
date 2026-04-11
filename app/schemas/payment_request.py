@@ -13,9 +13,8 @@ from app.models.payment_request import PaymentCategory, PaymentRequestStatus
 class PaymentRequestCreate(BaseModel):
     amount: Decimal = Field(gt=0)
     description: str = Field(min_length=1)
-    category: PaymentCategory
+    source_account_code: str = Field(min_length=1)
     beneficiary_name: str = Field(min_length=1)
-    beneficiary_member_id: Optional[UUID] = None
     cycle_id: Optional[UUID] = None
 
 

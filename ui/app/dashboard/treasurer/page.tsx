@@ -1170,13 +1170,16 @@ export default function TreasurerDashboard() {
                                   K{pr.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </span>
                                 <span className="text-xs bg-green-200 text-green-800 px-2 py-0.5 rounded-full">
-                                  {pr.category.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                  {pr.source_account_code === 'ADMIN_FUND' ? 'Admin Fund'
+                                    : pr.source_account_code === 'SOCIAL_FUND' ? 'Social Fund'
+                                    : pr.source_account_code === 'INTEREST_INCOME' ? 'Savings + Interest'
+                                    : pr.source_account_code === 'PENALTY_INCOME' ? 'Penalties'
+                                    : pr.source_account_code}
                                 </span>
                               </div>
                               <p className="text-sm text-green-800">{pr.description}</p>
                               <p className="text-xs text-green-600 mt-0.5">
-                                To: <span className="font-semibold">{pr.beneficiary_name}</span>
-                                {' · '}From: {pr.source_account_code.replace(/_/g, ' ')}
+                                Paid to: <span className="font-semibold">{pr.beneficiary_name}</span>
                               </p>
                               <p className="text-xs text-green-500">
                                 Approved by {pr.approver_name || 'Chairman'}
