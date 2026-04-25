@@ -38,6 +38,8 @@ class PenaltyRecordStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     PAID = "paid"
+    REVERSAL_PENDING = "reversal_pending"
+    REVERSED = "reversed"
 
 
 class PenaltyRecordStatusType(TypeDecorator):
@@ -70,7 +72,9 @@ class PenaltyRecordStatusType(TypeDecorator):
             name_to_value = {
                 'PENDING': 'pending',
                 'APPROVED': 'approved',
-                'PAID': 'paid'
+                'PAID': 'paid',
+                'REVERSAL_PENDING': 'reversal_pending',
+                'REVERSED': 'reversed',
             }
             # If it's an uppercase enum name, convert to lowercase value
             if value in name_to_value:
@@ -261,10 +265,19 @@ class PenaltyRecord(Base):
     journal_entry_id = Column(Uuid(as_uuid=True), ForeignKey("journal_entry.id"), nullable=True, index=True)
     notes = Column(Text, nullable=True)
 
+    # Reversal fields
+    reversal_requested_by = Column(Uuid(as_uuid=True), ForeignKey("user.id"), nullable=True)
+    reversal_requested_at = Column(DateTime, nullable=True)
+    reversal_reason = Column(Text, nullable=True)
+    reversed_by = Column(Uuid(as_uuid=True), ForeignKey("user.id"), nullable=True)
+    reversed_at = Column(DateTime, nullable=True)
+    reversal_journal_entry_id = Column(Uuid(as_uuid=True), ForeignKey("journal_entry.id"), nullable=True)
+
     # Relationships
     member = relationship("MemberProfile", back_populates="penalty_records")
     penalty_type = relationship("PenaltyType", back_populates="penalty_records")
-    journal_entry = relationship("JournalEntry", backref="penalty_record")
+    journal_entry = relationship("JournalEntry", foreign_keys=[journal_entry_id])
+    reversal_journal_entry = relationship("JournalEntry", foreign_keys=[reversal_journal_entry_id])
 
 
 class BankStatement(Base):

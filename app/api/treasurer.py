@@ -1595,3 +1595,125 @@ def update_scheduler_interval(
     )
 
     return get_scheduler_status()
+
+
+# ---------------------------------------------------------------------------
+# Penalty Reversals — Treasurer approves reversal requests from Compliance
+# ---------------------------------------------------------------------------
+
+@router.get("/penalties/pending-reversals")
+def get_pending_reversals(
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Get penalties awaiting reversal approval."""
+    from app.models.transaction import PenaltyRecordStatus
+    penalties = db.query(PenaltyRecord).filter(
+        PenaltyRecord.status == PenaltyRecordStatus.REVERSAL_PENDING.value
+    ).order_by(PenaltyRecord.reversal_requested_at.desc()).all()
+
+    result = []
+    for p in penalties:
+        member = p.member
+        user = db.query(User).filter(User.id == member.user_id).first() if member else None
+        member_name = f"{(user.first_name or '')} {(user.last_name or '')}".strip() if user else "Unknown"
+        requester = db.query(User).filter(User.id == p.reversal_requested_by).first() if p.reversal_requested_by else None
+        result.append({
+            "id": str(p.id),
+            "member_name": member_name,
+            "penalty_type_name": p.penalty_type.name if p.penalty_type else "Unknown",
+            "fee_amount": float(p.penalty_type.fee_amount) if p.penalty_type else 0,
+            "date_issued": p.date_issued.isoformat() if p.date_issued else None,
+            "notes": p.notes,
+            "reversal_reason": p.reversal_reason,
+            "reversal_requested_by_name": f"{(requester.first_name or '')} {(requester.last_name or '')}".strip() if requester else None,
+            "reversal_requested_at": p.reversal_requested_at.isoformat() if p.reversal_requested_at else None,
+        })
+    return result
+
+
+@router.post("/penalties/{penalty_id}/approve-reversal")
+def approve_penalty_reversal(
+    penalty_id: str,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Approve a penalty reversal — creates a reversing journal entry and marks
+    the penalty as REVERSED. The penalty no longer appears in declarations."""
+    from app.models.transaction import PenaltyRecordStatus
+    from app.models.ledger import JournalEntry, JournalLine
+    from app.services.accounting import create_journal_entry
+    from app.core.audit import write_audit_log
+
+    try:
+        pid = UUID(penalty_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid penalty ID")
+
+    penalty = db.query(PenaltyRecord).filter(PenaltyRecord.id == pid).first()
+    if not penalty:
+        raise HTTPException(status_code=404, detail="Penalty not found")
+
+    status_val = penalty.status.value if isinstance(penalty.status, PenaltyRecordStatus) else penalty.status
+    if status_val != PenaltyRecordStatus.REVERSAL_PENDING.value:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Penalty is not pending reversal. Current status: {status_val}",
+        )
+
+    # Create a reversing journal entry if the original penalty had one.
+    # Original: Debit MEM_SAV (reduce savings), Credit PENALTY_INCOME
+    # Reversal: Debit PENALTY_INCOME, Credit MEM_SAV (restore savings)
+    reversal_je = None
+    if penalty.journal_entry_id:
+        original_je = db.query(JournalEntry).filter(JournalEntry.id == penalty.journal_entry_id).first()
+        if original_je and not original_je.reversed_by:
+            original_lines = db.query(JournalLine).filter(
+                JournalLine.journal_entry_id == original_je.id
+            ).all()
+
+            reversal_lines = []
+            for line in original_lines:
+                reversal_lines.append({
+                    "account_id": line.ledger_account_id,
+                    "debit_amount": line.credit_amount,
+                    "credit_amount": line.debit_amount,
+                    "description": f"Reversal: {line.description or ''}",
+                })
+
+            member = penalty.member
+            user = db.query(User).filter(User.id == member.user_id).first() if member else None
+            member_name = f"{(user.first_name or '')} {(user.last_name or '')}".strip() if user else "Unknown"
+
+            reversal_je = create_journal_entry(
+                db=db,
+                description=f"Penalty reversal: {penalty.penalty_type.name if penalty.penalty_type else 'Unknown'} — {member_name} — {penalty.reversal_reason or ''}",
+                lines=reversal_lines,
+                source_ref=str(penalty.id),
+                source_type="penalty_reversal",
+                created_by=current_user.id,
+            )
+
+            original_je.reversed_by = current_user.id
+            original_je.reversed_at = datetime.utcnow()
+            original_je.reversal_reason = penalty.reversal_reason
+
+    penalty.status = PenaltyRecordStatus.REVERSED
+    penalty.reversed_by = current_user.id
+    penalty.reversed_at = datetime.utcnow()
+    if reversal_je:
+        penalty.reversal_journal_entry_id = reversal_je.id
+    db.commit()
+
+    member = penalty.member
+    user = db.query(User).filter(User.id == member.user_id).first() if member else None
+    member_name = f"{(user.first_name or '')} {(user.last_name or '')}".strip() if user else "Unknown"
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role="treasurer",
+        action="Penalty reversal approved",
+        details=f"member={member_name}, penalty={penalty.penalty_type.name if penalty.penalty_type else 'Unknown'}, reason={penalty.reversal_reason or 'N/A'}",
+    )
+
+    return {"message": "Penalty reversed successfully", "penalty_id": str(penalty.id)}

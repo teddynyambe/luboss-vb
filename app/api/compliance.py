@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Form
 from sqlalchemy.orm import Session
 from app.db.base import get_db
@@ -5,8 +7,9 @@ from app.core.dependencies import require_compliance, require_any_role, get_curr
 from app.models.user import User
 from app.models.transaction import PenaltyRecord, PenaltyType, PenaltyRecordStatus
 from app.models.member import MemberProfile, MemberStatus
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
+from uuid import UUID
 
 router = APIRouter(prefix="/api/compliance", tags=["compliance"])
 
@@ -15,6 +18,10 @@ class PenaltyCreate(BaseModel):
     member_id: str
     penalty_type_id: str
     notes: Optional[str] = None
+
+
+class PenaltyReversalRequest(BaseModel):
+    reason: str = Field(min_length=1)
 
 
 @router.post("/penalties")
@@ -208,3 +215,91 @@ def get_members_for_penalty(
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error loading members: {str(e)}")
+
+
+# ---------------------------------------------------------------------------
+# Penalty Reversal — request (Compliance) then approve (Treasurer)
+# ---------------------------------------------------------------------------
+
+def _penalty_detail(p: PenaltyRecord, db: Session) -> dict:
+    """Serialize a PenaltyRecord with member/user names for the UI."""
+    member = p.member
+    user = db.query(User).filter(User.id == member.user_id).first() if member else None
+    member_name = f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip() if user else "Unknown"
+    requester = db.query(User).filter(User.id == p.reversal_requested_by).first() if p.reversal_requested_by else None
+    reverser = db.query(User).filter(User.id == p.reversed_by).first() if p.reversed_by else None
+    return {
+        "id": str(p.id),
+        "member_id": str(p.member_id),
+        "member_name": member_name,
+        "penalty_type_name": p.penalty_type.name if p.penalty_type else "Unknown",
+        "fee_amount": float(p.penalty_type.fee_amount) if p.penalty_type else 0,
+        "status": p.status.value if isinstance(p.status, PenaltyRecordStatus) else p.status,
+        "date_issued": p.date_issued.isoformat() if p.date_issued else None,
+        "notes": p.notes,
+        "reversal_reason": p.reversal_reason,
+        "reversal_requested_by_name": f"{(requester.first_name or '')} {(requester.last_name or '')}".strip() if requester else None,
+        "reversal_requested_at": p.reversal_requested_at.isoformat() if p.reversal_requested_at else None,
+        "reversed_by_name": f"{(reverser.first_name or '')} {(reverser.last_name or '')}".strip() if reverser else None,
+        "reversed_at": p.reversed_at.isoformat() if p.reversed_at else None,
+    }
+
+
+@router.get("/penalties/approved")
+def get_approved_penalties(
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman")),
+    db: Session = Depends(get_db),
+):
+    """Get approved penalties that can be reversed."""
+    penalties = db.query(PenaltyRecord).filter(
+        PenaltyRecord.status.in_([
+            PenaltyRecordStatus.APPROVED.value,
+            PenaltyRecordStatus.REVERSAL_PENDING.value,
+        ])
+    ).order_by(PenaltyRecord.date_issued.desc()).all()
+    return [_penalty_detail(p, db) for p in penalties]
+
+
+@router.put("/penalties/{penalty_id}/request-reversal")
+def request_penalty_reversal(
+    penalty_id: str,
+    body: PenaltyReversalRequest,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman")),
+    db: Session = Depends(get_db),
+):
+    """Request reversal of an approved penalty. Goes to Treasurer for approval."""
+    try:
+        pid = UUID(penalty_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid penalty ID")
+
+    penalty = db.query(PenaltyRecord).filter(PenaltyRecord.id == pid).first()
+    if not penalty:
+        raise HTTPException(status_code=404, detail="Penalty not found")
+
+    status_val = penalty.status.value if isinstance(penalty.status, PenaltyRecordStatus) else penalty.status
+    if status_val not in (PenaltyRecordStatus.APPROVED.value,):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Only approved penalties can be reversed. Current status: {status_val}",
+        )
+
+    penalty.status = PenaltyRecordStatus.REVERSAL_PENDING
+    penalty.reversal_requested_by = current_user.id
+    penalty.reversal_requested_at = datetime.utcnow()
+    penalty.reversal_reason = body.reason
+    db.commit()
+    db.refresh(penalty)
+
+    from app.core.audit import write_audit_log
+    member = penalty.member
+    user = db.query(User).filter(User.id == member.user_id).first() if member else None
+    member_name = f"{(user.first_name or '')} {(user.last_name or '')}".strip() if user else "Unknown"
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role="compliance",
+        action="Penalty reversal requested",
+        details=f"member={member_name}, penalty={penalty.penalty_type.name if penalty.penalty_type else 'Unknown'}, reason={body.reason}",
+    )
+
+    return _penalty_detail(penalty, db)

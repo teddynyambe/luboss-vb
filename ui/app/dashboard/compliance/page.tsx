@@ -26,6 +26,18 @@ interface Member {
   };
 }
 
+interface ApprovedPenalty {
+  id: string;
+  member_name: string;
+  penalty_type_name: string;
+  fee_amount: number;
+  status: string;
+  date_issued: string | null;
+  notes: string | null;
+  reversal_reason: string | null;
+  reversal_requested_at: string | null;
+}
+
 export default function ComplianceDashboard() {
   const { user } = useAuth();
   const router = useRouter();
@@ -43,9 +55,15 @@ export default function ComplianceDashboard() {
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
+  // Reversal state
+  const [approvedPenalties, setApprovedPenalties] = useState<ApprovedPenalty[]>([]);
+  const [reversingId, setReversingId] = useState<string | null>(null);
+  const [reversalReason, setReversalReason] = useState('');
+
   useEffect(() => {
     loadPenaltyTypes();
     loadMembers();
+    loadApprovedPenalties();
   }, []);
 
   const loadPenaltyTypes = async () => {
@@ -60,6 +78,29 @@ export default function ComplianceDashboard() {
     const response = await api.get<Member[]>('/api/compliance/members');
     if (response.data) {
       setMembers(response.data);
+    }
+  };
+
+  const loadApprovedPenalties = async () => {
+    const res = await api.get<ApprovedPenalty[]>('/api/compliance/penalties/approved');
+    if (res.data) setApprovedPenalties(res.data);
+  };
+
+  const handleRequestReversal = async () => {
+    if (!reversingId || !reversalReason.trim()) return;
+    setError('');
+    const res = await api.put(`/api/compliance/penalties/${reversingId}/request-reversal`, {
+      reason: reversalReason,
+    });
+    if (!res.error) {
+      setSuccess('Reversal request submitted — awaiting Treasurer approval');
+      setReversingId(null);
+      setReversalReason('');
+      loadApprovedPenalties();
+      setTimeout(() => setSuccess(''), 5000);
+    } else {
+      setError(res.error || 'Failed to request reversal');
+      setTimeout(() => setError(''), 5000);
     }
   };
 
@@ -468,6 +509,76 @@ export default function ComplianceDashboard() {
             </button>
           </form>
         </div>
+        {/* Penalty Reversals */}
+        <div className="card mt-6">
+          <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Reverse Penalty</h2>
+          <p className="text-sm text-blue-600 mb-4">
+            Select an approved penalty to request reversal. The Treasurer must approve the reversal before it takes effect.
+          </p>
+
+          {approvedPenalties.length === 0 ? (
+            <p className="text-blue-500 text-center py-4">No approved penalties to reverse.</p>
+          ) : (
+            <div className="space-y-2 max-h-[400px] overflow-y-auto">
+              {approvedPenalties.map(p => (
+                <div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border border-blue-100 rounded-lg p-3 bg-blue-50">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold text-blue-900">{p.member_name}</span>
+                      <span className="text-xs bg-blue-200 text-blue-800 px-2 py-0.5 rounded-full">{p.penalty_type_name}</span>
+                      <span className="font-bold text-blue-900">K{p.fee_amount.toLocaleString()}</span>
+                      {p.status === 'reversal_pending' && (
+                        <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full">Reversal Pending</span>
+                      )}
+                    </div>
+                    {p.notes && <p className="text-xs text-blue-600 mt-0.5 truncate">{p.notes}</p>}
+                    {p.reversal_reason && (
+                      <p className="text-xs text-orange-600 mt-0.5">Reversal reason: {p.reversal_reason}</p>
+                    )}
+                  </div>
+                  {p.status === 'approved' && (
+                    <button
+                      onClick={() => { setReversingId(p.id); setReversalReason(''); }}
+                      className="px-3 py-1.5 bg-red-500 text-white rounded-lg text-xs font-semibold hover:bg-red-600 shrink-0"
+                    >
+                      Request Reversal
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Reversal reason modal */}
+        {reversingId && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
+              <h3 className="text-lg font-bold text-red-800 mb-3">Request Penalty Reversal</h3>
+              <p className="text-sm text-blue-700 mb-3">Provide a reason for reversing this penalty. The Treasurer must approve before it takes effect.</p>
+              <textarea
+                value={reversalReason}
+                onChange={e => setReversalReason(e.target.value)}
+                className="w-full mb-4"
+                rows={3}
+                placeholder="Reason for reversal (e.g. wrongly charged, disputed and resolved)..."
+                autoFocus
+              />
+              <div className="flex justify-end gap-2">
+                <button onClick={() => setReversingId(null)} className="px-4 py-2 bg-gray-200 rounded-lg text-sm font-semibold">
+                  Cancel
+                </button>
+                <button
+                  onClick={handleRequestReversal}
+                  disabled={!reversalReason.trim()}
+                  className="px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 disabled:opacity-50"
+                >
+                  Submit Request
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

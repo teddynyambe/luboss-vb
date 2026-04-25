@@ -147,6 +147,21 @@ export default function TreasurerDashboard() {
   const [bankStmtDesc, setBankStmtDesc] = useState('');
   const [uploadingStmt, setUploadingStmt] = useState(false);
 
+  // Penalty Reversals state
+  interface PendingReversal {
+    id: string;
+    member_name: string;
+    penalty_type_name: string;
+    fee_amount: number;
+    date_issued: string | null;
+    notes: string | null;
+    reversal_reason: string;
+    reversal_requested_by_name: string | null;
+    reversal_requested_at: string | null;
+  }
+  const [pendingReversals, setPendingReversals] = useState<PendingReversal[]>([]);
+  const [approvingReversalId, setApprovingReversalId] = useState<string | null>(null);
+
   // Payment Requests state
   interface ApprovedPaymentRequest {
     id: string;
@@ -246,12 +261,13 @@ export default function TreasurerDashboard() {
   };
 
   const loadData = async () => {
-    const [depositsRes, penaltiesRes, loansRes, activeLoansRes, paymentsRes] = await Promise.all([
+    const [depositsRes, penaltiesRes, loansRes, activeLoansRes, paymentsRes, reversalsRes] = await Promise.all([
       api.get<PendingDeposit[]>('/api/treasurer/deposits/pending'),
       api.get<PendingPenalty[]>('/api/treasurer/penalties/pending'),
       api.get<PendingLoanApplication[]>('/api/treasurer/loans/pending'),
       api.get<ActiveLoan[]>('/api/treasurer/loans/active?loan_filter=active'),
       api.get<ApprovedPaymentRequest[]>('/api/payment-requests/?status=approved'),
+      api.get<PendingReversal[]>('/api/treasurer/penalties/pending-reversals'),
     ]);
 
     if (depositsRes.data) setPendingDeposits(depositsRes.data);
@@ -263,6 +279,7 @@ export default function TreasurerDashboard() {
       console.error('Active loans fetch error:', activeLoansRes.error);
     }
     if (paymentsRes.data) setApprovedPayments(paymentsRes.data);
+    if (reversalsRes.data) setPendingReversals(reversalsRes.data);
     setLoading(false);
   };
 
@@ -1150,6 +1167,50 @@ export default function TreasurerDashboard() {
                           ))
                         )}
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Pending Penalty Reversals */}
+                {pendingReversals.length > 0 && (
+                  <div className="bg-white border-2 border-orange-200 rounded-lg p-4">
+                    <h3 className="text-base font-bold text-orange-900 mb-3">
+                      Pending Penalty Reversals ({pendingReversals.length})
+                    </h3>
+                    <div className="space-y-2 max-h-[400px] overflow-y-auto">
+                      {pendingReversals.map(r => (
+                        <div key={r.id} className="border border-orange-100 rounded-lg p-3 bg-orange-50">
+                          <div className="flex justify-between items-start gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-2 mb-1 flex-wrap">
+                                <span className="font-semibold text-orange-900">{r.member_name}</span>
+                                <span className="text-xs bg-orange-200 text-orange-800 px-2 py-0.5 rounded-full">{r.penalty_type_name}</span>
+                                <span className="font-bold text-orange-900">K{r.fee_amount.toLocaleString()}</span>
+                              </div>
+                              <p className="text-sm text-red-700 font-medium">Reason: {r.reversal_reason}</p>
+                              {r.notes && <p className="text-xs text-orange-600 mt-0.5">Original note: {r.notes}</p>}
+                              <p className="text-xs text-orange-500 mt-0.5">
+                                Requested by {r.reversal_requested_by_name || 'Unknown'}
+                                {r.reversal_requested_at && ` on ${new Date(r.reversal_requested_at).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}`}
+                              </p>
+                            </div>
+                            <button
+                              disabled={approvingReversalId === r.id}
+                              onClick={async () => {
+                                setApprovingReversalId(r.id);
+                                const res = await api.post(`/api/treasurer/penalties/${r.id}/approve-reversal`, {});
+                                setApprovingReversalId(null);
+                                if (res.data) {
+                                  loadData();
+                                }
+                              }}
+                              className="px-3 py-1.5 bg-orange-600 text-white rounded-lg text-xs font-semibold hover:bg-orange-700 disabled:opacity-50 shrink-0"
+                            >
+                              {approvingReversalId === r.id ? 'Reversing...' : 'Approve Reversal'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 )}
