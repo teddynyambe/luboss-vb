@@ -369,18 +369,37 @@ def get_applicable_penalties(
         auto_apply = getattr(declaration_phase, 'auto_apply_penalty', False)
         monthly_end_day = getattr(declaration_phase, 'monthly_end_day', None)
         penalty_type_id = getattr(declaration_phase, 'penalty_type_id', None)
-        
+
         if auto_apply and monthly_end_day and penalty_type_id:
             today = date.today()
             is_late = False
-            
-            # Check if declaration is late (after monthly_end_day)
-            if today.year == effective_date.year and today.month == effective_date.month:
-                if today.day > monthly_end_day:
+
+            # Check if a declaration already exists for this month.
+            # If yes, the member declared on time and is just editing —
+            # do NOT apply a late declaration penalty.
+            existing_declaration = db.query(Declaration).filter(
+                Declaration.member_id == member_profile.id,
+                extract('year', Declaration.effective_month) == effective_date.year,
+                extract('month', Declaration.effective_month) == effective_date.month,
+            ).first()
+
+            if existing_declaration:
+                # Member already has a declaration — they declared on time.
+                # Check if the ORIGINAL declaration was made late
+                # (only apply penalty if the declaration was first created after the deadline).
+                if existing_declaration.created_at:
+                    created_day = existing_declaration.created_at.day
+                    is_late = created_day > monthly_end_day
+                else:
+                    is_late = False
+            else:
+                # No declaration yet — check if today is past the deadline
+                if today.year == effective_date.year and today.month == effective_date.month:
+                    if today.day > monthly_end_day:
+                        is_late = True
+                elif today.year > effective_date.year or (today.year == effective_date.year and today.month > effective_date.month):
                     is_late = True
-            elif today.year > effective_date.year or (today.year == effective_date.year and today.month > effective_date.month):
-                is_late = True
-            
+
             if is_late:
                 # Check if penalty record already exists for this declaration
                 # More comprehensive duplicate check: check by member, penalty_type, and effective month
