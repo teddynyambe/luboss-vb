@@ -63,6 +63,7 @@ interface ActiveLoan {
   disbursement_date?: string;
   maturity_date?: string;
   status: string;
+  performance_status?: 'on_track' | 'at_risk' | 'defaulting' | 'paid';
   total_principal_paid: number;
   total_interest_paid: number;
   total_interest_expected: number | null;
@@ -114,7 +115,7 @@ export default function TreasurerDashboard() {
   const [pendingPenalties, setPendingPenalties] = useState<PendingPenalty[]>([]);
   const [pendingLoans, setPendingLoans] = useState<PendingLoanApplication[]>([]);
   const [activeLoans, setActiveLoans] = useState<ActiveLoan[]>([]);
-  const [loanFilter, setLoanFilter] = useState<'active' | 'paid'>('active');
+  const [loanFilter, setLoanFilter] = useState<'active' | 'at_risk' | 'defaulting' | 'paid'>('active');
   const [showAllLoans, setShowAllLoans] = useState(false);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
@@ -184,8 +185,10 @@ export default function TreasurerDashboard() {
   interface DeclarationReportMember {
     member_id: string;
     member_name: string;
+    declaration_id: string | null;
     declaration_amount: number | null;
     is_paid: boolean;
+    is_phantom?: boolean;
   }
   
   interface LoanReportItem {
@@ -237,6 +240,11 @@ export default function TreasurerDashboard() {
   const [declarationDetails, setDeclarationDetails] = useState<DeclarationDetailsReport | null>(null);
   const [loadingDeclarationDetails, setLoadingDeclarationDetails] = useState(false);
 
+  // Reject-declaration modal state
+  const [rejectTarget, setRejectTarget] = useState<DeclarationReportMember | null>(null);
+  const [rejectDeclComment, setRejectDeclComment] = useState('');
+  const [rejectingDecl, setRejectingDecl] = useState(false);
+
   useEffect(() => {
     loadData();
   }, []);
@@ -251,7 +259,7 @@ export default function TreasurerDashboard() {
     loadReports();
   }, [selectedReportMonth]);
 
-  const loadLoans = async (filter: 'active' | 'paid') => {
+  const loadLoans = async (filter: 'active' | 'at_risk' | 'defaulting' | 'paid') => {
     const res = await api.get<ActiveLoan[]>(`/api/treasurer/loans/active?loan_filter=${filter}`);
     if (res.data) {
       setActiveLoans(res.data);
@@ -436,6 +444,35 @@ export default function TreasurerDashboard() {
       setShowDeclarationDetailsModal(false);
     } finally {
       setLoadingDeclarationDetails(false);
+    }
+  };
+
+  const openRejectDeclaration = (member: DeclarationReportMember) => {
+    setRejectTarget(member);
+    setRejectDeclComment('');
+  };
+
+  const submitRejectDeclaration = async () => {
+    if (!rejectTarget?.declaration_id || !rejectDeclComment.trim()) return;
+    setRejectingDecl(true);
+    try {
+      const res = await api.post(
+        `/api/chairman/reconcile/declaration/${rejectTarget.declaration_id}/reject`,
+        { comment: rejectDeclComment.trim() }
+      );
+      if (res.error) {
+        setMessage({ type: 'error', text: res.error });
+      } else {
+        setMessage({
+          type: 'success',
+          text: `Declaration for ${rejectTarget.member_name} rejected. Member can now re-upload proof.`,
+        });
+        setRejectTarget(null);
+        loadReports();
+      }
+    } finally {
+      setRejectingDecl(false);
+      setTimeout(() => setMessage(null), 4000);
     }
   };
 
@@ -873,32 +910,39 @@ export default function TreasurerDashboard() {
               </div>
 
               {/* Filter tabs */}
-              <div className="flex gap-2 mb-3">
-                <button
-                  onClick={() => { if (loanFilter !== 'active') { setLoanFilter('active'); setShowAllLoans(false); loadLoans('active'); } }}
-                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                    loanFilter === 'active'
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'bg-white text-blue-700 border-blue-300 hover:bg-blue-50'
-                  }`}
-                >
-                  Active
-                </button>
-                <button
-                  onClick={() => { if (loanFilter !== 'paid') { setLoanFilter('paid'); setShowAllLoans(false); loadLoans('paid'); } }}
-                  className={`flex-1 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                    loanFilter === 'paid'
-                      ? 'bg-green-600 text-white border-green-600'
-                      : 'bg-white text-green-700 border-green-300 hover:bg-green-50'
-                  }`}
-                >
-                  Paid Off
-                </button>
+              <div className="flex gap-2 mb-3 flex-wrap">
+                {([
+                  { key: 'active',     label: 'Active',     activeColor: 'bg-blue-600 border-blue-600',     idleColor: 'text-blue-700 border-blue-300 hover:bg-blue-50' },
+                  { key: 'at_risk',    label: 'At Risk',    activeColor: 'bg-amber-500 border-amber-500',   idleColor: 'text-amber-700 border-amber-300 hover:bg-amber-50' },
+                  { key: 'defaulting', label: 'Defaulting', activeColor: 'bg-red-600 border-red-600',       idleColor: 'text-red-700 border-red-300 hover:bg-red-50' },
+                  { key: 'paid',       label: 'Paid Off',   activeColor: 'bg-green-600 border-green-600',   idleColor: 'text-green-700 border-green-300 hover:bg-green-50' },
+                ] as const).map((opt) => (
+                  <button
+                    key={opt.key}
+                    onClick={() => {
+                      if (loanFilter !== opt.key) {
+                        setLoanFilter(opt.key);
+                        setShowAllLoans(false);
+                        loadLoans(opt.key);
+                      }
+                    }}
+                    className={`flex-1 min-w-[80px] py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                      loanFilter === opt.key
+                        ? `${opt.activeColor} text-white`
+                        : `bg-white ${opt.idleColor}`
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
               </div>
 
               {activeLoans.length === 0 ? (
                 <p className="text-blue-700 text-sm text-center py-6">
-                  {loanFilter === 'paid' ? 'No paid-off loans' : 'No active loans'}
+                  {loanFilter === 'paid' ? 'No paid-off loans' :
+                   loanFilter === 'at_risk' ? 'No at-risk loans' :
+                   loanFilter === 'defaulting' ? 'No defaulting loans' :
+                   'No active loans'}
                 </p>
               ) : (
                 <div className="space-y-2 max-h-[460px] overflow-y-auto">
@@ -910,9 +954,21 @@ export default function TreasurerDashboard() {
                     >
                       <div className="flex justify-between items-start gap-2">
                         <div className="flex-1 min-w-0">
-                          <p className="font-semibold text-sm text-blue-900 truncate mb-1.5">
-                            {loan.member_name}
-                          </p>
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <p className="font-semibold text-sm text-blue-900 truncate">
+                              {loan.member_name}
+                            </p>
+                            {loan.performance_status === 'defaulting' && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-red-600 text-white whitespace-nowrap">
+                                Defaulting
+                              </span>
+                            )}
+                            {loan.performance_status === 'at_risk' && (
+                              <span className="px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded bg-amber-500 text-white whitespace-nowrap">
+                                At Risk
+                              </span>
+                            )}
+                          </div>
                           <div className="space-y-0.5">
                             {loan.disbursement_date && (
                               <div className="flex justify-between text-xs">
@@ -1101,11 +1157,36 @@ export default function TreasurerDashboard() {
                                 {member.member_name}
                               </button>
                               <span className="flex items-center gap-1 text-blue-700 font-semibold">
-                                {member.declaration_amount != null
-                                  ? `K${member.declaration_amount.toLocaleString()}`
-                                  : ''}
-                                {member.declaration_amount != null && member.is_paid && (
-                                  <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
+                                {member.is_phantom ? (
+                                  <span
+                                    className="text-amber-700"
+                                    title="Empty reconciliation was saved — declaration is marked approved with K0. Reject to clean it up."
+                                  >
+                                    K0 ⚠
+                                  </span>
+                                ) : member.declaration_amount != null ? (
+                                  `K${member.declaration_amount.toLocaleString()}`
+                                ) : null}
+                                {member.is_paid && (
+                                  <>
+                                    {!member.is_phantom && (
+                                      <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
+                                    )}
+                                    {member.declaration_id && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openRejectDeclaration(member)}
+                                        title={
+                                          member.is_phantom
+                                            ? 'Phantom approved declaration — reject to clear and let the member re-declare'
+                                            : 'Reverse this declaration and let the member re-upload proof'
+                                        }
+                                        className="ml-1 px-1.5 py-0.5 text-xs font-semibold text-red-700 bg-red-50 hover:bg-red-100 border border-red-300 rounded transition-colors"
+                                      >
+                                        Reject
+                                      </button>
+                                    )}
+                                  </>
                                 )}
                               </span>
                             </div>
@@ -1845,6 +1926,52 @@ export default function TreasurerDashboard() {
                 className="btn-secondary"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reject Declaration Modal */}
+      {rejectTarget && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 space-y-4">
+            <h2 className="text-lg font-bold text-red-700">Reject Declaration</h2>
+            <p className="text-sm text-gray-700">
+              You are about to reverse the <strong>{formatMonth(selectedReportMonth)}</strong> declaration
+              for <strong>{rejectTarget.member_name}</strong> (K{rejectTarget.declaration_amount?.toLocaleString()}).
+            </p>
+            <ul className="text-sm text-gray-700 list-disc pl-5 space-y-1">
+              <li>All ledger postings for this deposit (savings, social, admin, penalties, interest, loan repayment) will be reversed.</li>
+              <li>The deposit proof will be marked <em>rejected</em> with your comment, and the declaration set back to <em>pending</em>.</li>
+              <li>The member can then edit the declaration and re-upload proof normally.</li>
+            </ul>
+            <div className="flex flex-col gap-1">
+              <label className="text-sm font-semibold text-blue-900">
+                Comment to member (required)
+              </label>
+              <textarea
+                value={rejectDeclComment}
+                onChange={(e) => setRejectDeclComment(e.target.value)}
+                rows={3}
+                placeholder="e.g. Proof of payment was not actually submitted — please attach the deposit slip and resubmit."
+                className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setRejectTarget(null)}
+                disabled={rejectingDecl}
+                className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitRejectDeclaration}
+                disabled={rejectingDecl || !rejectDeclComment.trim()}
+                className="px-5 py-2 bg-red-600 text-white rounded-lg font-semibold text-sm hover:bg-red-700 disabled:opacity-50"
+              >
+                {rejectingDecl ? 'Rejecting…' : 'Reject Declaration'}
               </button>
             </div>
           </div>

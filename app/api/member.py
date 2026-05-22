@@ -122,9 +122,13 @@ def get_my_status(
         except Exception:
             pending_penalties_count = 0
 
-        # Monthly interest due on active loans (minus interest already paid)
+        # Monthly interest due on active loans (minus interest already paid).
+        # Interest paid is sourced from Repayment rows (same source as the ledger
+        # statement), so Payment-Proof and Reconciliation paths agree.
         try:
-            from app.models.transaction import LoanStatus as _LS
+            from app.models.transaction import LoanStatus as _LS, Repayment
+            from app.models.ledger import JournalEntry as _JE
+            from sqlalchemy import func as _func
             active_loans = db.query(Loan).filter(
                 Loan.member_id == member_profile.id,
                 Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED])
@@ -132,18 +136,15 @@ def get_my_status(
             interest_on_loan_due = 0.0
             for loan in active_loans:
                 monthly_interest = float(loan.loan_amount) * float(loan.percentage_interest) / 100
-                # Subtract interest already paid via approved declarations
-                decl_query = db.query(Declaration).filter(
-                    Declaration.member_id == member_profile.id,
-                    Declaration.status == DeclarationStatus.APPROVED,
-                    Declaration.declared_interest_on_loan > 0,
-                )
-                if loan.disbursement_date:
-                    decl_query = decl_query.filter(
-                        Declaration.effective_month >= loan.disbursement_date
+                total_interest_paid = float(
+                    db.query(_func.coalesce(_func.sum(Repayment.interest_amount), 0))
+                    .join(_JE, _JE.id == Repayment.journal_entry_id)
+                    .filter(
+                        Repayment.loan_id == loan.id,
+                        _JE.reversed_by.is_(None),
+                        _JE.reversed_at.is_(None),
                     )
-                total_interest_paid = sum(
-                    float(d.declared_interest_on_loan or 0) for d in decl_query.all()
+                    .scalar() or 0
                 )
                 interest_on_loan_due += max(0.0, monthly_interest - total_interest_paid)
         except Exception:
@@ -1709,23 +1710,17 @@ def get_account_transactions(
                     "amount": float(deposit.amount)
                 })
             
-            # Add declarations as debit entries (informational - shows when member declared savings)
-            # Only include declarations that have been approved (have an approved, non-reversed deposit)
-            approved_declaration_ids = set()
-            for da in deposit_approvals:
-                dep = da.deposit_proof
-                if dep and dep.declaration_id:
-                    approved_declaration_ids.add(dep.declaration_id)
-
-            if approved_declaration_ids:
-                declarations = db.query(Declaration).filter(
-                    Declaration.member_id == member_profile.id,
-                    Declaration.declared_savings_amount.isnot(None),
-                    Declaration.declared_savings_amount > 0,
-                    Declaration.id.in_(approved_declaration_ids)
-                ).order_by(Declaration.created_at.desc()).all()
-            else:
-                declarations = []
+            # Add declarations as debit entries (informational - shows what the member
+            # declared for the month). We include any declaration with a non-zero
+            # declared savings amount regardless of approval state — that way the
+            # statement keeps showing the declaration on the left even when the
+            # corresponding deposit was rejected or reversed (in which case the
+            # right-hand "Approved Deposit" column simply shows blank).
+            declarations = db.query(Declaration).filter(
+                Declaration.member_id == member_profile.id,
+                Declaration.declared_savings_amount.isnot(None),
+                Declaration.declared_savings_amount > 0,
+            ).order_by(Declaration.created_at.desc()).all()
             
             for declaration in declarations:
                 transactions.append({

@@ -1678,6 +1678,7 @@ class ReconcileRequest(BaseModel):
     loan_amount: float = 0.0
     loan_rate: float = 0.0
     loan_term_months: str = "1"  # e.g. "1", "2", "3", "4"
+    allow_overwrite: bool = False  # required when this member+month already has a live approved deposit
 
 
 @router.get("/reconcile")
@@ -1773,6 +1774,28 @@ def post_reconcile(
     if (month_date.year, month_date.month) > (today.year, today.month):
         raise HTTPException(status_code=400, detail="Cannot reconcile a future month")
 
+    # Refuse empty reconciliations — saving with every amount at zero produces a
+    # phantom "approved" declaration + zero-value journal entry that's confusing
+    # for everyone and impossible to spot in the reports view.
+    total_inputs = (
+        (body.savings_amount or 0.0)
+        + (body.social_fund or 0.0)
+        + (body.admin_fund or 0.0)
+        + (body.penalties or 0.0)
+        + (body.interest_on_loan or 0.0)
+        + (body.loan_repayment or 0.0)
+        + (body.loan_amount or 0.0)
+    )
+    if total_inputs <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Reconciliation has no amounts. Enter at least one non-zero value "
+                "(savings, social fund, admin fund, penalties, interest, loan repayment, "
+                "or loan amount) before saving."
+            ),
+        )
+
     # 1. Active cycle
     active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
     if not active_cycle:
@@ -1821,11 +1844,25 @@ def post_reconcile(
         existing_approval = db.query(DepositApproval).filter(
             DepositApproval.deposit_proof_id == existing_proof.id
         ).first()
+        # Guard: if there is a live (non-reversed) approval for this member+month,
+        # require the caller to opt-in to overwrite. Otherwise we'd silently reverse
+        # the existing posting and clobber the ledger (the root cause of the
+        # outstanding-balance divergence bug). The operator should usually edit the
+        # original declaration via the Payment Proof flow instead of re-reconciling.
         if existing_approval and existing_approval.journal_entry_id:
             old_entry = db.query(JournalEntry).filter(
                 JournalEntry.id == existing_approval.journal_entry_id
             ).first()
-            if old_entry:
+            if old_entry and old_entry.reversed_by is None and old_entry.reversed_at is None:
+                if not body.allow_overwrite:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"An approved deposit already exists for {month_date.strftime('%B %Y')}. "
+                            "Re-reconciling will reverse the existing ledger posting. "
+                            "If you really intend to overwrite, resubmit with allow_overwrite=true."
+                        ),
+                    )
                 old_entry.reversed_by = current_user.id
                 old_entry.reversed_at = datetime.now()
                 db.flush()
@@ -1962,6 +1999,18 @@ def post_reconcile(
             )
         ).first()
 
+        # Guard against silently duplicating an active loan when reconciling
+        # a non-disbursement month: if the operator entered loan_amount for a
+        # month that is not the disbursement month, treat it as repayment context
+        # against the existing active loan rather than creating a new loan.
+        if not existing_loan:
+            active_loan = db.query(Loan).filter(
+                Loan.member_id == member_uuid,
+                Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
+            ).order_by(Loan.created_at.asc()).first()
+            if active_loan:
+                existing_loan = active_loan
+
         if existing_loan:
             # Update existing loan details
             existing_loan.loan_amount = Decimal(str(body.loan_amount))
@@ -2023,6 +2072,219 @@ def post_reconcile(
 
     db.commit()
     return {"message": "Reconciliation saved successfully"}
+
+
+class ConsolidateLoansRequest(BaseModel):
+    member_id: str
+    keep_loan_id: str
+    new_loan_amount: float
+    new_percentage_interest: float | None = None
+    new_number_of_instalments: str | None = None
+    close_loan_ids: list[str]
+
+
+class AdjustRepaymentRequest(BaseModel):
+    new_principal: float
+    new_interest: float
+
+
+@router.get("/reconcile/loan-state/{member_id}")
+def get_loan_state(
+    member_id: str,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Loans + repayments + ledger summary for a member, used by the
+    reconciliation page's Loan State panel."""
+    from app.services.loan_repair import get_member_loan_state
+    try:
+        mid = UUID(member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id")
+    return get_member_loan_state(db, mid)
+
+
+@router.post("/reconcile/consolidate")
+def post_consolidate_loans(
+    body: ConsolidateLoansRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Collapse duplicate loans into one, reverse the closed loans'
+    disbursement entries, and (if needed) post a balancing entry so the
+    kept loan's ledger matches the new amount."""
+    from app.services.loan_repair import consolidate_loans
+    from app.core.audit import write_audit_log
+    try:
+        member_uuid = UUID(body.member_id)
+        keep_uuid = UUID(body.keep_loan_id)
+        close_uuids = [UUID(x) for x in body.close_loan_ids]
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid UUID in request")
+
+    try:
+        result = consolidate_loans(
+            db=db,
+            member_id=member_uuid,
+            keep_loan_id=keep_uuid,
+            new_loan_amount=Decimal(str(body.new_loan_amount)),
+            new_percentage_interest=(
+                Decimal(str(body.new_percentage_interest))
+                if body.new_percentage_interest is not None else None
+            ),
+            new_number_of_instalments=body.new_number_of_instalments,
+            close_loan_ids=close_uuids,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Loan consolidation",
+        details=(
+            f"member={body.member_id} keep={body.keep_loan_id} "
+            f"closed={','.join(body.close_loan_ids)} new_amount={body.new_loan_amount}"
+        ),
+    )
+    return result
+
+
+class MoveRepaymentRequest(BaseModel):
+    new_loan_id: str
+
+
+class RejectDeclarationRequest(BaseModel):
+    comment: str
+
+
+@router.post("/reconcile/declaration/{declaration_id}/reject")
+def post_reject_declaration(
+    declaration_id: str,
+    body: RejectDeclarationRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Reverse every live ledger posting tied to a declaration, mark its
+    deposit proof rejected with the treasurer's comment, and reset the
+    declaration to pending so the member can edit and re-upload proof."""
+    from app.services.loan_repair import reject_declaration
+    from app.core.audit import write_audit_log
+    try:
+        decl_uuid = UUID(declaration_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid declaration_id")
+    try:
+        result = reject_declaration(
+            db=db,
+            declaration_id=decl_uuid,
+            comment=body.comment,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Declaration rejected",
+        details=f"declaration={declaration_id} comment={body.comment[:120]}",
+    )
+    return result
+
+
+@router.post("/reconcile/repayment/{repayment_id}/reverse")
+def post_reverse_repayment(
+    repayment_id: str,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Mark a repayment's journal entry as reversed. Use when a payment was
+    misattributed (e.g. moved onto the wrong loan during consolidation)."""
+    from app.services.loan_repair import reverse_repayment
+    from app.core.audit import write_audit_log
+    try:
+        rep_uuid = UUID(repayment_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid repayment_id")
+    try:
+        result = reverse_repayment(db=db, repayment_id=rep_uuid, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Repayment reversed",
+        details=f"repayment={repayment_id}",
+    )
+    return result
+
+
+@router.post("/reconcile/repayment/{repayment_id}/move")
+def post_move_repayment(
+    repayment_id: str,
+    body: MoveRepaymentRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Re-point a repayment to a different loan belonging to the same member."""
+    from app.services.loan_repair import move_repayment_to_loan
+    from app.core.audit import write_audit_log
+    try:
+        rep_uuid = UUID(repayment_id)
+        new_loan_uuid = UUID(body.new_loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+    try:
+        result = move_repayment_to_loan(
+            db=db, repayment_id=rep_uuid, new_loan_id=new_loan_uuid, user_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Repayment moved between loans",
+        details=f"repayment={repayment_id} new_loan={body.new_loan_id}",
+    )
+    return result
+
+
+@router.patch("/reconcile/repayment/{repayment_id}")
+def patch_repayment_split(
+    repayment_id: str,
+    body: AdjustRepaymentRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Reallocate principal vs interest on an individual repayment. Total
+    must stay the same — we only change how the posted amount is split."""
+    from app.services.loan_repair import adjust_repayment_split
+    from app.core.audit import write_audit_log
+    try:
+        rep_uuid = UUID(repayment_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid repayment_id")
+    try:
+        result = adjust_repayment_split(
+            db=db,
+            repayment_id=rep_uuid,
+            new_principal=Decimal(str(body.new_principal)),
+            new_interest=Decimal(str(body.new_interest)),
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Repayment split adjusted",
+        details=(
+            f"repayment={repayment_id} principal={body.new_principal} interest={body.new_interest}"
+        ),
+    )
+    return result
 
 
 class MoveDeclarationMonthRequest(BaseModel):

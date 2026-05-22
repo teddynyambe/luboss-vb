@@ -711,23 +711,29 @@ def get_approved_loans(
 @router.get("/loans/active")
 def get_active_loans(
     loan_filter: str = "active",
-    current_user: User = Depends(require_treasurer),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
     """Get loans by filter.
-    loan_filter='active' → OPEN + DISBURSED (default)
-    loan_filter='paid'   → CLOSED (paid-off loans)
+    loan_filter='active'      → all OPEN + DISBURSED (default)
+    loan_filter='at_risk'     → OPEN/DISBURSED, no payment in 30+ days, still within term
+    loan_filter='defaulting'  → OPEN/DISBURSED, past maturity, outstanding > 0
+    loan_filter='paid'        → CLOSED (paid-off loans)
     """
     import logging
     logger = logging.getLogger(__name__)
-    from app.models.transaction import Declaration, DeclarationStatus
+    from app.models.transaction import Repayment
+    from app.models.ledger import JournalEntry
     from decimal import Decimal
-    from sqlalchemy import or_
+    from sqlalchemy import func
+    from datetime import date as _date_cls, timedelta as _td
 
     if loan_filter == "paid":
         statuses = [LoanStatus.CLOSED]
     else:
         statuses = [LoanStatus.OPEN, LoanStatus.DISBURSED]
+
+    today = _date_cls.today()
 
     loans = db.query(Loan).filter(
         Loan.loan_status.in_(statuses)
@@ -741,25 +747,25 @@ def get_active_loans(
             if member:
                 user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
 
-            # Compute paid amounts from approved declarations
-            decl_q = db.query(Declaration).filter(
-                Declaration.member_id == loan.member_id,
-                Declaration.status == DeclarationStatus.APPROVED,
-                or_(
-                    Declaration.declared_loan_repayment > 0,
-                    Declaration.declared_interest_on_loan > 0,
-                ),
+            # Paid amounts are sourced from Repayment rows with a live (non-reversed)
+            # journal entry — same source the statement uses, so the figures here
+            # match what the member sees.
+            paid_principal_sum, paid_interest_sum, repayment_count = (
+                db.query(
+                    func.coalesce(func.sum(Repayment.principal_amount), 0),
+                    func.coalesce(func.sum(Repayment.interest_amount), 0),
+                    func.count(Repayment.id),
+                )
+                .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+                .filter(
+                    Repayment.loan_id == loan.id,
+                    JournalEntry.reversed_by.is_(None),
+                    JournalEntry.reversed_at.is_(None),
+                )
+                .one()
             )
-            if loan.disbursement_date:
-                decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
-            paid_decls = decl_q.all()
-
-            total_principal_paid = sum(
-                (d.declared_loan_repayment or Decimal("0.00")) for d in paid_decls
-            )
-            total_interest_paid = sum(
-                (d.declared_interest_on_loan or Decimal("0.00")) for d in paid_decls
-            )
+            total_principal_paid = Decimal(str(paid_principal_sum))
+            total_interest_paid = Decimal(str(paid_interest_sum))
             outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
             rate = float(loan.percentage_interest or 0)
             # Interest is a flat charge on the principal (not compounded per month)
@@ -779,15 +785,68 @@ def get_active_loans(
 
             status_val = loan.loan_status.value if hasattr(loan.loan_status, "value") else str(loan.loan_status)
 
-            # Compute maturity date from disbursement + term months
+            # Compute maturity date from disbursement + term months.
+            # Use stdlib instead of dateutil to avoid an extra dependency.
             maturity_date = None
             if loan.disbursement_date and loan.number_of_instalments:
                 try:
-                    from dateutil.relativedelta import relativedelta
                     term = int(loan.number_of_instalments)
-                    maturity_date = (loan.disbursement_date + relativedelta(months=term)).isoformat()
+                    d = loan.disbursement_date
+                    new_month = d.month - 1 + term
+                    new_year = d.year + new_month // 12
+                    new_month = new_month % 12 + 1
+                    # Clamp day to the last day of the target month if needed
+                    import calendar
+                    last_day = calendar.monthrange(new_year, new_month)[1]
+                    new_day = min(d.day, last_day)
+                    from datetime import date as _date
+                    maturity_date = _date(new_year, new_month, new_day).isoformat()
                 except (ValueError, TypeError):
                     pass
+
+            # Performance classification:
+            #   defaulting → active loan past maturity with outstanding > 0
+            #   at_risk    → active loan, no payment yet, at least 30 days old
+            #                (still within term, or term unknown)
+            #   on_track   → everything else active
+            #   paid       → closed loan
+            performance_status = "on_track"
+            if loan.loan_status == LoanStatus.CLOSED:
+                performance_status = "paid"
+            else:
+                maturity_dt = None
+                if maturity_date:
+                    try:
+                        maturity_dt = _date_cls.fromisoformat(maturity_date)
+                    except ValueError:
+                        maturity_dt = None
+                is_defaulting = (
+                    maturity_dt is not None
+                    and maturity_dt < today
+                    and outstanding_balance > Decimal("0.01")
+                )
+                no_payment_made = (
+                    total_principal_paid == Decimal("0.00")
+                    and total_interest_paid == Decimal("0.00")
+                )
+                created_dt = loan.created_at.date() if loan.created_at else today
+                aged_30d = (today - created_dt) >= _td(days=30)
+                is_at_risk = (
+                    not is_defaulting
+                    and no_payment_made
+                    and aged_30d
+                    and (maturity_dt is None or maturity_dt >= today)
+                )
+                if is_defaulting:
+                    performance_status = "defaulting"
+                elif is_at_risk:
+                    performance_status = "at_risk"
+
+            # Apply requested filter
+            if loan_filter == "at_risk" and performance_status != "at_risk":
+                continue
+            if loan_filter == "defaulting" and performance_status != "defaulting":
+                continue
 
             result.append({
                 "id": str(loan.id),
@@ -803,12 +862,13 @@ def get_active_loans(
                 "created_at": loan.created_at.isoformat() if loan.created_at else None,
                 "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
                 "status": status_val,
+                "performance_status": performance_status,
                 "total_principal_paid": float(total_principal_paid),
                 "total_interest_paid": float(total_interest_paid),
                 "total_interest_expected": total_interest_expected,
                 "total_paid": float(total_principal_paid + total_interest_paid),
                 "outstanding_balance": float(outstanding_balance),
-                "repayment_count": len(paid_decls),
+                "repayment_count": int(repayment_count or 0),
             })
         except Exception as e:
             logger.error(f"Error processing loan {loan.id}: {e}", exc_info=True)
@@ -820,12 +880,14 @@ def get_active_loans(
 @router.get("/loans/{loan_id}/details")
 def get_loan_details(
     loan_id: str,
-    current_user: User = Depends(require_treasurer),
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
     db: Session = Depends(get_db)
 ):
     """Get detailed information about a loan including repayment history and performance."""
     from decimal import Decimal
     from datetime import date, timedelta
+    from app.models.transaction import Repayment
+    from app.models.ledger import JournalEntry
     
     try:
         loan_uuid = UUID(loan_id)
@@ -841,36 +903,34 @@ def get_loan_details(
     if member:
         user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
     
-    # Compute payment history from approved declarations (covers all historical data)
-    from app.models.transaction import Declaration, DeclarationStatus
-    from sqlalchemy import or_
-
-    decl_q = db.query(Declaration).filter(
-        Declaration.member_id == loan.member_id,
-        Declaration.status == DeclarationStatus.APPROVED,
-        or_(
-            Declaration.declared_loan_repayment > 0,
-            Declaration.declared_interest_on_loan > 0,
-        ),
+    # Payment history sourced from live Repayment rows (same source the statement
+    # and the active-loans list use, so the numbers stay aligned everywhere).
+    repayments_q = (
+        db.query(Repayment, JournalEntry)
+        .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+        .filter(
+            Repayment.loan_id == loan.id,
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.reversed_at.is_(None),
+        )
+        .order_by(Repayment.repayment_date.asc())
+        .all()
     )
-    if loan.disbursement_date:
-        decl_q = decl_q.filter(Declaration.effective_month >= loan.disbursement_date)
-    paid_decls = decl_q.order_by(Declaration.effective_month.asc()).all()
 
     total_principal_paid = Decimal("0.00")
     total_interest_paid = Decimal("0.00")
     repayments_list = []
     running_balance = loan.loan_amount
 
-    for decl in paid_decls:
-        principal = decl.declared_loan_repayment or Decimal("0.00")
-        interest = decl.declared_interest_on_loan or Decimal("0.00")
+    for rep, _je in repayments_q:
+        principal = rep.principal_amount or Decimal("0.00")
+        interest = rep.interest_amount or Decimal("0.00")
         total_principal_paid += principal
         total_interest_paid += interest
         running_balance -= principal
         repayments_list.append({
-            "id": f"decl_{decl.id}",
-            "date": decl.effective_month.isoformat(),
+            "id": str(rep.id),
+            "date": rep.repayment_date.isoformat() if rep.repayment_date else None,
             "principal": float(principal),
             "interest": float(interest),
             "total": float(principal + interest),
@@ -879,20 +939,56 @@ def get_loan_details(
         })
 
     outstanding_balance = max(Decimal("0.00"), loan.loan_amount - total_principal_paid)
-    payment_performance = "On Time"
     rate = float(loan.percentage_interest or 0)
     # Interest is a flat charge on the principal (not compounded per month)
     total_interest_expected = float(loan.loan_amount) * (rate / 100) if rate > 0 else None
 
-    # Compute maturity date from disbursement + term months
+    # Maturity from disbursement + term months (stdlib, no dateutil dependency).
     maturity_date = None
+    maturity_dt = None
     if loan.disbursement_date and loan.number_of_instalments:
         try:
-            from dateutil.relativedelta import relativedelta
             term = int(loan.number_of_instalments)
-            maturity_date = (loan.disbursement_date + relativedelta(months=term)).isoformat()
+            d = loan.disbursement_date
+            new_month = d.month - 1 + term
+            new_year = d.year + new_month // 12
+            new_month = new_month % 12 + 1
+            import calendar
+            last_day = calendar.monthrange(new_year, new_month)[1]
+            new_day = min(d.day, last_day)
+            maturity_dt = date(new_year, new_month, new_day)
+            maturity_date = maturity_dt.isoformat()
         except (ValueError, TypeError):
             pass
+
+    # Performance label — same rules as the active-loans list so badges align.
+    today = date.today()
+    if loan.loan_status == LoanStatus.CLOSED:
+        performance_status = "paid"
+    elif (
+        maturity_dt is not None
+        and maturity_dt < today
+        and outstanding_balance > Decimal("0.01")
+    ):
+        performance_status = "defaulting"
+    elif (
+        total_principal_paid == Decimal("0.00")
+        and total_interest_paid == Decimal("0.00")
+        and loan.created_at
+        and (today - loan.created_at.date()) >= timedelta(days=30)
+        and (maturity_dt is None or maturity_dt >= today)
+    ):
+        performance_status = "at_risk"
+    else:
+        performance_status = "on_track"
+
+    performance_label = {
+        "paid": "Paid Off",
+        "defaulting": "Defaulting — past maturity",
+        "at_risk": "At Risk — no payment yet",
+        "on_track": "On Time",
+    }[performance_status]
+    all_payments_on_time = performance_status in ("on_track", "paid")
 
     return {
         "id": str(loan.id),
@@ -908,13 +1004,14 @@ def get_loan_details(
         "created_at": loan.created_at.isoformat() if loan.created_at else None,
         "cycle_id": str(loan.cycle_id),
         "status": loan.loan_status.value,
+        "performance_status": performance_status,
         "total_principal_paid": float(total_principal_paid),
         "total_interest_paid": float(total_interest_paid),
         "total_interest_expected": total_interest_expected,
         "total_paid": float(total_principal_paid + total_interest_paid),
         "outstanding_balance": float(outstanding_balance),
-        "payment_performance": payment_performance,
-        "all_payments_on_time": True,
+        "payment_performance": performance_label,
+        "all_payments_on_time": all_payments_on_time,
         "repayments": repayments_list,
     }
 
@@ -922,31 +1019,53 @@ def get_loan_details(
 @router.post("/loans/{application_id}/approve")
 def approve_loan_application(
     application_id: str,
+    force: bool = False,
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
-    """Approve a loan application, create Loan record, disburse it, and post to ledger in one step."""
+    """Approve a loan application, create Loan record, disburse it, and post to ledger in one step.
+
+    Enforces one active loan per member. Pass `?force=true` (Admin only) to
+    override — used for genuine refinance/restructure cases.
+    """
     from app.models.cycle import Cycle
     from app.models.policy import MemberCreditRating, CreditRatingInterestRange
     from app.models.ledger import LedgerAccount
     from app.services.transaction import disburse_loan
     from decimal import Decimal
     from datetime import date
-    
+
     try:
         app_uuid = UUID(application_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid application ID format")
-    
+
     application = db.query(LoanApplication).filter(LoanApplication.id == app_uuid).first()
     if not application:
         raise HTTPException(status_code=404, detail="Loan application not found")
-    
+
     if application.status != LoanApplicationStatus.PENDING:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot approve application with status: {application.status.value}"
         )
+
+    # Enforce one active loan per member (Admin can override with ?force=true).
+    existing_active = db.query(Loan).filter(
+        Loan.member_id == application.member_id,
+        Loan.loan_status.in_([LoanStatus.APPROVED, LoanStatus.OPEN, LoanStatus.DISBURSED]),
+    ).first()
+    if existing_active:
+        is_admin = (current_user.role and current_user.role.value.lower() == "admin")
+        if not (force and is_admin):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Member already has an active loan (status={existing_active.loan_status.value}, "
+                    f"amount=K{existing_active.loan_amount}). Close or consolidate it before approving "
+                    "a new one. Admins may pass force=true to override."
+                ),
+            )
     
     # Get credit rating to determine interest rate
     credit_rating = db.query(MemberCreditRating).filter(
@@ -1116,10 +1235,14 @@ def get_declarations_report(
             )
         ).first()
 
-        # Calculate total declaration amount (None if no declaration)
+        # Calculate total declaration amount.
+        # A declaration with total == 0 but status APPROVED is a "phantom" caused
+        # by an old empty reconciliation; surface it (declaration_amount=0,
+        # is_phantom=True) so the treasurer can spot and reject it instead of
+        # hiding the row entirely.
         declaration_amount = None
+        total = Decimal("0.00")
         if declaration:
-            total = Decimal("0.00")
             if declaration.declared_savings_amount:
                 total += declaration.declared_savings_amount
             if declaration.declared_social_fund:
@@ -1132,7 +1255,8 @@ def get_declarations_report(
                 total += declaration.declared_interest_on_loan
             if declaration.declared_loan_repayment:
                 total += declaration.declared_loan_repayment
-            declaration_amount = float(total) if total > 0 else None
+            if total > 0:
+                declaration_amount = float(total)
 
         # Check if deposit proof is approved (paid)
         is_paid = False
@@ -1143,12 +1267,18 @@ def get_declarations_report(
             ).first()
             is_paid = deposit_proof is not None
 
+        is_phantom = bool(declaration and is_paid and total == 0)
+        if is_phantom and declaration_amount is None:
+            declaration_amount = 0.0
+
         # Include ALL members (with or without declarations)
         result.append({
             "member_id": str(member.id),
             "member_name": member_name,
+            "declaration_id": str(declaration.id) if declaration else None,
             "declaration_amount": declaration_amount,
-            "is_paid": is_paid
+            "is_paid": is_paid,
+            "is_phantom": is_phantom,
         })
     
     # Sort by surname (last word of name)

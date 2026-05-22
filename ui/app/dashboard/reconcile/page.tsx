@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import UserMenu from '@/components/UserMenu';
+import LoanStatePanel from '@/components/LoanStatePanel';
 
 interface Member {
   id: string;
@@ -334,6 +335,9 @@ export default function ReconcilePage() {
             </button>
           </div>
         </div>
+
+        {/* Loan State panel — shown whenever a member is selected, independent of month */}
+        {selectedMemberId && <LoanStatePanel memberId={selectedMemberId} />}
 
         {/* Form — only visible after Load succeeds */}
         {loaded && (

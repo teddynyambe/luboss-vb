@@ -166,13 +166,13 @@ def get_member_loan_balance(
 ) -> Decimal:
     """Get member's outstanding loan balance.
 
-    Calculates by summing active loan amounts and subtracting principal paid.
-    Principal paid is sourced from APPROVED declarations (declared_loan_repayment),
-    which covers both historical deposits (no Repayment record) and new ones equally.
+    Principal paid is sourced from Repayment rows whose linked JournalEntry has
+    not been reversed. This matches the ledger statement (LOANS_RECEIVABLE
+    credits on live entries), so reconciliation reversals are honored.
     """
-    from app.models.transaction import Loan, LoanStatus, Declaration, DeclarationStatus
+    from app.models.transaction import Loan, LoanStatus, Repayment
+    from app.models.ledger import JournalEntry
 
-    # Get all active loans (OPEN or DISBURSED) for this member
     loan_query = db.query(Loan).filter(
         Loan.member_id == member_id,
         Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
@@ -185,30 +185,21 @@ def get_member_loan_balance(
         return Decimal("0.00")
 
     total_outstanding = Decimal("0.00")
-
     for loan in active_loans:
-        # Sum principal paid from approved declarations dated on/after disbursement
-        decl_query = db.query(Declaration).filter(
-            Declaration.member_id == member_id,
-            Declaration.status == DeclarationStatus.APPROVED,
-            Declaration.declared_loan_repayment > 0,
-        )
-        if loan.disbursement_date:
-            decl_query = decl_query.filter(
-                Declaration.effective_month >= loan.disbursement_date
+        rep_q = (
+            db.query(func.coalesce(func.sum(Repayment.principal_amount), 0))
+            .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+            .filter(
+                Repayment.loan_id == loan.id,
+                JournalEntry.reversed_by.is_(None),
+                JournalEntry.reversed_at.is_(None),
             )
+        )
         if as_of_date:
-            decl_query = decl_query.filter(
-                Declaration.effective_month <= as_of_date.date()
-            )
-
-        total_principal_paid = sum(
-            (decl.declared_loan_repayment or Decimal("0.00"))
-            for decl in decl_query.all()
-        )
-
-        outstanding = loan.loan_amount - total_principal_paid
-        total_outstanding += outstanding
+            cutoff = as_of_date.date() if hasattr(as_of_date, "date") else as_of_date
+            rep_q = rep_q.filter(Repayment.repayment_date <= cutoff)
+        total_principal_paid = Decimal(str(rep_q.scalar() or 0))
+        total_outstanding += (loan.loan_amount - total_principal_paid)
 
     return max(Decimal("0.00"), total_outstanding)
 
