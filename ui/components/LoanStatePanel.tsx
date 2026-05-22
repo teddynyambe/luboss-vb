@@ -18,6 +18,7 @@ interface LoanRow {
   id: string;
   loan_amount: number;
   percentage_interest: number;
+  number_of_instalments: string | null;
   disbursement_date: string | null;
   loan_status: string | null;
   application_id: string | null;
@@ -106,7 +107,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setKeepId(preferred.id);
     setNewAmount(String(preferred.loan_amount));
     setNewRate(String(preferred.percentage_interest));
-    setNewTerm('');
+    setNewTerm(preferred.number_of_instalments || '');
     setCloseIds(active.filter((l) => l.id !== preferred.id).map((l) => l.id));
     setShowConsolidate(true);
   };
@@ -422,6 +423,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                         );
                         setNewAmount(String(l.loan_amount));
                         setNewRate(String(l.percentage_interest));
+                        setNewTerm(l.number_of_instalments || '');
                       }}
                     />
                     <div className="flex-1 text-sm">

@@ -111,6 +111,7 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
             "id": str(loan.id),
             "loan_amount": float(loan.loan_amount or 0),
             "percentage_interest": float(loan.percentage_interest or 0),
+            "number_of_instalments": loan.number_of_instalments or None,
             "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
             "loan_status": loan.loan_status.value if loan.loan_status else None,
             "application_id": str(loan.application_id) if loan.application_id else None,
