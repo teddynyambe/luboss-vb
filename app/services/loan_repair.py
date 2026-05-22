@@ -84,6 +84,7 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
                 live_interest += rep.interest_amount or Decimal("0.00")
             rep_items.append({
                 "id": str(rep.id),
+                "loan_id": str(rep.loan_id) if rep.loan_id else None,
                 "repayment_date": rep.repayment_date.isoformat() if rep.repayment_date else None,
                 "principal_amount": float(rep.principal_amount or 0),
                 "interest_amount": float(rep.interest_amount or 0),

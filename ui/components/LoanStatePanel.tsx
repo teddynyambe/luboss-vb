@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 
 interface Repayment {
   id: string;
+  loan_id: string | null;
   repayment_date: string | null;
   principal_amount: number;
   interest_amount: number;
@@ -567,9 +568,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
               >
                 <option value="">Pick a loan…</option>
-                {state.loans
-                  .filter((l) => l.id !== moveRep.loan_id || true)
-                  .map((l) => (
+                {state.loans.map((l) => (
                     <option key={l.id} value={l.id} disabled={l.id === moveRep.loan_id}>
                       {l.id.slice(0, 8)} · {fmt(l.loan_amount)} ·{' '}
                       {l.disbursement_date || '—'} · {l.loan_status}
