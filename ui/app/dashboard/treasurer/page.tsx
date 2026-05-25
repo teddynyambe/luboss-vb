@@ -136,6 +136,10 @@ export default function TreasurerDashboard() {
   const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
   const [loanToApprove, setLoanToApprove] = useState<PendingLoanApplication | null>(null);
   const [loanApprovalForce, setLoanApprovalForce] = useState(false);
+  // Treasurer overrides that can be applied at approval time
+  const [approveAmount, setApproveAmount] = useState<string>('');
+  const [approveTerm, setApproveTerm] = useState<string>('');
+  const [approveNote, setApproveNote] = useState<string>('');
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -547,6 +551,11 @@ export default function TreasurerDashboard() {
     if (loan) {
       setLoanToApprove(loan);
       setLoanApprovalForce(false);
+      // Pre-fill override fields with the application's current values so the
+      // treasurer can adjust just what they need.
+      setApproveAmount(String(loan.amount));
+      setApproveTerm(loan.term_months || '1');
+      setApproveNote('');
       setShowLoanApprovalModal(true);
     }
   };
@@ -554,11 +563,36 @@ export default function TreasurerDashboard() {
   const confirmApproveLoan = async (force: boolean = false) => {
     if (!loanToApprove) return;
 
+    // Build override body only when the treasurer actually changed something
+    // or added a note; otherwise approve with the application's stored values.
+    const requestedAmount = parseFloat(approveAmount);
+    const body: { amount?: number; term_months?: string; note?: string } = {};
+    if (
+      !Number.isNaN(requestedAmount) &&
+      Math.abs(requestedAmount - Number(loanToApprove.amount)) > 0.001
+    ) {
+      body.amount = requestedAmount;
+    }
+    if (approveTerm && approveTerm !== loanToApprove.term_months) {
+      body.term_months = approveTerm;
+    }
+    if (approveNote.trim()) {
+      body.note = approveNote.trim();
+    }
+    // If the amount/term was varied without a note, require one — keeps audit trail clean.
+    if ((body.amount !== undefined || body.term_months) && !body.note) {
+      setMessage({
+        type: 'error',
+        text: 'Please add a note explaining the variation from the original application.',
+      });
+      return;
+    }
+
     setApprovingLoan(loanToApprove.id);
     setMessage(null);
     try {
       const url = `/api/treasurer/loans/${loanToApprove.id}/approve${force ? '?force=true' : ''}`;
-      const response = await api.post(url);
+      const response = await api.post(url, Object.keys(body).length ? body : undefined);
       if (!response.error) {
         setMessage({ type: 'success', text: 'Loan approved, disbursed, and posted to member\'s account successfully!' });
         await loadData();
@@ -2166,25 +2200,59 @@ export default function TreasurerDashboard() {
                 <p className="text-base md:text-lg text-blue-900 mb-4">
                   Are you sure you want to approve and disburse this loan?
                 </p>
-                <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 space-y-2">
+                <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 space-y-3">
                   <div className="flex justify-between">
                     <span className="text-sm text-blue-700 font-medium">Member:</span>
                     <span className="text-sm text-blue-900 font-semibold">{loanToApprove.member_name}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-blue-700 font-medium">Loan Amount:</span>
-                    <span className="text-sm text-blue-900 font-semibold">K{loanToApprove.amount.toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-sm text-blue-700 font-medium">Term:</span>
-                    <span className="text-sm text-blue-900 font-semibold">
+                  <div className="flex justify-between text-xs text-blue-700">
+                    <span>Member requested:</span>
+                    <span>
+                      K{loanToApprove.amount.toLocaleString()} ·{' '}
                       {loanToApprove.term_months} {loanToApprove.term_months === '1' ? 'Month' : 'Months'}
                     </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-xs font-semibold text-blue-900">
+                        Disburse Amount (K)
+                      </label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={approveAmount}
+                        onChange={(e) => setApproveAmount(e.target.value)}
+                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-xs font-semibold text-blue-900">Term (months)</label>
+                      <input
+                        type="text"
+                        value={approveTerm}
+                        onChange={(e) => setApproveTerm(e.target.value)}
+                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">
+                      Note (required if amount or term varies)
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={approveNote}
+                      onChange={(e) => setApproveNote(e.target.value)}
+                      placeholder="e.g. Group only has K7,000 cash on hand; disbursing K7,000 of the K10,000 requested."
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
                   </div>
                 </div>
                 <div className="mt-4 p-3 bg-yellow-50 border-2 border-yellow-300 rounded-xl">
                   <p className="text-sm text-yellow-800 font-medium">
-                    ⚠️ This will post the loan to the member's account and make it active.
+                    ⚠️ This will post the loan to the member&apos;s account and make it active. The
+                    application record will be updated to reflect the disbursed amount/term and your note.
                   </p>
                 </div>
               </div>

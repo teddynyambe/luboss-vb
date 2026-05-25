@@ -1034,10 +1034,23 @@ def get_loan_details(
     }
 
 
+class ApproveLoanRequest(BaseModel):
+    """Optional overrides the treasurer can apply when approving a loan.
+
+    Use when the group has less cash on hand than the requested amount, or
+    when an adjusted term is being agreed. The application record is updated
+    in place so the audit trail reflects what was actually disbursed.
+    """
+    amount: Optional[float] = None         # disbursed amount (overrides application.amount)
+    term_months: Optional[str] = None      # actual term (overrides application.term_months)
+    note: Optional[str] = None             # reason for the variation; appended to application.notes
+
+
 @router.post("/loans/{application_id}/approve")
 def approve_loan_application(
     application_id: str,
     force: bool = False,
+    body: Optional[ApproveLoanRequest] = None,
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
@@ -1045,6 +1058,10 @@ def approve_loan_application(
 
     Enforces one active loan per member. Pass `?force=true` (Admin only) to
     override — used for genuine refinance/restructure cases.
+
+    The optional request body lets the treasurer adjust the disbursed amount
+    and/or term at approval time and attach a note. The application record is
+    updated in place so the saved figures match what was actually disbursed.
     """
     from app.models.cycle import Cycle
     from app.models.policy import MemberCreditRating, CreditRatingInterestRange
@@ -1099,6 +1116,33 @@ def approve_loan_application(
                 detail += " Admins may pass force=true to override."
             raise HTTPException(status_code=409, detail=detail)
     
+    # Apply treasurer overrides (if any) to the application before any further
+    # lookups, so the rate-table lookup honors the actual term being approved.
+    override_amount: Decimal = None
+    override_term: str = None
+    override_note: str = None
+    if body:
+        if body.amount is not None:
+            override_amount = Decimal(str(body.amount))
+            if override_amount <= 0:
+                raise HTTPException(status_code=400, detail="Override amount must be positive.")
+        if body.term_months:
+            override_term = body.term_months.strip() or None
+        if body.note:
+            override_note = body.note.strip() or None
+    if override_amount is not None:
+        application.amount = override_amount
+    if override_term:
+        application.term_months = override_term
+    if override_note:
+        prefix = (application.notes + "\n") if application.notes else ""
+        application.notes = (
+            f"{prefix}[Treasurer @ approval, {datetime.utcnow().date().isoformat()}]: "
+            f"{override_note}"
+        )
+    if override_amount is not None or override_term or override_note:
+        db.flush()
+
     # Get credit rating to determine interest rate
     credit_rating = db.query(MemberCreditRating).filter(
         MemberCreditRating.member_id == application.member_id,

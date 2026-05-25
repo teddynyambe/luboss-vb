@@ -16,10 +16,23 @@ interface Cycle {
   end_date?: string;
 }
 
-/** Parse a date-only string (YYYY-MM-DD) as local midnight to avoid UTC timezone shift. */
+/** Parse a date-only string (YYYY-MM-DD) or ISO timestamp as local midnight,
+ * avoiding UTC timezone shift. */
 function parseLocalDate(dateStr: string): Date {
-  const [y, m, d] = dateStr.split('-').map(Number);
+  // Strip time portion if present so an ISO timestamp like
+  // "2026-05-22T08:30:00" parses as a calendar date in local TZ.
+  const dateOnly = dateStr.split('T')[0].split(' ')[0];
+  const [y, m, d] = dateOnly.split('-').map(Number);
+  if (!y || !m || !d) return new Date(NaN);
   return new Date(y, m - 1, d);
+}
+
+/** Short, human-readable date e.g. "Jan 1, 2026". Returns '—' when invalid. */
+function fmtShortDate(s?: string | null): string {
+  if (!s) return '—';
+  const d = parseLocalDate(s);
+  if (Number.isNaN(d.getTime())) return '—';
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
 }
 
 export default function LoanApplicationPage() {
@@ -525,10 +538,19 @@ export default function LoanApplicationPage() {
                             </span>
                           </div>
                           <div>
-                            <p className="text-xs md:text-sm text-blue-700 font-medium mb-1">Date</p>
-                            <p className="text-base md:text-lg font-semibold text-blue-900">
-                              {loan.application_date ? parseLocalDate(loan.application_date).toLocaleDateString() : 'N/A'}
+                            <p className="text-xs md:text-sm text-blue-700 font-medium mb-1">
+                              {loan.type === 'loan' ? 'Borrow → Maturity' : 'Applied'}
                             </p>
+                            {loan.type === 'loan' ? (
+                              <p className="text-sm md:text-base font-semibold text-blue-900">
+                                {fmtShortDate(loan.disbursement_date)} <span className="text-blue-500">→</span>{' '}
+                                {fmtShortDate(loan.maturity_date)}
+                              </p>
+                            ) : (
+                              <p className="text-base md:text-lg font-semibold text-blue-900">
+                                {fmtShortDate(loan.application_date)}
+                              </p>
+                            )}
                           </div>
                         </div>
                         {loan.type === 'application' && loan.status === 'pending' && (

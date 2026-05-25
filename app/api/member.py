@@ -1639,6 +1639,8 @@ def get_my_loans(
         })
     
     # Add loans (these replace approved applications)
+    from calendar import monthrange as _monthrange
+    from datetime import date as _date_cls
     for loan in loans:
         # Map status: OPEN -> active, others stay as-is
         status_value = loan.loan_status.value if hasattr(loan.loan_status, 'value') else str(loan.loan_status)
@@ -1646,7 +1648,22 @@ def get_my_loans(
             status_display = "active"
         else:
             status_display = status_value
-        
+
+        # Compute maturity_date = disbursement_date + term_months (with month-end clamp).
+        maturity_iso = None
+        if loan.disbursement_date and loan.number_of_instalments:
+            try:
+                term = int(loan.number_of_instalments)
+                d = loan.disbursement_date
+                new_month = d.month - 1 + term
+                new_year = d.year + new_month // 12
+                new_month = new_month % 12 + 1
+                last_day = _monthrange(new_year, new_month)[1]
+                new_day = min(d.day, last_day)
+                maturity_iso = _date_cls(new_year, new_month, new_day).isoformat()
+            except (ValueError, TypeError):
+                pass
+
         result.append({
             "id": str(loan.id),
             "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
@@ -1654,7 +1671,9 @@ def get_my_loans(
             "term_months": loan.number_of_instalments or "N/A",
             "status": status_display,
             "application_date": loan.disbursement_date.isoformat() if loan.disbursement_date else (loan.created_at.isoformat() if loan.created_at else None),
-            "type": "loan"
+            "disbursement_date": loan.disbursement_date.isoformat() if loan.disbursement_date else None,
+            "maturity_date": maturity_iso,
+            "type": "loan",
         })
     
     # Sort by date (most recent first)

@@ -53,6 +53,9 @@ export interface LoanApplication {
   term_months: string;
   status: string;
   application_date: string;
+  disbursement_date?: string | null;  // present on type='loan' rows
+  maturity_date?: string | null;       // present on type='loan' rows
+  type?: 'application' | 'loan';
 }
 
 export interface Cycle {
