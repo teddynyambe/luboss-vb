@@ -725,6 +725,16 @@ export default function PaymentProofPage() {
                 </div>
               ) : (
                 <div className="space-y-4">
+                  {/* Provenance legend */}
+                  <div className="flex flex-wrap gap-x-5 gap-y-1 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs md:text-sm text-blue-900">
+                    <span className="font-semibold">Legend:</span>
+                    <span title="A real proof of payment file was uploaded">
+                      <span className="font-bold">📎</span> Real proof attached
+                    </span>
+                    <span title="This entry came from a treasurer reconciliation — no physical proof file was uploaded">
+                      <span className="font-bold">♻️</span> Reconciliation entry (no file)
+                    </span>
+                  </div>
                   {deposits.map((deposit) => (
                     <div
                       key={deposit.id}
@@ -737,6 +747,15 @@ export default function PaymentProofPage() {
                               {deposit.effective_month ? formatMonth(deposit.effective_month) : 'Deposit Proof'}
                             </h3>
                             {getStatusBadge(deposit.status)}
+                            {deposit.upload_path === 'reconciliation' ? (
+                              <span title="Reconciliation entry — no physical proof file was uploaded" className="text-lg leading-none">
+                                ♻️
+                              </span>
+                            ) : (deposit.upload_path && (
+                              <span title="Proof of payment file is attached" className="text-lg leading-none">
+                                📎
+                              </span>
+                            ))}
                           </div>
                           <div className="text-sm text-blue-600 space-y-1">
                             <p>Amount: K{parseFloat(String(deposit.amount)).toLocaleString()}</p>

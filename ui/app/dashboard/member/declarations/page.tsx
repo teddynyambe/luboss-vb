@@ -41,6 +41,9 @@ interface Declaration {
   updated_at?: string;
   can_edit?: boolean;
   rejected_deposit_proof?: RejectedDepositProof;
+  has_real_proof?: boolean;
+  created_via_reconciliation?: boolean;
+  approved_via_reconciliation?: boolean;
 }
 
 export default function DeclarationsPage() {
@@ -1072,6 +1075,20 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       </div>
                     </div>
 
+                    {/* Provenance legend — explains the small icons next to each declaration's Status */}
+                    <div className="flex flex-wrap gap-x-5 gap-y-1 px-3 py-2 bg-blue-50 border border-blue-200 rounded-lg text-xs md:text-sm text-blue-900">
+                      <span className="font-semibold">Legend:</span>
+                      <span title="A real proof of payment file was uploaded">
+                        <span className="font-bold">📎</span> Proof attached
+                      </span>
+                      <span title="This declaration was created by the treasurer via reconciliation">
+                        <span className="font-bold">♻️</span> Created via reconciliation
+                      </span>
+                      <span title="Approved with a reconciliation entry (no physical proof file)">
+                        <span className="font-bold">⚙️</span> Approved via reconciliation
+                      </span>
+                    </div>
+
                     <div className="overflow-x-auto">
                       <table className="w-full border-collapse">
                         <thead>
@@ -1157,21 +1174,38 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                                     : '-'}
                                 </td>
                                 <td className="p-3 md:p-4">
-                                  <span
-                                    className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
-                                      declaration.status === 'pending'
-                                        ? 'bg-yellow-200 text-yellow-800'
-                                        : declaration.status === 'proof'
-                                        ? 'bg-blue-200 text-blue-800'
-                                        : declaration.status === 'approved'
-                                        ? 'bg-green-200 text-green-800'
-                                        : declaration.status === 'rejected'
-                                        ? 'bg-red-200 text-red-800'
-                                        : 'bg-gray-200 text-gray-800'
-                                    }`}
-                                  >
-                                    {declaration.status === 'proof' ? 'Proof Submitted' : declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
-                                  </span>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span
+                                      className={`inline-block px-3 py-1 rounded-full text-xs md:text-sm font-semibold ${
+                                        declaration.status === 'pending'
+                                          ? 'bg-yellow-200 text-yellow-800'
+                                          : declaration.status === 'proof'
+                                          ? 'bg-blue-200 text-blue-800'
+                                          : declaration.status === 'approved'
+                                          ? 'bg-green-200 text-green-800'
+                                          : declaration.status === 'rejected'
+                                          ? 'bg-red-200 text-red-800'
+                                          : 'bg-gray-200 text-gray-800'
+                                      }`}
+                                    >
+                                      {declaration.status === 'proof' ? 'Proof Submitted' : declaration.status.charAt(0).toUpperCase() + declaration.status.slice(1)}
+                                    </span>
+                                    {declaration.has_real_proof && (
+                                      <span title="Proof of payment file is attached" className="text-base leading-none">
+                                        📎
+                                      </span>
+                                    )}
+                                    {declaration.created_via_reconciliation && (
+                                      <span title="Created by the treasurer via reconciliation" className="text-base leading-none">
+                                        ♻️
+                                      </span>
+                                    )}
+                                    {declaration.approved_via_reconciliation && (
+                                      <span title="Approved via reconciliation (no physical proof file)" className="text-base leading-none">
+                                        ⚙️
+                                      </span>
+                                    )}
+                                  </div>
                                 </td>
                                 <td className="p-3 md:p-4 text-sm md:text-base text-blue-800">
                                   {formatDate(declaration.created_at)}

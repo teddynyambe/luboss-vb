@@ -193,6 +193,9 @@ export default function TreasurerDashboard() {
     declaration_amount: number | null;
     is_paid: boolean;
     is_phantom?: boolean;
+    has_real_proof?: boolean;
+    created_via_reconciliation?: boolean;
+    approved_via_reconciliation?: boolean;
   }
   
   interface LoanReportItem {
@@ -1172,6 +1175,13 @@ export default function TreasurerDashboard() {
                           <p className="text-green-900 font-bold text-sm">K{totalDeposited.toLocaleString()}</p>
                         </div>
                       </div>
+                      {/* Provenance legend */}
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 px-2 py-1.5 mb-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-900">
+                        <span className="font-semibold">Legend:</span>
+                        <span title="A real proof of payment file was uploaded"><span className="font-bold">📎</span> Proof attached</span>
+                        <span title="Declaration was created by the treasurer via reconciliation"><span className="font-bold">♻️</span> Created via reconciliation</span>
+                        <span title="Approved via a reconciliation entry (no physical proof file)"><span className="font-bold">⚙️</span> Approved via reconciliation</span>
+                      </div>
                       <div className="max-h-[500px] overflow-y-auto space-y-1 text-sm font-mono">
                         {declarationsReport.length === 0 ? (
                           <p className="text-blue-700 text-center py-4">No members for this month</p>
@@ -1203,6 +1213,15 @@ export default function TreasurerDashboard() {
                                   <>
                                     {!member.is_phantom && (
                                       <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
+                                    )}
+                                    {member.has_real_proof && (
+                                      <span title="Proof of payment file is attached" className="text-base leading-none">📎</span>
+                                    )}
+                                    {member.created_via_reconciliation && (
+                                      <span title="Created by the treasurer via reconciliation" className="text-base leading-none">♻️</span>
+                                    )}
+                                    {member.approved_via_reconciliation && (
+                                      <span title="Approved via reconciliation (no physical proof file)" className="text-base leading-none">⚙️</span>
                                     )}
                                     {member.declaration_id && (
                                       <button

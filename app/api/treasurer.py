@@ -1311,6 +1311,36 @@ def get_declarations_report(
         if is_phantom and declaration_amount is None:
             declaration_amount = 0.0
 
+        # Provenance flags so the report can render small badges next to each
+        # member's amount and the treasurer knows at a glance whether the
+        # entry came from a real upload, was created via reconciliation, or
+        # was approved purely via reconciliation. Mirrors the same fields on
+        # the member's declarations endpoint.
+        has_real_proof = False
+        created_via_reconciliation = False
+        approved_via_reconciliation = False
+        if declaration:
+            all_proofs = db.query(DepositProof).filter(
+                DepositProof.declaration_id == declaration.id
+            ).all()
+            live_proofs = [p for p in all_proofs if p.status != "superseded"]
+            has_real_proof = any(
+                (p.upload_path and p.upload_path != "reconciliation")
+                for p in live_proofs
+            )
+            created_via_reconciliation = any(
+                p.upload_path == "reconciliation" for p in all_proofs
+            )
+            approved_via_reconciliation = bool(
+                is_paid
+                and not has_real_proof
+                and any(
+                    p.upload_path == "reconciliation"
+                    and p.status == DepositProofStatus.APPROVED.value
+                    for p in all_proofs
+                )
+            )
+
         # Include ALL members (with or without declarations)
         result.append({
             "member_id": str(member.id),
@@ -1319,6 +1349,9 @@ def get_declarations_report(
             "declaration_amount": declaration_amount,
             "is_paid": is_paid,
             "is_phantom": is_phantom,
+            "has_real_proof": has_real_proof,
+            "created_via_reconciliation": created_via_reconciliation,
+            "approved_via_reconciliation": approved_via_reconciliation,
         })
     
     # Sort by surname (last word of name)

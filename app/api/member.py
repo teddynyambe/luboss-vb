@@ -710,7 +710,38 @@ def get_my_declarations(
                 "upload_path": rejected_proof.upload_path,
                 "rejected_at": rejected_proof.rejected_at.isoformat() if rejected_proof.rejected_at else None
             }
-        
+
+        # Provenance flags for the at-a-glance UI legend:
+        #   has_real_proof       — at least one non-superseded DepositProof exists
+        #                          with a real file (upload_path is not the
+        #                          "reconciliation" marker and not empty)
+        #   created_via_reconciliation — any DepositProof on this declaration is
+        #                          a reconciliation marker (legacy reconciliation
+        #                          flow created these)
+        #   approved_via_reconciliation — declaration is APPROVED AND its
+        #                          approval was based on a reconciliation marker
+        #                          (no real proof file ever existed)
+        all_proofs = db.query(DepositProof).filter(
+            DepositProof.declaration_id == d.id,
+        ).all()
+        live_proofs = [p for p in all_proofs if p.status != "superseded"]
+        has_real_proof = any(
+            (p.upload_path and p.upload_path != "reconciliation")
+            for p in live_proofs
+        )
+        created_via_reconciliation = any(
+            p.upload_path == "reconciliation" for p in all_proofs
+        )
+        approved_via_reconciliation = bool(
+            d.status == DeclarationStatus.APPROVED
+            and not has_real_proof
+            and any(
+                p.upload_path == "reconciliation"
+                and p.status == DepositProofStatus.APPROVED.value
+                for p in all_proofs
+            )
+        )
+
         result.append({
             "id": str(d.id),
             "cycle_id": str(d.cycle_id),
@@ -730,7 +761,10 @@ def get_my_declarations(
                 # Allow editing if there's a rejected deposit proof for this declaration
                 rejected_proof is not None
             ),
-            "rejected_deposit_proof": rejected_deposit_proof
+            "rejected_deposit_proof": rejected_deposit_proof,
+            "has_real_proof": has_real_proof,
+            "created_via_reconciliation": created_via_reconciliation,
+            "approved_via_reconciliation": approved_via_reconciliation,
         })
     
     return result
