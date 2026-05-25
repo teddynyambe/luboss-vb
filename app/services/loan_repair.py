@@ -309,6 +309,10 @@ def reject_declaration(
                 je.reversed_by = user_id
                 je.reversed_at = datetime.now()
                 reversed_entries += 1
+            # Drop the now-stale approval row. The unique constraint on
+            # deposit_proof_id would otherwise block a future re-approval of the
+            # same proof. The audit trail lives on the reversed journal entry.
+            db.delete(approval)
         if proof.status == DepositProofStatus.APPROVED.value:
             proof.status = DepositProofStatus.REJECTED.value
             proof.rejected_by = user_id
@@ -376,6 +380,9 @@ def reverse_repayment(
                 if decl:
                     decl.status = DeclarationStatus.PENDING
                     declaration_id = str(decl.id)
+        # Drop the stale approval row so a future re-approval of this same
+        # deposit proof doesn't trip the unique constraint on deposit_proof_id.
+        db.delete(approval)
 
     db.commit()
     return {

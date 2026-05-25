@@ -393,6 +393,17 @@ export default function PaymentProofPage() {
     setProofError(null);
     setProofBlobUrl(null);
 
+    // Reconciliation-created proofs have no real file — show a friendly note
+    // instead of issuing a doomed fetch that returns 404.
+    if (!deposit.upload_path || deposit.upload_path === 'reconciliation') {
+      setProofError(
+        'This entry was created during reconciliation by the treasurer, so no payment slip is attached. ' +
+        'If you have a proof of payment for this declaration, please use the "Upload Proof" tab to attach it.'
+      );
+      setProofLoading(false);
+      return;
+    }
+
     try {
       const filename = deposit.upload_path.split('/').pop() || deposit.upload_path;
       const blobUrl = await api.getFileBlob(`/api/treasurer/deposits/proof/${encodeURIComponent(filename)}`);

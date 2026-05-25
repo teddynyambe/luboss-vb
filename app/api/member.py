@@ -45,14 +45,33 @@ class LoanApplicationCreate(BaseModel):
     amount: float
     term_months: str
     notes: Optional[str] = None
+    borrowing_date: Optional[str] = None  # ISO YYYY-MM-DD; sets application_date on the record
 
 
 @router.get("/status")
 def get_my_status(
+    as_of_month: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get my account status (savings, loans, penalties summary)."""
+    """Get my account status (savings, loans, penalties summary).
+
+    `as_of_month` (optional, ISO YYYY-MM-DD): compute outstanding loan and
+    interest-due as-of that month rather than today. Used by the declarations
+    page when editing a past declaration, so the form only reflects loans that
+    existed at the time and repayments made up to that point.
+    """
+    # Parse as_of_month into a date cutoff (last day of the month makes the
+    # comparison inclusive of repayments dated within that month).
+    as_of_cutoff = None
+    if as_of_month:
+        try:
+            from calendar import monthrange
+            base = date.fromisoformat(as_of_month)
+            last_day = monthrange(base.year, base.month)[1]
+            as_of_cutoff = date(base.year, base.month, last_day)
+        except (ValueError, TypeError):
+            as_of_cutoff = None
     try:
         member_profile = get_member_profile_by_user_id(db, current_user.id)
         if not member_profile:
@@ -92,7 +111,17 @@ def get_my_status(
         # Get balances from ledger
         try:
             savings_balance = get_member_savings_balance(db, member_profile.id)
-            loan_balance = get_member_loan_balance(db, member_profile.id)
+            # When the caller is asking about a past month (editing a past
+            # declaration), compute outstanding as-of the end of that month so
+            # loans disbursed AFTER that month don't contaminate the figure.
+            if as_of_cutoff:
+                from datetime import datetime as _dt
+                loan_balance = get_member_loan_balance(
+                    db, member_profile.id,
+                    as_of_date=_dt.combine(as_of_cutoff, _dt.min.time()),
+                )
+            else:
+                loan_balance = get_member_loan_balance(db, member_profile.id)
             # For Account Status display, show accumulated payments (not balance due)
             social_fund_balance = get_member_social_fund_payments(db, member_profile.id)
             admin_fund_balance = get_member_admin_fund_payments(db, member_profile.id)
@@ -129,14 +158,27 @@ def get_my_status(
             from app.models.transaction import LoanStatus as _LS, Repayment
             from app.models.ledger import JournalEntry as _JE
             from sqlalchemy import func as _func
-            active_loans = db.query(Loan).filter(
-                Loan.member_id == member_profile.id,
-                Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED])
-            ).all()
+            # As-of-month: include OPEN/DISBURSED loans whose disbursement
+            # happened on or before the cutoff. Same logic as the loan-balance
+            # calc — closed loans are excluded because they were paid off (a
+            # closed loan with stale-data interest would otherwise show up).
+            if as_of_cutoff:
+                loan_q = db.query(Loan).filter(
+                    Loan.member_id == member_profile.id,
+                    Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED]),
+                    Loan.disbursement_date.isnot(None),
+                    Loan.disbursement_date <= as_of_cutoff,
+                )
+            else:
+                loan_q = db.query(Loan).filter(
+                    Loan.member_id == member_profile.id,
+                    Loan.loan_status.in_([_LS.OPEN, _LS.DISBURSED]),
+                )
+            active_loans = loan_q.all()
             interest_on_loan_due = 0.0
             for loan in active_loans:
                 monthly_interest = float(loan.loan_amount) * float(loan.percentage_interest) / 100
-                total_interest_paid = float(
+                paid_q = (
                     db.query(_func.coalesce(_func.sum(Repayment.interest_amount), 0))
                     .join(_JE, _JE.id == Repayment.journal_entry_id)
                     .filter(
@@ -144,8 +186,10 @@ def get_my_status(
                         _JE.reversed_by.is_(None),
                         _JE.reversed_at.is_(None),
                     )
-                    .scalar() or 0
                 )
+                if as_of_cutoff:
+                    paid_q = paid_q.filter(Repayment.repayment_date <= as_of_cutoff)
+                total_interest_paid = float(paid_q.scalar() or 0)
                 interest_on_loan_due += max(0.0, monthly_interest - total_interest_paid)
         except Exception:
             interest_on_loan_due = 0.0
@@ -881,31 +925,28 @@ def update_declaration_endpoint(
     if declaration.member_id != member_profile.id:
         raise HTTPException(status_code=403, detail="You can only edit your own declarations")
     
-    # Check if this is an edit after rejection (allow editing even if past 20th)
-    allow_rejected_edit = False
-    # Check if there's a rejected deposit proof for this declaration
+    # Editability is status-based, not date-based: a declaration can be edited
+    # iff it is pending or rejected (or has a rejected proof attached). Approved
+    # declarations are immutable — they're posted to the ledger, and to change
+    # them the treasurer must use Reports → Reject Declaration first, which
+    # moves the status back to pending.
     rejected_proof = db.query(DepositProof).filter(
         DepositProof.declaration_id == declaration_uuid,
         DepositProof.status == DepositProofStatus.REJECTED.value
     ).first()
-    if rejected_proof:
-        allow_rejected_edit = True
-
-    # ── Enforce declaration window (unless editing after rejection) ──
-    if not allow_rejected_edit:
-        today = date.today()
-        eff = declaration_data.effective_month
-        window_open = date(eff.year, eff.month, 15)
-        if eff.month == 12:
-            window_close = date(eff.year + 1, 1, 5)
-        else:
-            window_close = date(eff.year, eff.month + 1, 5)
-        if not (window_open <= today <= window_close):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Declarations for {eff.strftime('%B %Y')} can only be edited between "
-                       f"{window_open.strftime('%d %B %Y')} and {window_close.strftime('%d %B %Y')}."
-            )
+    editable = (
+        declaration.status in (DeclarationStatus.PENDING, DeclarationStatus.REJECTED)
+        or rejected_proof is not None
+    )
+    if not editable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This declaration is {declaration.status.value} and cannot be edited. "
+                "Ask the treasurer to reject it first (Reports → Reject Declaration) "
+                "if changes are needed."
+            ),
+        )
 
     try:
         updated_declaration = update_declaration(
@@ -920,7 +961,7 @@ def update_declaration_endpoint(
             declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties else None,
             declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan else None,
             declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment else None,
-            allow_rejected_edit=allow_rejected_edit
+            allow_rejected_edit=editable,
         )
         return {"message": "Declaration updated successfully", "declaration_id": str(updated_declaration.id)}
     except ValueError as e:
@@ -1159,13 +1200,23 @@ def apply_for_loan(
             detail=f"Loan term of {loan_data.term_months} month(s) is not available for your credit rating tier."
         )
     
-    loan_application = LoanApplication(
+    loan_application_kwargs = dict(
         member_id=member_profile.id,
         cycle_id=cycle_uuid,
         amount=loan_amount,
         term_months=loan_data.term_months,
-        status=LoanApplicationStatus.PENDING
+        status=LoanApplicationStatus.PENDING,
     )
+    if loan_data.borrowing_date:
+        try:
+            borrow_dt = date.fromisoformat(loan_data.borrowing_date)
+            loan_application_kwargs["application_date"] = datetime.combine(borrow_dt, datetime.min.time())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid borrowing_date format. Use YYYY-MM-DD.",
+            )
+    loan_application = LoanApplication(**loan_application_kwargs)
     db.add(loan_application)
     db.flush()  # Flush to get loan_application.id
     
@@ -1382,6 +1433,15 @@ def update_loan_application(
     application.term_months = loan_data.term_months
     application.notes = loan_data.notes
     application.cycle_id = cycle_uuid
+    if loan_data.borrowing_date:
+        try:
+            borrow_dt = date.fromisoformat(loan_data.borrowing_date)
+            application.application_date = datetime.combine(borrow_dt, datetime.min.time())
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid borrowing_date format. Use YYYY-MM-DD.",
+            )
     
     db.commit()
     db.refresh(application)
@@ -2312,8 +2372,12 @@ def get_my_deposit_proofs(
     if not member_profile:
         return []
     
+    # Hide 'superseded' proofs from the member — they're audit-only artefacts
+    # produced when a reconciliation re-saves the same month. The treasurer/admin
+    # views still see them.
     deposits = db.query(DepositProof).filter(
-        DepositProof.member_id == member_profile.id
+        DepositProof.member_id == member_profile.id,
+        DepositProof.status != "superseded",
     ).order_by(DepositProof.uploaded_at.desc()).all()
     
     result = []

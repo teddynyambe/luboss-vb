@@ -319,16 +319,17 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
         const declarations = Array.isArray(response.data) ? response.data : [];
         const declaration = declarations.find(d => d.id === declarationId);
         if (declaration) {
-          // Check if it's the current month and can be edited
-          // Parse date string (YYYY-MM-DD) without timezone conversion
-          const [year, month] = declaration.effective_month.split('-').map(Number);
-          const declarationDate = new Date(year, month - 1, 1); // month is 0-indexed
-          const now = new Date();
-          const isCurrentMonth = declarationDate.getFullYear() === now.getFullYear() && 
-                                 declarationDate.getMonth() === now.getMonth();
-          // Removed 20th day restriction - can edit current month declarations anytime
-          const canEdit = isCurrentMonth;
-          
+          // Editable iff the declaration needs revision — meaning its status is
+          // pending or rejected, or it has a rejected deposit proof. Approved
+          // declarations are immutable (they're already posted to the ledger;
+          // to change them, the treasurer must reject first via Reports →
+          // Reject Declaration, which moves the status back to pending).
+          const status = (declaration.status || '').toLowerCase();
+          const canEdit =
+            status === 'pending' ||
+            status === 'rejected' ||
+            !!declaration.rejected_deposit_proof;
+
           if (canEdit) {
             setCurrentMonthDeclaration({ ...declaration, can_edit: true });
             setIsEditing(true);
@@ -344,8 +345,14 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
             });
             setSelectedCycle(declaration.cycle_id);
             setEffectiveMonth(declaration.effective_month);
+            // Reload member status as-of this declaration's month so the
+            // Outstanding/Due hints only reflect loans that existed then.
+            loadMemberStatus(declaration.effective_month);
           } else {
-            setError('This declaration cannot be edited. Only current month declarations can be edited.');
+            setError(
+              'Approved declarations cannot be edited. Ask the treasurer to ' +
+              'reject this declaration first if it needs changes.'
+            );
           }
         } else {
           setError('Declaration not found.');
@@ -379,8 +386,14 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
     }
   };
 
-  const loadMemberStatus = async () => {
+  const loadMemberStatus = async (asOfMonth?: string) => {
     try {
+      // When editing a past declaration, ask the backend to compute outstanding
+      // loan + interest as-of the end of that month, so loans disbursed AFTER
+      // that month aren't included in the figures the member sees.
+      const url = asOfMonth
+        ? `/api/member/status?as_of_month=${encodeURIComponent(asOfMonth)}`
+        : '/api/member/status';
       const res = await api.get<{
         social_fund_balance?: number;
         social_fund_required?: number | null;
@@ -388,7 +401,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
         admin_fund_required?: number | null;
         loan_balance?: number;
         interest_on_loan_due?: number;
-      }>('/api/member/status');
+      }>(url);
       if (res.data) {
         setMemberStatus(res.data);
       }

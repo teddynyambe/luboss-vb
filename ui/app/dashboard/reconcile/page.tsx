@@ -191,13 +191,19 @@ export default function ReconcilePage() {
       });
 
       if (!res.error) {
-        setMessage({ type: 'success', text: 'Reconciliation saved successfully!' });
+        const hasLoan = (parseFloat(formData.loan_amount) || 0) > 0;
+        const lines = [
+          'Reconciliation draft saved as pending.',
+          'Member must upload proof of payment via the Payment Proof page.',
+        ];
+        if (hasLoan) lines.push('Loan application is pending — treasurer must approve it.');
+        setMessage({ type: 'success', text: lines.join(' ') });
       } else {
         setMessage({ type: 'error', text: res.error || 'Failed to save reconciliation' });
       }
     } finally {
       setSaving(false);
-      setTimeout(() => setMessage(null), 6000);
+      setTimeout(() => setMessage(null), 8000);
     }
   };
 
@@ -342,6 +348,16 @@ export default function ReconcilePage() {
         {/* Form — only visible after Load succeeds */}
         {loaded && (
           <>
+            {/* How-it-works note */}
+            <div className="px-4 py-3 bg-amber-50 border-2 border-amber-300 rounded-xl text-sm text-amber-900">
+              <strong>Reconciliation creates drafts, not ledger postings.</strong> Saving will
+              create or update a <em>pending</em> declaration for this member-month and (if a
+              loan amount is entered) a <em>pending</em> loan application. The member must
+              upload proof of payment via the Payment Proof page, and the treasurer must
+              approve it (and the loan application) through the normal queue before anything
+              touches the ledger.
+            </div>
+
             {/* Context banner */}
             <div className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-medium flex items-center justify-between">
               <span>

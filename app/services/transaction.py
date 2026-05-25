@@ -498,9 +498,10 @@ def approve_deposit(
 ) -> DepositApproval:
     """
     Approve deposit proof and post to ledger.
-    
+
     Uses amounts from the associated declaration to post to correct accounts.
     """
+    from app.models.ledger import JournalEntry
     deposit = db.query(DepositProof).filter(DepositProof.id == deposit_proof_id).first()
     if not deposit:
         raise ValueError("Deposit proof not found")
@@ -719,13 +720,40 @@ def approve_deposit(
         created_by=approved_by
     )
     
-    # Create approval record
-    approval = DepositApproval(
-        deposit_proof_id=deposit.id,
-        journal_entry_id=journal_entry.id,
-        approved_by=approved_by
-    )
-    db.add(approval)
+    # Approval record — upsert rather than blind insert. A DepositApproval row
+    # may still exist from a previous approval that was later reversed (via
+    # reject_declaration / reverse_repayment), or because someone hand-edited
+    # the DB and left a stale row whose JE wasn't properly reversed. The
+    # unique constraint on deposit_proof_id means we can't just INSERT in
+    # either case. Updating in place keeps the row id stable for audit.
+    existing_approval = db.query(DepositApproval).filter(
+        DepositApproval.deposit_proof_id == deposit.id
+    ).first()
+    if existing_approval:
+        old_je = db.query(JournalEntry).filter(
+            JournalEntry.id == existing_approval.journal_entry_id
+        ).first() if existing_approval.journal_entry_id else None
+        if old_je and old_je.reversed_by is None and old_je.reversed_at is None:
+            # Old JE was never reversed. Auto-reverse it now so the ledger
+            # doesn't double-count when we point the approval at the new JE.
+            import logging
+            logging.getLogger(__name__).warning(
+                "approve_deposit: prior DepositApproval %s pointed at a live JE %s "
+                "for deposit %s; auto-reversing the old JE before re-approving.",
+                existing_approval.id, old_je.id, deposit.id,
+            )
+            old_je.reversed_by = approved_by
+            old_je.reversed_at = datetime.utcnow()
+        existing_approval.journal_entry_id = journal_entry.id
+        existing_approval.approved_by = approved_by
+        approval = existing_approval
+    else:
+        approval = DepositApproval(
+            deposit_proof_id=deposit.id,
+            journal_entry_id=journal_entry.id,
+            approved_by=approved_by
+        )
+        db.add(approval)
     
     # Update deposit proof status to APPROVED
     deposit.status = DepositProofStatus.APPROVED.value
@@ -896,7 +924,8 @@ def disburse_loan(
     loan_id: UUID,
     disbursed_by: UUID,
     bank_cash_account_id: UUID,
-    loans_receivable_account_id: UUID
+    loans_receivable_account_id: UUID,
+    disbursement_date_override: date = None,
 ) -> Loan:
     """Disburse a loan and post to ledger.
     
@@ -940,8 +969,12 @@ def disburse_loan(
     )
     
     loan.loan_status = LoanStatus.OPEN  # Set to OPEN (active) after disbursement
-    loan.disbursement_date = date.today()
+    loan.disbursement_date = disbursement_date_override or date.today()
+    loan.effective_month = loan.disbursement_date
     loan.disbursement_journal_entry_id = journal_entry.id
+    # Backdate the journal entry too so ledger reports for that period are right.
+    if disbursement_date_override is not None:
+        journal_entry.entry_date = datetime.combine(disbursement_date_override, datetime.min.time())
     
     db.commit()
     db.refresh(loan)

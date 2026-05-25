@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, Form, UploadFile, File, status, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_
 from app.db.base import get_db
 from app.core.dependencies import require_treasurer, require_any_role, get_current_user
 from app.models.user import User
@@ -23,10 +24,27 @@ def get_pending_deposits(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Get list of pending deposit proofs awaiting approval with declaration details."""
+    """Get list of pending deposit proofs awaiting approval with declaration details.
+
+    Includes:
+      - all SUBMITTED proofs (newly uploaded by member, awaiting treasurer review)
+      - REJECTED proofs that have a member_response (member pushed back, asking
+        treasurer to reconsider)
+
+    Plain REJECTED proofs without a member response are NOT included — they're
+    dead-ends in the treasurer's queue (the next action is on the member, who
+    needs to upload a new proof). Excluding them keeps the queue actionable.
+    """
     try:
         deposits = db.query(DepositProof).filter(
-            DepositProof.status.in_([DepositProofStatus.SUBMITTED.value, DepositProofStatus.REJECTED.value])
+            or_(
+                DepositProof.status == DepositProofStatus.SUBMITTED.value,
+                and_(
+                    DepositProof.status == DepositProofStatus.REJECTED.value,
+                    DepositProof.member_response.isnot(None),
+                    DepositProof.member_response != "",
+                ),
+            )
         ).order_by(DepositProof.uploaded_at.desc()).all()
         
         if not deposits:
@@ -1050,22 +1068,36 @@ def approve_loan_application(
             detail=f"Cannot approve application with status: {application.status.value}"
         )
 
-    # Enforce one active loan per member (Admin can override with ?force=true).
+    # Enforce one active loan per member.
+    #   - Live new application (application_date today): only Admin can force-override.
+    #   - Backdated historical reconciliation (application_date in the past):
+    #     Treasurer can force-override too, because the loan being approved
+    #     existed in a prior period and the conflict is a chronological
+    #     artefact, not a current double-borrow. The follow-on reconciliation
+    #     that records the historical repayment will close the loan.
     existing_active = db.query(Loan).filter(
         Loan.member_id == application.member_id,
         Loan.loan_status.in_([LoanStatus.APPROVED, LoanStatus.OPEN, LoanStatus.DISBURSED]),
     ).first()
     if existing_active:
         is_admin = (current_user.role and current_user.role.value.lower() == "admin")
-        if not (force and is_admin):
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Member already has an active loan (status={existing_active.loan_status.value}, "
-                    f"amount=K{existing_active.loan_amount}). Close or consolidate it before approving "
-                    "a new one. Admins may pass force=true to override."
-                ),
+        app_dt = application.application_date.date() if application.application_date else date.today()
+        is_backdated = app_dt < date.today()
+        can_override = (force and is_admin) or (force and is_backdated)
+        if not can_override:
+            detail = (
+                f"Member already has an active loan (status={existing_active.loan_status.value}, "
+                f"amount=K{existing_active.loan_amount}). Close or consolidate it before approving "
+                "a new one."
             )
+            if is_backdated:
+                detail += (
+                    " This application is backdated; Treasurer may resubmit with force=true "
+                    "to record the historical loan, then reconcile its payoff."
+                )
+            else:
+                detail += " Admins may pass force=true to override."
+            raise HTTPException(status_code=409, detail=detail)
     
     # Get credit rating to determine interest rate
     credit_rating = db.query(MemberCreditRating).filter(
@@ -1118,14 +1150,22 @@ def approve_loan_application(
     application.reviewed_at = datetime.utcnow()
     
     # Disburse the loan (post to ledger and set status to OPEN)
-    # This happens in the same transaction - disburse_loan will commit
+    # This happens in the same transaction - disburse_loan will commit.
+    # If the application was backdated (reconciliation), use its application_date
+    # as the disbursement date so the loan's borrowing/maturity reflect when the
+    # member actually borrowed the money, not when the treasurer is approving it.
+    today_dt = date.today()
+    backdated_disbursement = None
+    if application.application_date and application.application_date.date() < today_dt:
+        backdated_disbursement = application.application_date.date()
     try:
         loan = disburse_loan(
             db=db,
             loan_id=loan.id,  # Pass UUID directly
             disbursed_by=current_user.id,
             bank_cash_account_id=bank_cash.id,
-            loans_receivable_account_id=loans_receivable.id
+            loans_receivable_account_id=loans_receivable.id,
+            disbursement_date_override=backdated_disbursement,
         )
     except Exception as e:
         # If disbursement fails, rollback the loan creation

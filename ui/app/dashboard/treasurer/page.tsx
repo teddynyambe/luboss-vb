@@ -117,6 +117,9 @@ export default function TreasurerDashboard() {
   const [activeLoans, setActiveLoans] = useState<ActiveLoan[]>([]);
   const [loanFilter, setLoanFilter] = useState<'active' | 'at_risk' | 'defaulting' | 'paid'>('active');
   const [showAllLoans, setShowAllLoans] = useState(false);
+  const [showAllDeposits, setShowAllDeposits] = useState(false);
+  const [showAllPendingLoans, setShowAllPendingLoans] = useState(false);
+  const [showAllPenalties, setShowAllPenalties] = useState(false);
   const [loading, setLoading] = useState(true);
   const [approving, setApproving] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<string | null>(null);
@@ -132,6 +135,7 @@ export default function TreasurerDashboard() {
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [showLoanApprovalModal, setShowLoanApprovalModal] = useState(false);
   const [loanToApprove, setLoanToApprove] = useState<PendingLoanApplication | null>(null);
+  const [loanApprovalForce, setLoanApprovalForce] = useState(false);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -539,24 +543,43 @@ export default function TreasurerDashboard() {
     const loan = pendingLoans.find(l => l.id === applicationId);
     if (loan) {
       setLoanToApprove(loan);
+      setLoanApprovalForce(false);
       setShowLoanApprovalModal(true);
     }
   };
 
-  const confirmApproveLoan = async () => {
+  const confirmApproveLoan = async (force: boolean = false) => {
     if (!loanToApprove) return;
-    
+
     setApprovingLoan(loanToApprove.id);
     setMessage(null);
     try {
-      const response = await api.post(`/api/treasurer/loans/${loanToApprove.id}/approve`);
+      const url = `/api/treasurer/loans/${loanToApprove.id}/approve${force ? '?force=true' : ''}`;
+      const response = await api.post(url);
       if (!response.error) {
         setMessage({ type: 'success', text: 'Loan approved, disbursed, and posted to member\'s account successfully!' });
         await loadData();
         setShowLoanApprovalModal(false);
         setLoanToApprove(null);
       } else {
-        setMessage({ type: 'error', text: response.error || 'Failed to approve and disburse loan' });
+        // If the backend refused because of the one-active-loan rule but is
+        // willing to honor force (backdated application or Admin), surface a
+        // second-click "Confirm override" button instead of just an error.
+        const refusal = response.error || 'Failed to approve and disburse loan';
+        if (
+          !force &&
+          /already has an active loan/i.test(refusal) &&
+          /(force=true|backdated)/i.test(refusal)
+        ) {
+          setMessage({
+            type: 'error',
+            text: refusal + ' Click Approve again to confirm the override.',
+          });
+          // arm the override on the next click
+          setLoanApprovalForce(true);
+        } else {
+          setMessage({ type: 'error', text: refusal });
+        }
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Error approving and disbursing loan' });
@@ -800,7 +823,7 @@ export default function TreasurerDashboard() {
                 <p className="text-blue-700 text-sm text-center py-6">No pending deposit proofs</p>
               ) : (
                 <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                  {pendingDeposits.slice(0, 3).map((deposit) => (
+                  {(showAllDeposits ? pendingDeposits : pendingDeposits.slice(0, 3)).map((deposit) => (
                     <div
                       key={deposit.id}
                       className="p-3 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg hover:shadow-md transition-shadow"
@@ -844,9 +867,12 @@ export default function TreasurerDashboard() {
                     </div>
                   ))}
                   {pendingDeposits.length > 3 && (
-                    <p className="text-xs text-blue-600 text-center pt-2">
-                      +{pendingDeposits.length - 3} more
-                    </p>
+                    <button
+                      onClick={() => setShowAllDeposits((v) => !v)}
+                      className="block mx-auto text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline pt-2 focus:outline-none"
+                    >
+                      {showAllDeposits ? 'Show less' : `+${pendingDeposits.length - 3} more`}
+                    </button>
                   )}
                 </div>
               )}
@@ -867,7 +893,7 @@ export default function TreasurerDashboard() {
                 <p className="text-blue-700 text-sm text-center py-6">No pending loan applications</p>
               ) : (
                 <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                  {pendingLoans.slice(0, 3).map((loan) => (
+                  {(showAllPendingLoans ? pendingLoans : pendingLoans.slice(0, 3)).map((loan) => (
                     <div
                       key={loan.id}
                       className="p-3 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg hover:shadow-md transition-shadow"
@@ -892,9 +918,12 @@ export default function TreasurerDashboard() {
                     </div>
                   ))}
                   {pendingLoans.length > 3 && (
-                    <p className="text-xs text-blue-600 text-center pt-2">
-                      +{pendingLoans.length - 3} more
-                    </p>
+                    <button
+                      onClick={() => setShowAllPendingLoans((v) => !v)}
+                      className="block mx-auto text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline pt-2 focus:outline-none"
+                    >
+                      {showAllPendingLoans ? 'Show less' : `+${pendingLoans.length - 3} more`}
+                    </button>
                   )}
                 </div>
               )}
@@ -1047,7 +1076,7 @@ export default function TreasurerDashboard() {
                 <p className="text-blue-700 text-sm text-center py-6">No pending penalties</p>
               ) : (
                 <div className="space-y-2 max-h-[400px] overflow-y-auto">
-                  {pendingPenalties.slice(0, 3).map((penalty) => (
+                  {(showAllPenalties ? pendingPenalties : pendingPenalties.slice(0, 3)).map((penalty) => (
                     <div
                       key={penalty.id}
                       className="p-3 bg-gradient-to-r from-yellow-50 to-yellow-100 border-2 border-yellow-300 rounded-lg hover:shadow-md transition-shadow"
@@ -1075,9 +1104,12 @@ export default function TreasurerDashboard() {
                     </div>
                   ))}
                   {pendingPenalties.length > 3 && (
-                    <p className="text-xs text-blue-600 text-center pt-2">
-                      +{pendingPenalties.length - 3} more
-                    </p>
+                    <button
+                      onClick={() => setShowAllPenalties((v) => !v)}
+                      className="block mx-auto text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline pt-2 focus:outline-none"
+                    >
+                      {showAllPenalties ? 'Show less' : `+${pendingPenalties.length - 3} more`}
+                    </button>
                   )}
                 </div>
               )}
@@ -2149,11 +2181,19 @@ export default function TreasurerDashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={confirmApproveLoan}
+                  onClick={() => confirmApproveLoan(loanApprovalForce)}
                   disabled={approvingLoan === loanToApprove.id}
-                  className="px-4 py-2 md:px-6 md:py-3 bg-gradient-to-br from-green-500 to-green-600 border-2 border-green-600 text-white rounded-xl hover:from-green-600 hover:to-green-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200"
+                  className={`px-4 py-2 md:px-6 md:py-3 border-2 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200 ${
+                    loanApprovalForce
+                      ? 'bg-gradient-to-br from-amber-500 to-amber-600 border-amber-600 hover:from-amber-600 hover:to-amber-700'
+                      : 'bg-gradient-to-br from-green-500 to-green-600 border-green-600 hover:from-green-600 hover:to-green-700'
+                  }`}
                 >
-                  {approvingLoan === loanToApprove.id ? 'Approving...' : 'Approve & Disburse Loan'}
+                  {approvingLoan === loanToApprove.id
+                    ? 'Approving...'
+                    : loanApprovalForce
+                      ? 'Confirm Override & Disburse'
+                      : 'Approve & Disburse Loan'}
                 </button>
               </div>
             </div>

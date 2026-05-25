@@ -1678,7 +1678,6 @@ class ReconcileRequest(BaseModel):
     loan_amount: float = 0.0
     loan_rate: float = 0.0
     loan_term_months: str = "1"  # e.g. "1", "2", "3", "4"
-    allow_overwrite: bool = False  # required when this member+month already has a live approved deposit
 
 
 @router.get("/reconcile")
@@ -1750,16 +1749,30 @@ def post_reconcile(
     current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Save backlog financial data for a member + month, bypassing normal member flow."""
+    """Backfill a member's monthly declaration and/or loan application.
+
+    Reconciliation never posts to the ledger directly anymore. It only creates
+    drafts that flow through the same approval queues as member-initiated
+    actions, eliminating the duplicate-loan / phantom-approved-declaration bug
+    class:
+
+      * Declaration is created/updated with status = PENDING. The member is
+        responsible for uploading proof of payment via the normal Payment Proof
+        page. Treasurer then approves through the existing pending-deposits
+        queue (that's when the ledger is touched).
+      * If loan_amount > 0, a LoanApplication with status = PENDING is created.
+        Treasurer approves it through the existing /loans/{application_id}/approve
+        endpoint, which runs the one-active-loan guard and disburses normally.
+
+    If the declaration for the month is already APPROVED, the endpoint refuses
+    and points the operator to the Reports → Reject Declaration flow.
+    """
     from app.models.transaction import (
         Declaration, DeclarationStatus,
-        DepositProof, DepositProofStatus, DepositApproval,
         Loan, LoanStatus,
+        LoanApplication, LoanApplicationStatus,
     )
     from app.models.cycle import Cycle, CycleStatus
-    from app.models.ledger import LedgerAccount, AccountType, JournalEntry, JournalLine
-    from app.services.transaction import create_declaration, approve_deposit
-    from app.services.accounting import create_journal_entry
     from app.core.audit import write_audit_log
     from sqlalchemy import extract, and_
     from datetime import date as date_type
@@ -1801,7 +1814,7 @@ def post_reconcile(
     if not active_cycle:
         raise HTTPException(status_code=404, detail="No active cycle found")
 
-    # 2. Load or create Declaration
+    # 2. Look up existing Declaration for this (member, month)
     declaration = db.query(Declaration).filter(
         and_(
             Declaration.member_id == member_uuid,
@@ -1810,268 +1823,135 @@ def post_reconcile(
         )
     ).first()
 
+    # Refuse to overwrite an already-approved declaration. The operator must
+    # explicitly reject it first (Reports → Reject Declaration), which clears
+    # the ledger posting and leaves the declaration in pending — then this
+    # reconciliation can update it cleanly.
+    if declaration and declaration.status == DeclarationStatus.APPROVED:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{month_date.strftime('%B %Y')} declaration for this member is already approved. "
+                "Reject it first via Reports → Reject Declaration if you need to change it, "
+                "then re-run reconciliation."
+            ),
+        )
+
+    declared_savings = Decimal(str(body.savings_amount))
+    declared_social = Decimal(str(body.social_fund))
+    declared_admin = Decimal(str(body.admin_fund))
+    declared_penalties = Decimal(str(body.penalties))
+    declared_interest = Decimal(str(body.interest_on_loan))
+    declared_repayment = Decimal(str(body.loan_repayment))
+
     if declaration:
-        declaration.declared_savings_amount = Decimal(str(body.savings_amount))
-        declaration.declared_social_fund = Decimal(str(body.social_fund))
-        declaration.declared_admin_fund = Decimal(str(body.admin_fund))
-        declaration.declared_penalties = Decimal(str(body.penalties))
-        declaration.declared_interest_on_loan = Decimal(str(body.interest_on_loan))
-        declaration.declared_loan_repayment = Decimal(str(body.loan_repayment))
-        declaration.status = DeclarationStatus.APPROVED
-        db.flush()
+        declaration.declared_savings_amount = declared_savings
+        declaration.declared_social_fund = declared_social
+        declaration.declared_admin_fund = declared_admin
+        declaration.declared_penalties = declared_penalties
+        declaration.declared_interest_on_loan = declared_interest
+        declaration.declared_loan_repayment = declared_repayment
+        declaration.status = DeclarationStatus.PENDING
     else:
         declaration = Declaration(
             member_id=member_uuid,
             cycle_id=active_cycle.id,
             effective_month=month_date,
-            declared_savings_amount=Decimal(str(body.savings_amount)),
-            declared_social_fund=Decimal(str(body.social_fund)),
-            declared_admin_fund=Decimal(str(body.admin_fund)),
-            declared_penalties=Decimal(str(body.penalties)),
-            declared_interest_on_loan=Decimal(str(body.interest_on_loan)),
-            declared_loan_repayment=Decimal(str(body.loan_repayment)),
-            status=DeclarationStatus.APPROVED,
+            declared_savings_amount=declared_savings,
+            declared_social_fund=declared_social,
+            declared_admin_fund=declared_admin,
+            declared_penalties=declared_penalties,
+            declared_interest_on_loan=declared_interest,
+            declared_loan_repayment=declared_repayment,
+            status=DeclarationStatus.PENDING,
         )
         db.add(declaration)
-        db.flush()
-
-    # 3. Reverse any existing DepositApproval journal entry
-    existing_proof = db.query(DepositProof).filter(
-        DepositProof.declaration_id == declaration.id
-    ).order_by(DepositProof.uploaded_at.desc()).first()
-
-    if existing_proof:
-        existing_approval = db.query(DepositApproval).filter(
-            DepositApproval.deposit_proof_id == existing_proof.id
-        ).first()
-        # Guard: if there is a live (non-reversed) approval for this member+month,
-        # require the caller to opt-in to overwrite. Otherwise we'd silently reverse
-        # the existing posting and clobber the ledger (the root cause of the
-        # outstanding-balance divergence bug). The operator should usually edit the
-        # original declaration via the Payment Proof flow instead of re-reconciling.
-        if existing_approval and existing_approval.journal_entry_id:
-            old_entry = db.query(JournalEntry).filter(
-                JournalEntry.id == existing_approval.journal_entry_id
-            ).first()
-            if old_entry and old_entry.reversed_by is None and old_entry.reversed_at is None:
-                if not body.allow_overwrite:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=(
-                            f"An approved deposit already exists for {month_date.strftime('%B %Y')}. "
-                            "Re-reconciling will reverse the existing ledger posting. "
-                            "If you really intend to overwrite, resubmit with allow_overwrite=true."
-                        ),
-                    )
-                old_entry.reversed_by = current_user.id
-                old_entry.reversed_at = datetime.now()
-                db.flush()
-        # Mark old proof superseded
-        existing_proof.status = "superseded"
-        db.flush()
-
-    # 4. Create synthetic DepositProof
-    total_amount = Decimal(str(
-        body.savings_amount + body.social_fund + body.admin_fund +
-        body.penalties + body.interest_on_loan + body.loan_repayment
-    ))
-    synthetic_proof = DepositProof(
-        member_id=member_uuid,
-        cycle_id=active_cycle.id,
-        declaration_id=declaration.id,
-        upload_path="reconciliation",
-        amount=total_amount,
-        status=DepositProofStatus.SUBMITTED.value,
-    )
-    db.add(synthetic_proof)
     db.flush()
 
-    # 5. Look up ledger accounts
-    bank_cash = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "BANK_CASH"
-    ).first()
-    if not bank_cash:
-        raise HTTPException(status_code=500, detail="BANK_CASH ledger account not found")
-
-    member_savings = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_uuid,
-        LedgerAccount.account_name.ilike("%savings%")
-    ).first()
-    if not member_savings:
-        short_id = str(member_uuid).replace("-", "")[:8]
-        member_savings = LedgerAccount(
-            account_code=f"MEM_SAV_{short_id}",
-            account_name=f"Member Savings - {member_uuid}",
-            account_type=AccountType.LIABILITY,
-            member_id=member_uuid,
-            description=f"Savings account for member {member_uuid}",
-        )
-        db.add(member_savings)
-        db.flush()
-
-    member_social_fund = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_uuid,
-        LedgerAccount.account_name.ilike("%social fund%")
-    ).first()
-    if not member_social_fund and body.social_fund > 0:
-        short_id = str(member_uuid).replace("-", "")[:8]
-        member_social_fund = LedgerAccount(
-            account_code=f"MEM_SOC_{short_id}",
-            account_name=f"Member Social Fund - {member_uuid}",
-            account_type=AccountType.LIABILITY,
-            member_id=member_uuid,
-            description=f"Social fund account for member {member_uuid}",
-        )
-        db.add(member_social_fund)
-        db.flush()
-
-    member_admin_fund = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_uuid,
-        LedgerAccount.account_name.ilike("%admin fund%")
-    ).first()
-    if not member_admin_fund and body.admin_fund > 0:
-        short_id = str(member_uuid).replace("-", "")[:8]
-        member_admin_fund = LedgerAccount(
-            account_code=f"MEM_ADM_{short_id}",
-            account_name=f"Member Admin Fund - {member_uuid}",
-            account_type=AccountType.LIABILITY,
-            member_id=member_uuid,
-            description=f"Admin fund account for member {member_uuid}",
-        )
-        db.add(member_admin_fund)
-        db.flush()
-
-    interest_income = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code == "INTEREST_INCOME"
-    ).first()
-
-    loans_receivable = db.query(LedgerAccount).filter(
-        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
-    ).first()
-
-    # 6. Approve the synthetic deposit proof (posts to ledger)
-    try:
-        approve_deposit(
-            db=db,
-            deposit_proof_id=synthetic_proof.id,
-            approved_by=current_user.id,
-            bank_cash_account_id=bank_cash.id,
-            member_savings_account_id=member_savings.id,
-            member_social_fund_account_id=member_social_fund.id if member_social_fund else None,
-            member_admin_fund_account_id=member_admin_fund.id if member_admin_fund else None,
-            interest_income_account_id=interest_income.id if interest_income else None,
-            loans_receivable_account_id=loans_receivable.id if loans_receivable else None,
-        )
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to post reconciliation to ledger: {str(e)}")
-
-    # Transfer any excess social/admin fund contributions to savings
-    from app.services.transaction import post_excess_contributions
-    post_excess_contributions(
-        db=db,
-        member_id=member_uuid,
-        cycle=active_cycle,
-        effective_month=month_date,
-        approved_by=current_user.id,
-    )
-
-    # Backdate deposit journal entry to reconciliation month so B/F columns in group report are correct
-    updated_approval = db.query(DepositApproval).filter(
-        DepositApproval.deposit_proof_id == synthetic_proof.id
-    ).first()
-    if updated_approval and updated_approval.journal_entry_id:
-        deposit_je = db.query(JournalEntry).filter(
-            JournalEntry.id == updated_approval.journal_entry_id
-        ).first()
-        if deposit_je:
-            from datetime import datetime as dt
-            deposit_je.entry_date = dt.combine(month_date, dt.min.time())
-            db.flush()
-
-    # 7. Handle loan (if loan_amount > 0)
+    # 3. Loan application (only if loan_amount > 0)
+    created_loan_application_id = None
     if body.loan_amount > 0:
-        existing_loan = db.query(Loan).filter(
-            and_(
-                Loan.member_id == member_uuid,
-                extract("year", Loan.disbursement_date) == month_date.year,
-                extract("month", Loan.disbursement_date) == month_date.month,
-            )
+        # Avoid duplicate pending applications for the same member.
+        existing_pending_app = db.query(LoanApplication).filter(
+            LoanApplication.member_id == member_uuid,
+            LoanApplication.status == LoanApplicationStatus.PENDING,
         ).first()
-
-        # Guard against silently duplicating an active loan when reconciling
-        # a non-disbursement month: if the operator entered loan_amount for a
-        # month that is not the disbursement month, treat it as repayment context
-        # against the existing active loan rather than creating a new loan.
-        if not existing_loan:
-            active_loan = db.query(Loan).filter(
-                Loan.member_id == member_uuid,
-                Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
-            ).order_by(Loan.created_at.asc()).first()
-            if active_loan:
-                existing_loan = active_loan
-
-        if existing_loan:
-            # Update existing loan details
-            existing_loan.loan_amount = Decimal(str(body.loan_amount))
-            existing_loan.percentage_interest = Decimal(str(body.loan_rate))
-            existing_loan.number_of_instalments = body.loan_term_months
-            db.flush()
-        else:
-            if not loans_receivable:
-                raise HTTPException(status_code=500, detail="LOANS_RECEIVABLE ledger account not found")
-
-            new_loan = Loan(
-                member_id=member_uuid,
-                cycle_id=active_cycle.id,
-                application_id=None,
-                loan_amount=Decimal(str(body.loan_amount)),
-                percentage_interest=Decimal(str(body.loan_rate)),
-                number_of_instalments=body.loan_term_months,
-                loan_status=LoanStatus.DISBURSED,
-                disbursement_date=month_date,
-                effective_month=month_date,
+        if existing_pending_app:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This member already has a pending loan application "
+                    f"(K{existing_pending_app.amount}, {existing_pending_app.term_months} months). "
+                    "Approve or reject it before reconciling another loan."
+                ),
             )
-            db.add(new_loan)
-            db.flush()
 
-            # Create disbursement journal entry: Debit LOANS_RECEIVABLE, Credit BANK_CASH
-            from datetime import datetime as dt
-            loan_je = create_journal_entry(
-                db=db,
-                description=f"Loan disbursement (reconciliation) for member {member_uuid} - {month_date}",
-                source_type="loan_disbursement",
-                source_ref=str(new_loan.id),
-                lines=[
-                    {
-                        "account_id": loans_receivable.id,
-                        "debit_amount": Decimal(str(body.loan_amount)),
-                        "credit_amount": Decimal("0.00"),
-                        "description": "Loan disbursed (reconciliation)",
-                    },
-                    {
-                        "account_id": bank_cash.id,
-                        "debit_amount": Decimal("0.00"),
-                        "credit_amount": Decimal(str(body.loan_amount)),
-                        "description": "Cash paid out for loan (reconciliation)",
-                    },
-                ],
-                created_by=current_user.id,
+        # Avoid creating a duplicate Loan for the same month. If the member
+        # already has an active loan disbursed in this reconciled month, the
+        # treasurer most likely tried to save the form twice — refuse and
+        # point them to the Loan State panel to manage the existing loan.
+        existing_same_month_loan = db.query(Loan).filter(
+            Loan.member_id == member_uuid,
+            Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
+            extract("year", Loan.disbursement_date) == month_date.year,
+            extract("month", Loan.disbursement_date) == month_date.month,
+        ).first()
+        if existing_same_month_loan:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This member already has an active K{existing_same_month_loan.loan_amount} "
+                    f"loan disbursed in {month_date.strftime('%B %Y')}. "
+                    "Open the Loan State panel to view, consolidate or close it before "
+                    "reconciling another loan for the same month."
+                ),
             )
-            # Backdate loan disbursement entry to reconciliation month
-            loan_je.entry_date = dt.combine(month_date, dt.min.time())
-            db.flush()
 
-    # 8. Audit log
+        # The single-active-loan rule is enforced at the approval endpoint
+        # (treasurer.py /loans/{application_id}/approve), so creating a pending
+        # application here is safe even if the member has an active loan —
+        # approval will refuse with a clear 409 if so. We still surface a
+        # heads-up to the operator in the response payload.
+        # Backdate the application to the reconciled month so the eventual
+        # Loan inherits the correct borrowing date / maturity. Without this,
+        # application_date defaults to NOW() and the loan would look as if it
+        # were borrowed today instead of during the reconciled period.
+        new_application = LoanApplication(
+            member_id=member_uuid,
+            cycle_id=active_cycle.id,
+            amount=Decimal(str(body.loan_amount)),
+            term_months=body.loan_term_months or "1",
+            notes=f"Created via reconciliation for {month_date.strftime('%B %Y')}",
+            status=LoanApplicationStatus.PENDING,
+            application_date=datetime.combine(month_date, datetime.min.time()),
+        )
+        db.add(new_application)
+        db.flush()
+        created_loan_application_id = str(new_application.id)
+
+    # 4. Audit log
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
         user_role=current_user.role.value if current_user.role else "chairman",
-        action="Reconciliation saved",
-        details=f"member={body.member_id}, month={month_date.strftime('%Y-%m')}",
+        action="Reconciliation drafted",
+        details=(
+            f"member={body.member_id}, month={month_date.strftime('%Y-%m')}, "
+            f"declaration_status=pending, loan_application_id={created_loan_application_id or '-'}"
+        ),
     )
 
     db.commit()
-    return {"message": "Reconciliation saved successfully"}
+
+    next_steps = ["Member must upload proof of payment via Payment Proof page."]
+    if created_loan_application_id:
+        next_steps.append("Loan application is now pending and awaits treasurer approval.")
+    return {
+        "message": "Reconciliation draft saved. Awaiting member proof + treasurer approval.",
+        "declaration_id": str(declaration.id),
+        "declaration_status": declaration.status.value,
+        "loan_application_id": created_loan_application_id,
+        "next_steps": next_steps,
+    }
 
 
 class ConsolidateLoansRequest(BaseModel):

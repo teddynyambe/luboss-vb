@@ -202,6 +202,7 @@ export default function LoanApplicationPage() {
       amount: formData.amount,
       term_months: formData.term_months,
       notes: formData.notes || undefined,
+      borrowing_date: formData.borrowing_date || undefined,
     };
 
     try {
@@ -242,11 +243,13 @@ export default function LoanApplicationPage() {
     setEditingApplication(null);
     setEditingData(null);
     setError('');
+    const todayIso = new Date().toISOString().slice(0, 10);
     setFormData({
       cycle_id: selectedCycle,
       amount: 0,
       term_months: formData.term_months || '1',
       notes: '',
+      borrowing_date: todayIso,
     });
     if (selectedCycle) loadLoanEligibility(selectedCycle, false);
     setShowFormModal(true);
@@ -267,6 +270,12 @@ export default function LoanApplicationPage() {
     // Validate that we got a valid number (not NaN)
     const finalAmount = (isNaN(amountValue) || amountValue < 0) ? 0 : amountValue;
 
+    // Pull borrowing_date from application_date (timestamp or YYYY-MM-DD) → YYYY-MM-DD
+    const rawAppDate = (application.application_date || '').toString();
+    const borrowingDate = rawAppDate
+      ? rawAppDate.split('T')[0].split(' ')[0]
+      : new Date().toISOString().slice(0, 10);
+
     setEditingApplication(application.id);
     setSelectedCycle(application.cycle_id);
     setEditingData({
@@ -274,14 +283,16 @@ export default function LoanApplicationPage() {
       amount: finalAmount,
       term_months: application.term_months,
       notes: application.notes || '',
+      borrowing_date: borrowingDate,
     });
-    
+
     // Set form data with the amount value
     setFormData({
       cycle_id: application.cycle_id,
       amount: finalAmount,
       term_months: application.term_months || '1',
       notes: application.notes || '',
+      borrowing_date: borrowingDate,
     });
     
     setError('');
@@ -298,7 +309,13 @@ export default function LoanApplicationPage() {
     setShowFormModal(false);
     setEditingApplication(null);
     setEditingData(null);
-    setFormData({ cycle_id: selectedCycle, amount: 0, term_months: formData.term_months || '1', notes: '' });
+    setFormData({
+      cycle_id: selectedCycle,
+      amount: 0,
+      term_months: formData.term_months || '1',
+      notes: '',
+      borrowing_date: new Date().toISOString().slice(0, 10),
+    });
     setError('');
   };
 
@@ -648,19 +665,25 @@ export default function LoanApplicationPage() {
                   </div>
                 </div>
 
-                {/* Borrowing Date & Maturity Date (computed, read-only) */}
+                {/* Borrowing Date (editable) & Maturity Date (computed from borrow + term) */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
                   <div>
                     <label className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
                       Borrowing Date
                     </label>
                     <input
-                      type="text"
-                      readOnly
-                      value={new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })}
-                      className="w-full bg-gray-100 border-2 border-gray-300 rounded-xl px-4 py-2 text-blue-900 cursor-not-allowed"
+                      type="date"
+                      name="borrowing_date"
+                      value={formData.borrowing_date || ''}
+                      max={new Date().toISOString().slice(0, 10)}
+                      onChange={(e) =>
+                        setFormData((prev) => ({ ...prev, borrowing_date: e.target.value }))
+                      }
+                      className="w-full bg-white border-2 border-blue-300 rounded-xl px-4 py-2 text-blue-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                    <p className="mt-1 text-xs text-blue-600 italic">Set to the date the loan is approved and disbursed</p>
+                    <p className="mt-1 text-xs text-blue-600 italic">
+                      When the loan was actually borrowed. Defaults to today.
+                    </p>
                   </div>
                   <div>
                     <label className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
@@ -670,14 +693,18 @@ export default function LoanApplicationPage() {
                       type="text"
                       readOnly
                       value={(() => {
-                        const today = new Date();
+                        const base = formData.borrowing_date
+                          ? new Date(formData.borrowing_date + 'T00:00:00')
+                          : new Date();
                         const months = parseInt(formData.term_months) || 1;
-                        const maturity = new Date(today.getFullYear(), today.getMonth() + months, today.getDate());
+                        const maturity = new Date(base.getFullYear(), base.getMonth() + months, base.getDate());
                         return maturity.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
                       })()}
                       className="w-full bg-gray-100 border-2 border-gray-300 rounded-xl px-4 py-2 text-blue-900 cursor-not-allowed"
                     />
-                    <p className="mt-1 text-xs text-blue-600 italic">Borrowing date + {formData.term_months} {parseInt(formData.term_months) === 1 ? 'month' : 'months'}</p>
+                    <p className="mt-1 text-xs text-blue-600 italic">
+                      Borrowing date + {formData.term_months} {parseInt(formData.term_months) === 1 ? 'month' : 'months'}
+                    </p>
                   </div>
                 </div>
 

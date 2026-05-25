@@ -16,6 +16,7 @@ export interface LoanApplicationCreate {
   amount: number;
   term_months: string;
   notes?: string;
+  borrowing_date?: string;  // ISO YYYY-MM-DD; overrides the default (today)
 }
 
 export interface RejectedDepositProof {

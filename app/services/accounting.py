@@ -172,13 +172,26 @@ def get_member_loan_balance(
     """
     from app.models.transaction import Loan, LoanStatus, Repayment
     from app.models.ledger import JournalEntry
+    from sqlalchemy import or_ as _or_
 
-    loan_query = db.query(Loan).filter(
-        Loan.member_id == member_id,
-        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
-    )
     if as_of_date:
-        loan_query = loan_query.filter(Loan.created_at <= as_of_date)
+        # "What was outstanding at this point in time": include OPEN/DISBURSED
+        # loans whose disbursement happened on or before the cutoff. Closed
+        # loans are excluded — by definition they were fully paid off, so they
+        # contribute 0 to outstanding anyway, and excluding them avoids
+        # double-counting closed-with-stale-data records.
+        cutoff_date = as_of_date.date() if hasattr(as_of_date, "date") else as_of_date
+        loan_query = db.query(Loan).filter(
+            Loan.member_id == member_id,
+            Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
+            Loan.disbursement_date.isnot(None),
+            Loan.disbursement_date <= cutoff_date,
+        )
+    else:
+        loan_query = db.query(Loan).filter(
+            Loan.member_id == member_id,
+            Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED])
+        )
 
     active_loans = loan_query.all()
     if not active_loans:
