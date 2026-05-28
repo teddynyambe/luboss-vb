@@ -233,6 +233,8 @@ export default function TreasurerDashboard() {
       status: string;
       amount: number;
       uploaded_at: string | null;
+      upload_path?: string | null;
+      has_file?: boolean;
     } | null;
   }
   
@@ -2151,7 +2153,7 @@ export default function TreasurerDashboard() {
                           {declarationDetails.declaration.status === 'proof' ? 'Proof Submitted' : declarationDetails.declaration.status}
                         </span>
                       </div>
-                      {declarationDetails.deposit_proof && (
+                      {declarationDetails.deposit_proof ? (
                         <div className="bg-gray-50 border-2 border-gray-200 rounded-xl p-4">
                           <h3 className="font-bold text-lg text-gray-900 mb-2">Deposit Proof</h3>
                           <div className="space-y-1 text-sm">
@@ -2161,6 +2163,28 @@ export default function TreasurerDashboard() {
                               <p><span className="font-medium text-gray-700">Uploaded:</span> {new Date(declarationDetails.deposit_proof.uploaded_at).toLocaleString()}</p>
                             )}
                           </div>
+                          <div className="mt-3">
+                            {declarationDetails.deposit_proof.has_file && declarationDetails.deposit_proof.upload_path ? (
+                              <button
+                                type="button"
+                                onClick={() => handleViewProof(declarationDetails.deposit_proof!.upload_path!)}
+                                className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
+                              >
+                                📎 View Proof of Payment
+                              </button>
+                            ) : (
+                              <p className="text-sm italic text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-2">
+                                No proof of payment was uploaded — this entry was created via reconciliation.
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-gray-50 border-2 border-gray-200 rounded-xl p-4">
+                          <h3 className="font-bold text-lg text-gray-900 mb-2">Deposit Proof</h3>
+                          <p className="text-sm italic text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-2">
+                            No proof of payment was uploaded for this declaration.
+                          </p>
                         </div>
                       )}
                     </>

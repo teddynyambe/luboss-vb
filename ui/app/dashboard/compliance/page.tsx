@@ -41,6 +41,10 @@ interface ApprovedPenalty {
 export default function ComplianceDashboard() {
   const { user } = useAuth();
   const router = useRouter();
+  const [activeTab, setActiveTab] = useState<'manage' | 'reverse'>('manage');
+  const [memberSearch, setMemberSearch] = useState('');
+  const [reverseNameFilter, setReverseNameFilter] = useState('');
+  const [reverseTypeFilter, setReverseTypeFilter] = useState<string>('');
   const [penaltyTypes, setPenaltyTypes] = useState<PenaltyType[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
   const [selectedType, setSelectedType] = useState('');
@@ -272,6 +276,33 @@ export default function ComplianceDashboard() {
           </div>
         )}
 
+        {/* Tab toggle */}
+        <div className="flex gap-2 mb-6 border-b-2 border-blue-200">
+          <button
+            type="button"
+            onClick={() => setActiveTab('manage')}
+            className={`px-4 py-2 md:px-6 md:py-3 text-sm md:text-base font-semibold rounded-t-lg transition-colors -mb-0.5 border-b-2 ${
+              activeTab === 'manage'
+                ? 'bg-white text-blue-900 border-blue-600'
+                : 'text-blue-600 hover:text-blue-800 border-transparent'
+            }`}
+          >
+            Manage Penalties
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('reverse')}
+            className={`px-4 py-2 md:px-6 md:py-3 text-sm md:text-base font-semibold rounded-t-lg transition-colors -mb-0.5 border-b-2 ${
+              activeTab === 'reverse'
+                ? 'bg-white text-blue-900 border-blue-600'
+                : 'text-blue-600 hover:text-blue-800 border-transparent'
+            }`}
+          >
+            Reverse Penalty
+          </button>
+        </div>
+
+        {activeTab === 'manage' && (<>
         {/* Penalty Type Management */}
         <div className="card mb-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 md:mb-6 gap-4">
@@ -435,6 +466,13 @@ export default function ComplianceDashboard() {
               <label className="block text-base md:text-lg font-semibold text-blue-900 mb-2">
                 Member *
               </label>
+              <input
+                type="text"
+                value={memberSearch}
+                onChange={(e) => setMemberSearch(e.target.value)}
+                placeholder="Filter by first name or last name"
+                className="w-full mb-2"
+              />
               <select
                 value={memberId}
                 onChange={(e) => setMemberId(e.target.value)}
@@ -442,11 +480,19 @@ export default function ComplianceDashboard() {
                 className="w-full"
               >
                 <option value="">Select a member</option>
-                {members.map((member) => (
-                  <option key={member.id} value={member.id}>
-                    {getMemberDisplayName(member)} {member.user?.email ? `(${member.user.email})` : ''}
-                  </option>
-                ))}
+                {members
+                  .filter((m) => {
+                    const q = memberSearch.trim().toLowerCase();
+                    if (!q) return true;
+                    const fn = (m.user?.first_name || '').toLowerCase();
+                    const ln = (m.user?.last_name || '').toLowerCase();
+                    return fn.includes(q) || ln.includes(q);
+                  })
+                  .map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {getMemberDisplayName(member)} {member.user?.email ? `(${member.user.email})` : ''}
+                    </option>
+                  ))}
               </select>
             </div>
 
@@ -509,18 +555,56 @@ export default function ComplianceDashboard() {
             </button>
           </form>
         </div>
-        {/* Penalty Reversals */}
-        <div className="card mt-6">
+        </>)}
+
+        {activeTab === 'reverse' && (
+        /* Penalty Reversals */
+        <div className="card">
           <h2 className="text-xl md:text-2xl font-bold text-blue-900 mb-4 md:mb-6">Reverse Penalty</h2>
           <p className="text-sm text-blue-600 mb-4">
             Select an approved penalty to request reversal. The Treasurer must approve the reversal before it takes effect.
           </p>
 
-          {approvedPenalties.length === 0 ? (
-            <p className="text-blue-500 text-center py-4">No approved penalties to reverse.</p>
-          ) : (
+          {/* Filters */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+            <input
+              type="text"
+              value={reverseNameFilter}
+              onChange={(e) => setReverseNameFilter(e.target.value)}
+              placeholder="Filter by first name or last name"
+              className="w-full"
+            />
+            <select
+              value={reverseTypeFilter}
+              onChange={(e) => setReverseTypeFilter(e.target.value)}
+              className="w-full"
+            >
+              <option value="">All penalty types</option>
+              {penaltyTypes.map((t) => (
+                <option key={t.id} value={t.name}>{t.name}</option>
+              ))}
+            </select>
+          </div>
+
+          {(() => {
+            const q = reverseNameFilter.trim().toLowerCase();
+            const filtered = approvedPenalties.filter((p) => {
+              const nameOk = !q || (p.member_name || '').toLowerCase().includes(q);
+              const typeOk = !reverseTypeFilter || p.penalty_type_name === reverseTypeFilter;
+              return nameOk && typeOk;
+            });
+            if (filtered.length === 0) {
+              return (
+                <p className="text-blue-500 text-center py-4">
+                  {approvedPenalties.length === 0
+                    ? 'No approved penalties to reverse.'
+                    : 'No penalties match the current filters.'}
+                </p>
+              );
+            }
+            return (
             <div className="space-y-2 max-h-[400px] overflow-y-auto">
-              {approvedPenalties.map(p => (
+              {filtered.map(p => (
                 <div key={p.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border border-blue-100 rounded-lg p-3 bg-blue-50">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
@@ -547,8 +631,10 @@ export default function ComplianceDashboard() {
                 </div>
               ))}
             </div>
-          )}
+            );
+          })()}
         </div>
+        )}
 
         {/* Reversal reason modal */}
         {reversingId && (
