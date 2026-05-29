@@ -191,7 +191,7 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
       ) : (
         <div className="space-y-4">
           {state.months.map((m) => (
-            <div key={m.month} className="border border-blue-200 rounded-lg overflow-hidden">
+            <div key={m.month} className="border border-blue-200 rounded-lg">
               <div className="px-3 py-2 bg-blue-50 flex justify-between items-center">
                 <div className="font-semibold text-blue-900">{m.month_label}</div>
                 <div className="text-xs text-gray-700 flex gap-3">
@@ -242,7 +242,7 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
                             {openMenu === l.id && (
                               <div
                                 onMouseLeave={() => setOpenMenu(null)}
-                                className="absolute right-2 top-7 z-10 bg-white border border-gray-300 rounded shadow-md text-left text-xs min-w-[140px]"
+                                className="absolute right-2 top-7 z-40 bg-white border border-gray-300 rounded shadow-md text-left text-xs min-w-[140px]"
                               >
                                 <button
                                   onClick={() => { setOpenMenu(null); setReverseLine(l); setReverseDesc(''); }}
