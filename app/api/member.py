@@ -742,6 +742,24 @@ def get_my_declarations(
             )
         )
 
+        # Compute live posted amounts per category for this declaration's month
+        # and flag when they diverge from the declared figures (i.e. treasurer
+        # used Posted Transactions to reverse, split or move a line).
+        from app.services.accounting import compute_posted_breakdown as _posted_bd
+        posted_items = _posted_bd(db, member_profile.id, d.effective_month.year, d.effective_month.month)
+        declared_items = {
+            "savings": float(d.declared_savings_amount or 0),
+            "social_fund": float(d.declared_social_fund or 0),
+            "admin_fund": float(d.declared_admin_fund or 0),
+            "penalty": float(d.declared_penalties or 0),
+        }
+        # Only flag when this declaration was actually posted (otherwise pending
+        # declarations would show as "discrepant" because posted is 0).
+        has_reconciliation_discrepancy = (
+            d.status == DeclarationStatus.APPROVED
+            and any(abs(posted_items[k] - declared_items[k]) > 0.01 for k in declared_items)
+        )
+
         result.append({
             "id": str(d.id),
             "cycle_id": str(d.cycle_id),
@@ -765,6 +783,8 @@ def get_my_declarations(
             "has_real_proof": has_real_proof,
             "created_via_reconciliation": created_via_reconciliation,
             "approved_via_reconciliation": approved_via_reconciliation,
+            "posted_items": posted_items,
+            "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
         })
     
     return result
@@ -1835,7 +1855,26 @@ def get_account_transactions(
                 Declaration.declared_savings_amount > 0,
             ).order_by(Declaration.created_at.desc()).all()
             
+            from app.services.accounting import compute_posted_breakdown as _posted_bd
             for declaration in declarations:
+                posted_items = _posted_bd(
+                    db, member_profile.id,
+                    declaration.effective_month.year,
+                    declaration.effective_month.month,
+                )
+                declared_items_chk = {
+                    "savings": float(declaration.declared_savings_amount or 0),
+                    "social_fund": float(declaration.declared_social_fund or 0),
+                    "admin_fund": float(declaration.declared_admin_fund or 0),
+                    "penalty": float(declaration.declared_penalties or 0),
+                }
+                has_reconciliation_discrepancy = (
+                    declaration.status == DeclarationStatus.APPROVED
+                    and any(
+                        abs(posted_items[k] - declared_items_chk[k]) > 0.01
+                        for k in declared_items_chk
+                    )
+                )
                 transactions.append({
                     "id": f"declaration_{declaration.id}",
                     "date": declaration.effective_month.isoformat(),
@@ -1851,7 +1890,9 @@ def get_account_transactions(
                         "penalties":        float(declaration.declared_penalties or 0),
                         "loan_repayment":   float(declaration.declared_loan_repayment or 0),
                         "interest_on_loan": float(declaration.declared_interest_on_loan or 0),
-                    }
+                    },
+                    "posted_items": posted_items,
+                    "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
                 })
             
             # Include excess contribution transfers (internal reclassifications to savings)
@@ -1860,6 +1901,32 @@ def get_account_transactions(
                 LedgerAccount.account_name.ilike("%savings%")
             ).first()
             if exc_savings_account:
+                # Treasurer corrections (splits etc.) — any live line on this
+                # member's savings account that isn't already covered above.
+                # Both credits (incoming) and debits (outgoing) shown.
+                covered_sources = ("deposit_approval", "excess_contribution")
+                other_lines = db.query(JournalLine).join(JournalEntry).filter(
+                    JournalLine.ledger_account_id == exc_savings_account.id,
+                    JournalEntry.reversed_by.is_(None),
+                    ~JournalEntry.source_type.in_(covered_sources),
+                ).all()
+                for line in other_lines:
+                    je = line.journal_entry
+                    cred = float(line.credit_amount or 0)
+                    deb = float(line.debit_amount or 0)
+                    if cred == 0 and deb == 0:
+                        continue
+                    transactions.append({
+                        "id": f"adj_{line.id}",
+                        "date": (je.entry_date.date().isoformat() if je.entry_date else date.today().isoformat()),
+                        "description": line.description or je.description or "Treasurer adjustment",
+                        "debit": deb,
+                        "credit": cred,
+                        "amount": cred if cred > 0 else deb,
+                        "is_adjustment": True,
+                        "source_type": je.source_type,
+                    })
+
                 excess_lines = db.query(JournalLine).join(JournalEntry).filter(
                     JournalLine.ledger_account_id == exc_savings_account.id,
                     JournalEntry.source_type == "excess_contribution",
@@ -2134,6 +2201,22 @@ def get_account_transactions(
                                 "amount": debit_val,
                                 "is_excess_transfer": True
                             })
+                    else:
+                        # Treasurer corrections: splits, manual adjustments etc.
+                        cred = float(line.credit_amount or 0)
+                        deb = float(line.debit_amount or 0)
+                        if cred == 0 and deb == 0:
+                            continue
+                        transactions.append({
+                            "id": f"adj_{line.id}",
+                            "date": line.journal_entry.entry_date.isoformat() if line.journal_entry.entry_date else None,
+                            "description": line.description or line.journal_entry.description or "Treasurer adjustment",
+                            "debit": deb,
+                            "credit": cred,
+                            "amount": cred if cred > 0 else deb,
+                            "is_adjustment": True,
+                            "source_type": line.journal_entry.source_type,
+                        })
 
         elif type == "admin_fund":
             # Get member's admin fund account (member-specific)
@@ -2216,6 +2299,23 @@ def get_account_transactions(
                                 "amount": debit_val,
                                 "is_excess_transfer": True
                             })
+                    else:
+                        # Treasurer corrections (splits, manual adjustments) on
+                        # the admin fund account.
+                        cred = float(line.credit_amount or 0)
+                        deb = float(line.debit_amount or 0)
+                        if cred == 0 and deb == 0:
+                            continue
+                        transactions.append({
+                            "id": f"adj_{line.id}",
+                            "date": line.journal_entry.entry_date.isoformat() if line.journal_entry.entry_date else None,
+                            "description": line.description or line.journal_entry.description or "Treasurer adjustment",
+                            "debit": deb,
+                            "credit": cred,
+                            "amount": cred if cred > 0 else deb,
+                            "is_adjustment": True,
+                            "source_type": line.journal_entry.source_type,
+                        })
 
     except Exception as e:
         import logging
@@ -3008,7 +3108,23 @@ def get_member_savings_history(
         Declaration.declared_savings_amount > 0
     ).order_by(Declaration.created_at.desc()).all()
 
+    from app.services.accounting import compute_posted_breakdown as _posted_bd
     for declaration in declarations:
+        posted_items = _posted_bd(
+            db, member_profile.id,
+            declaration.effective_month.year,
+            declaration.effective_month.month,
+        )
+        declared_check = {
+            "savings": float(declaration.declared_savings_amount or 0),
+            "social_fund": float(declaration.declared_social_fund or 0),
+            "admin_fund": float(declaration.declared_admin_fund or 0),
+            "penalty": float(declaration.declared_penalties or 0),
+        }
+        has_reconciliation_discrepancy = (
+            declaration.status == DeclarationStatus.APPROVED
+            and any(abs(posted_items[k] - declared_check[k]) > 0.01 for k in declared_check)
+        )
         transactions.append({
             "id": f"declaration_{declaration.id}",
             "date": declaration.effective_month.isoformat(),
@@ -3024,15 +3140,41 @@ def get_member_savings_history(
                 "penalties":        float(declaration.declared_penalties or 0),
                 "loan_repayment":   float(declaration.declared_loan_repayment or 0),
                 "interest_on_loan": float(declaration.declared_interest_on_loan or 0),
-            }
+            },
+            "posted_items": posted_items,
+            "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
         })
 
-    # Excess contribution transfers
+    # Treasurer adjustments on the member's savings account that aren't already
+    # covered above (e.g. transaction_split entries from the Posted Transactions
+    # tool). Both credit-side and debit-side rows are surfaced.
     exc_savings_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_profile.id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
     if exc_savings_account:
+        adj_lines = db.query(JournalLine).join(JournalEntry).filter(
+            JournalLine.ledger_account_id == exc_savings_account.id,
+            JournalEntry.reversed_by.is_(None),
+            ~JournalEntry.source_type.in_(("deposit_approval", "excess_contribution")),
+        ).all()
+        for line in adj_lines:
+            je = line.journal_entry
+            cred = float(line.credit_amount or 0)
+            deb = float(line.debit_amount or 0)
+            if cred == 0 and deb == 0:
+                continue
+            transactions.append({
+                "id": f"adj_{line.id}",
+                "date": (je.entry_date.date().isoformat() if je.entry_date else date.today().isoformat()),
+                "description": line.description or je.description or "Treasurer adjustment",
+                "debit": deb,
+                "credit": cred,
+                "amount": cred if cred > 0 else deb,
+                "is_adjustment": True,
+                "source_type": je.source_type,
+            })
+
         excess_lines = db.query(JournalLine).join(JournalEntry).filter(
             JournalLine.ledger_account_id == exc_savings_account.id,
             JournalEntry.source_type == "excess_contribution",

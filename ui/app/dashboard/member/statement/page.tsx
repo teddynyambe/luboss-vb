@@ -23,6 +23,13 @@ interface DeclarationItems {
   interest_on_loan: number;
 }
 
+interface PostedItems {
+  savings?: number;
+  social_fund?: number;
+  admin_fund?: number;
+  penalty?: number;
+}
+
 interface SavingsEntry {
   id: string;
   date: string;        // "YYYY-MM-DD" or ISO
@@ -32,6 +39,8 @@ interface SavingsEntry {
   amount: number;
   is_declaration?: boolean;
   declaration_items?: DeclarationItems;
+  posted_items?: PostedItems;
+  has_reconciliation_discrepancy?: boolean;
   is_excess_transfer?: boolean;
   excess_source?: string; // "social_fund" | "admin_fund"
 }
@@ -173,15 +182,29 @@ export default function MemberStatementPage() {
                 <p className="text-blue-700 text-sm text-center py-6">No savings history available.</p>
               ) : (() => {
                 // Group entries by month key (YYYY-MM), keeping declaration and deposit separately
-                const monthMap = new Map<string, { month: string; declarationItems: DeclarationItems | null; deposited: number | null }>();
+                const monthMap = new Map<string, {
+                  month: string;
+                  declarationItems: DeclarationItems | null;
+                  postedItems: PostedItems | null;
+                  hasDiscrepancy: boolean;
+                  deposited: number | null;
+                }>();
                 for (const entry of savingsHistory) {
                   const key = entry.date.substring(0, 7); // "YYYY-MM"
                   if (!monthMap.has(key)) {
-                    monthMap.set(key, { month: entry.date, declarationItems: null, deposited: null });
+                    monthMap.set(key, {
+                      month: entry.date,
+                      declarationItems: null,
+                      postedItems: null,
+                      hasDiscrepancy: false,
+                      deposited: null,
+                    });
                   }
                   const row = monthMap.get(key)!;
                   if (entry.is_declaration) {
                     row.declarationItems = entry.declaration_items ?? null;
+                    row.postedItems = entry.posted_items ?? null;
+                    row.hasDiscrepancy = !!entry.has_reconciliation_discrepancy;
                   } else {
                     row.deposited = (row.deposited ?? 0) + entry.amount;
                   }
@@ -208,28 +231,47 @@ export default function MemberStatementPage() {
                       <tbody className="divide-y divide-blue-100">
                         {rows.map((row) => (
                           <tr key={row.month}>
-                            <td className="py-2 pr-4 text-blue-800 whitespace-nowrap">{formatMonth(row.month)}</td>
+                            <td className="py-2 pr-4 text-blue-800 whitespace-nowrap">
+                              {formatMonth(row.month)}
+                              {row.hasDiscrepancy && (
+                                <span
+                                  className="ml-2 text-amber-600"
+                                  title="Posted amounts differ from declared due to treasurer reconciliation. Declared figures (left) are the member's original commitment; actual posted amounts may have been split or reallocated by the treasurer."
+                                >
+                                  ⚙
+                                </span>
+                              )}
+                            </td>
                             <td className="py-2 pr-4 text-right text-blue-700">
                               {row.declarationItems ? (
                                 <div className="text-xs space-y-0.5 leading-5">
-                                  {row.declarationItems.savings_amount > 0 && (
-                                    <div><span className="text-blue-500">Savings:</span> {fmt(row.declarationItems.savings_amount)}</div>
-                                  )}
-                                  {row.declarationItems.social_fund > 0 && (
-                                    <div><span className="text-blue-500">Social Fund:</span> {fmt(row.declarationItems.social_fund)}</div>
-                                  )}
-                                  {row.declarationItems.admin_fund > 0 && (
-                                    <div><span className="text-blue-500">Admin Fund:</span> {fmt(row.declarationItems.admin_fund)}</div>
-                                  )}
-                                  {row.declarationItems.penalties > 0 && (
-                                    <div><span className="text-blue-500">Penalties:</span> {fmt(row.declarationItems.penalties)}</div>
-                                  )}
-                                  {row.declarationItems.loan_repayment > 0 && (
-                                    <div><span className="text-blue-500">Loan Repayment:</span> {fmt(row.declarationItems.loan_repayment)}</div>
-                                  )}
-                                  {row.declarationItems.interest_on_loan > 0 && (
-                                    <div><span className="text-blue-500">Interest:</span> {fmt(row.declarationItems.interest_on_loan)}</div>
-                                  )}
+                                  {(() => {
+                                    type Row = { label: string; declared: number; posted?: number };
+                                    const items: Row[] = [
+                                      { label: 'Savings',        declared: row.declarationItems.savings_amount, posted: row.postedItems?.savings },
+                                      { label: 'Social Fund',    declared: row.declarationItems.social_fund,    posted: row.postedItems?.social_fund },
+                                      { label: 'Admin Fund',     declared: row.declarationItems.admin_fund,     posted: row.postedItems?.admin_fund },
+                                      { label: 'Penalties',      declared: row.declarationItems.penalties,      posted: row.postedItems?.penalty },
+                                      { label: 'Loan Repayment', declared: row.declarationItems.loan_repayment },
+                                      { label: 'Interest',       declared: row.declarationItems.interest_on_loan },
+                                    ];
+                                    return items.map((it) => {
+                                      const decl = it.declared || 0;
+                                      const post = it.posted;
+                                      const differs = post !== undefined && Math.abs(post - decl) > 0.01;
+                                      if (decl <= 0 && !(differs && post)) return null;
+                                      return (
+                                        <div key={it.label}>
+                                          <span className="text-blue-500">{it.label}:</span> {fmt(decl)}
+                                          {differs && (
+                                            <span className="ml-1 text-amber-700" title="Posted via reconciliation">
+                                              (posted {fmt(post)})
+                                            </span>
+                                          )}
+                                        </div>
+                                      );
+                                    });
+                                  })()}
                                 </div>
                               ) : '—'}
                             </td>
@@ -250,25 +292,26 @@ export default function MemberStatementPage() {
               })()}
             </div>
 
-            {/* Contribution Summary Card */}
+            {/* Contribution Summary Card — reflects the LIVE ledger balance
+                (credits − debits) per category, so it matches the Account
+                Status cards on the Member Dashboard. After a treasurer split
+                or reverse, the posted amounts diverge from the originally
+                declared figures; this summary follows the actual money. */}
             {savingsHistory.length > 0 && (() => {
               const totals = savingsHistory.reduce(
                 (acc, entry) => {
                   if (entry.is_declaration && entry.declaration_items) {
-                    acc.savings += entry.declaration_items.savings_amount;
-                    acc.social_fund += entry.declaration_items.social_fund;
-                    acc.admin_fund += entry.declaration_items.admin_fund;
-                    acc.penalties += entry.declaration_items.penalties;
-                  } else if (entry.is_excess_transfer) {
-                    // Excess fund contributions transferred to savings
-                    const amt = entry.credit || entry.amount || 0;
-                    acc.savings += amt;
-                    if (entry.excess_source === 'social_fund') {
-                      acc.social_fund -= amt;
-                    } else if (entry.excess_source === 'admin_fund') {
-                      acc.admin_fund -= amt;
-                    }
+                    // Prefer posted (live) per-month amounts when present so
+                    // splits/reverses on the ledger are reflected here.
+                    const p = entry.posted_items;
+                    acc.savings += p?.savings ?? entry.declaration_items.savings_amount;
+                    acc.social_fund += p?.social_fund ?? entry.declaration_items.social_fund;
+                    acc.admin_fund += p?.admin_fund ?? entry.declaration_items.admin_fund;
+                    acc.penalties += p?.penalty ?? entry.declaration_items.penalties;
                   }
+                  // Note: excess transfers and treasurer-adjustment lines are
+                  // already baked into posted_items, so they don't need a
+                  // separate branch here.
                   return acc;
                 },
                 { savings: 0, social_fund: 0, admin_fund: 0, penalties: 0 }

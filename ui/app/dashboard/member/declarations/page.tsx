@@ -44,6 +44,13 @@ interface Declaration {
   has_real_proof?: boolean;
   created_via_reconciliation?: boolean;
   approved_via_reconciliation?: boolean;
+  has_reconciliation_discrepancy?: boolean;
+  posted_items?: {
+    savings?: number;
+    social_fund?: number;
+    admin_fund?: number;
+    penalty?: number;
+  };
 }
 
 export default function DeclarationsPage() {
@@ -1087,6 +1094,9 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       <span title="Approved with a reconciliation entry (no physical proof file)">
                         <span className="font-bold">⚙️</span> Approved via reconciliation
                       </span>
+                      <span title="Posted amounts differ from declared amounts due to treasurer reconciliation (split / reverse)">
+                        <span className="font-bold">🔧</span> Posted differs from declared
+                      </span>
                     </div>
 
                     <div className="overflow-x-auto">
@@ -1203,6 +1213,27 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                                     {declaration.approved_via_reconciliation && (
                                       <span title="Approved via reconciliation (no physical proof file)" className="text-base leading-none">
                                         ⚙️
+                                      </span>
+                                    )}
+                                    {declaration.has_reconciliation_discrepancy && (
+                                      <span
+                                        title={(() => {
+                                          const p = declaration.posted_items || {};
+                                          const lines: string[] = ['Posted amounts differ from declared due to treasurer reconciliation:'];
+                                          const fmtK = (n: number) => `K${n.toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+                                          if ((declaration.declared_savings_amount || 0) !== (p.savings || 0))
+                                            lines.push(`  Savings: declared ${fmtK(declaration.declared_savings_amount || 0)} → posted ${fmtK(p.savings || 0)}`);
+                                          if ((declaration.declared_social_fund || 0) !== (p.social_fund || 0))
+                                            lines.push(`  Social Fund: declared ${fmtK(declaration.declared_social_fund || 0)} → posted ${fmtK(p.social_fund || 0)}`);
+                                          if ((declaration.declared_admin_fund || 0) !== (p.admin_fund || 0))
+                                            lines.push(`  Admin Fund: declared ${fmtK(declaration.declared_admin_fund || 0)} → posted ${fmtK(p.admin_fund || 0)}`);
+                                          if ((declaration.declared_penalties || 0) !== (p.penalty || 0))
+                                            lines.push(`  Penalties: declared ${fmtK(declaration.declared_penalties || 0)} → posted ${fmtK(p.penalty || 0)}`);
+                                          return lines.join('\n');
+                                        })()}
+                                        className="text-base leading-none"
+                                      >
+                                        🔧
                                       </span>
                                     )}
                                   </div>

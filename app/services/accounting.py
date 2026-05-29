@@ -108,55 +108,41 @@ def get_member_savings_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's savings balance from ledger.
-    
-    Returns only credits from deposit approvals (actual deposits received),
-    excluding penalty debits. This shows the accumulation of actual proof of
-    payment received for declarations, not reduced by penalties.
+    """Get member's savings balance from the ledger.
+
+    Standard liability-account balance: total live credits − total live debits.
+    Any source_type is included (deposit_approval, excess_contribution,
+    transaction_split, …) so that treasurer corrections via the Posted
+    Transactions tools flow through automatically.
     """
     from sqlalchemy import func
-    from app.models.transaction import DepositProof, DepositApproval
-    
-    # Find member's savings account
+
     savings_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
-    
     if not savings_account:
         return Decimal("0.00")
-    
-    # Query 1: credits from deposit approvals (existing logic)
-    q1 = db.query(func.sum(JournalLine.credit_amount)).join(
-        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
-    ).join(
-        DepositApproval, JournalEntry.id == DepositApproval.journal_entry_id
-    ).join(
-        DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
-    ).filter(
-        JournalLine.ledger_account_id == savings_account.id,
-        DepositProof.member_id == member_id,
-        JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",
-    )
-    if as_of_date:
-        q1 = q1.filter(JournalEntry.entry_date <= as_of_date)
-    deposit_credits = q1.scalar() or Decimal("0.00")
 
-    # Query 2: credits from excess contribution transfers
-    q2 = db.query(func.sum(JournalLine.credit_amount)).join(
+    q_credits = db.query(func.coalesce(func.sum(JournalLine.credit_amount), 0)).join(
         JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
     ).filter(
         JournalLine.ledger_account_id == savings_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "excess_contribution",
-        JournalLine.credit_amount > 0,
+    )
+    q_debits = db.query(func.coalesce(func.sum(JournalLine.debit_amount), 0)).join(
+        JournalEntry, JournalLine.journal_entry_id == JournalEntry.id
+    ).filter(
+        JournalLine.ledger_account_id == savings_account.id,
+        JournalEntry.reversed_by.is_(None),
     )
     if as_of_date:
-        q2 = q2.filter(JournalEntry.entry_date <= as_of_date)
-    excess_credits = q2.scalar() or Decimal("0.00")
+        q_credits = q_credits.filter(JournalEntry.entry_date <= as_of_date)
+        q_debits = q_debits.filter(JournalEntry.entry_date <= as_of_date)
 
-    return deposit_credits + excess_credits
+    credits = Decimal(str(q_credits.scalar() or 0))
+    debits = Decimal(str(q_debits.scalar() or 0))
+    return max(Decimal("0.00"), credits - debits)
 
 
 def get_member_loan_balance(
@@ -278,50 +264,29 @@ def get_member_social_fund_payments(
     """
     from app.models.ledger import JournalLine, JournalEntry
 
-    # Find member's social fund account (member-specific)
     member_social_fund_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%social fund%")
     ).first()
-
     if not member_social_fund_account:
         return Decimal("0.00")
 
-    # Credits from deposit approvals (payments into the fund)
-    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+    # Standard liability-account balance: live credits − live debits, any source.
+    # Splits, reverses and excess transfers all reflect automatically.
+    q_credits = db.query(func.coalesce(func.sum(JournalLine.credit_amount), 0)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",
-        JournalLine.credit_amount > 0
     )
-    # Legacy debits from deposit approvals (older accounting style)
-    query_legacy_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    q_debits = db.query(func.coalesce(func.sum(JournalLine.debit_amount), 0)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_social_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",
-        JournalLine.debit_amount > 0
     )
-    # Debits from excess contribution transfers (scheduler moved excess to savings)
-    query_excess_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
-        JournalLine.ledger_account_id == member_social_fund_account.id,
-        JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "excess_contribution",
-        JournalLine.debit_amount > 0
-    )
-
     if as_of_date:
-        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
-        query_legacy_debits = query_legacy_debits.filter(JournalEntry.entry_date <= as_of_date)
-        query_excess_debits = query_excess_debits.filter(JournalEntry.entry_date <= as_of_date)
-
-    total_credits = query_credits.scalar() or Decimal("0.00")
-    total_legacy_debits = query_legacy_debits.scalar() or Decimal("0.00")
-    excess_transferred = query_excess_debits.scalar() or Decimal("0.00")
-
-    # Net balance = payments (credits + legacy debits) minus excess transferred out
-    net_balance = total_credits + total_legacy_debits - excess_transferred
-
-    return max(Decimal("0.00"), net_balance)
+        q_credits = q_credits.filter(JournalEntry.entry_date <= as_of_date)
+        q_debits = q_debits.filter(JournalEntry.entry_date <= as_of_date)
+    credits = Decimal(str(q_credits.scalar() or 0))
+    debits = Decimal(str(q_debits.scalar() or 0))
+    return max(Decimal("0.00"), credits - debits)
 
 
 def get_member_admin_fund_balance(
@@ -385,50 +350,134 @@ def get_member_admin_fund_payments(
     """
     from app.models.ledger import JournalLine, JournalEntry
 
-    # Find member's admin fund account (member-specific)
     member_admin_fund_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_id,
         LedgerAccount.account_name.ilike("%admin fund%")
     ).first()
-
     if not member_admin_fund_account:
         return Decimal("0.00")
 
-    # Credits from deposit approvals (payments into the fund)
-    query_credits = db.query(func.sum(JournalLine.credit_amount)).join(JournalEntry).filter(
+    # Same as social fund payments: live credits − live debits, any source_type.
+    q_credits = db.query(func.coalesce(func.sum(JournalLine.credit_amount), 0)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",
-        JournalLine.credit_amount > 0
     )
-    # Legacy debits from deposit approvals (older accounting style)
-    query_legacy_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
+    q_debits = db.query(func.coalesce(func.sum(JournalLine.debit_amount), 0)).join(JournalEntry).filter(
         JournalLine.ledger_account_id == member_admin_fund_account.id,
         JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "deposit_approval",
-        JournalLine.debit_amount > 0
     )
-    # Debits from excess contribution transfers (scheduler moved excess to savings)
-    query_excess_debits = db.query(func.sum(JournalLine.debit_amount)).join(JournalEntry).filter(
-        JournalLine.ledger_account_id == member_admin_fund_account.id,
-        JournalEntry.reversed_by.is_(None),
-        JournalEntry.source_type == "excess_contribution",
-        JournalLine.debit_amount > 0
-    )
-
     if as_of_date:
-        query_credits = query_credits.filter(JournalEntry.entry_date <= as_of_date)
-        query_legacy_debits = query_legacy_debits.filter(JournalEntry.entry_date <= as_of_date)
-        query_excess_debits = query_excess_debits.filter(JournalEntry.entry_date <= as_of_date)
+        q_credits = q_credits.filter(JournalEntry.entry_date <= as_of_date)
+        q_debits = q_debits.filter(JournalEntry.entry_date <= as_of_date)
+    credits = Decimal(str(q_credits.scalar() or 0))
+    debits = Decimal(str(q_debits.scalar() or 0))
+    return max(Decimal("0.00"), credits - debits)
 
-    total_credits = query_credits.scalar() or Decimal("0.00")
-    total_legacy_debits = query_legacy_debits.scalar() or Decimal("0.00")
-    excess_transferred = query_excess_debits.scalar() or Decimal("0.00")
 
-    # Net balance = payments (credits + legacy debits) minus excess transferred out
-    net_balance = total_credits + total_legacy_debits - excess_transferred
+def compute_posted_breakdown(
+    db: Session,
+    member_id: UUID,
+    year: int,
+    month: int,
+) -> dict:
+    """Return per-category live posted amounts for this member in a given month.
 
-    return max(Decimal("0.00"), net_balance)
+    Each live journal line on the member's category accounts is bucketed by:
+      1. The declaration's effective_month, if the line traces to one (via
+         DepositApproval → DepositProof → Declaration). This handles the
+         common case of a March declaration whose deposit is approved in
+         April — the line still belongs to March.
+      2. For a 'transaction_split' JE, the same trace follows the split's
+         source line back to its declaration.
+      3. Otherwise, JournalEntry.entry_date is used as the fallback (excess
+         transfers and other anchor-less adjustments).
+
+    Returns the sum of (credit − debit) for each of savings / social_fund /
+    admin_fund / penalty that bucketed into the target (year, month).
+    Reversed JEs are excluded.
+    """
+    from app.models.ledger import JournalLine, JournalEntry
+    from app.models.transaction import DepositApproval, DepositProof, Declaration
+    import uuid as _uuid
+
+    category_filters = {
+        "savings": "%savings%",
+        "social_fund": "%social fund%",
+        "admin_fund": "%admin fund%",
+        "penalty": "%penalt%",
+    }
+    posted: dict[str, float] = {k: 0.0 for k in category_filters}
+
+    # Build a JE → (year, month) bucket cache so we don't re-walk the chain
+    # for every line of the same JE.
+    je_bucket_cache: dict[UUID, tuple[int, int] | None] = {}
+
+    def _bucket_for_je(je: JournalEntry) -> tuple[int, int] | None:
+        if je.id in je_bucket_cache:
+            return je_bucket_cache[je.id]
+        ym: tuple[int, int] | None = None
+
+        # 1. JE is a deposit approval (or any JE with a matching DepositApproval).
+        approval = db.query(DepositApproval).filter(
+            DepositApproval.journal_entry_id == je.id
+        ).first()
+        if approval:
+            proof = db.query(DepositProof).filter(
+                DepositProof.id == approval.deposit_proof_id
+            ).first()
+            if proof and proof.declaration_id:
+                decl = db.query(Declaration).filter(
+                    Declaration.id == proof.declaration_id
+                ).first()
+                if decl and decl.effective_month:
+                    ym = (decl.effective_month.year, decl.effective_month.month)
+
+        # 2. JE is a split — follow source_ref back to original line's JE.
+        if ym is None and je.source_type == "transaction_split" and je.source_ref:
+            try:
+                src_line_id = _uuid.UUID(je.source_ref)
+                src_line = db.query(JournalLine).filter(JournalLine.id == src_line_id).first()
+                if src_line:
+                    src_je = db.query(JournalEntry).filter(
+                        JournalEntry.id == src_line.journal_entry_id
+                    ).first()
+                    if src_je:
+                        ym = _bucket_for_je(src_je)
+            except (ValueError, TypeError):
+                pass
+
+        # 3. Fallback to the JE's own entry_date.
+        if ym is None and je.entry_date:
+            ym = (je.entry_date.year, je.entry_date.month)
+
+        je_bucket_cache[je.id] = ym
+        return ym
+
+    for category, name_filter in category_filters.items():
+        account = db.query(LedgerAccount).filter(
+            LedgerAccount.member_id == member_id,
+            LedgerAccount.account_name.ilike(name_filter),
+        ).first()
+        if not account:
+            continue
+        rows = (
+            db.query(JournalLine, JournalEntry)
+            .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
+            .filter(
+                JournalLine.ledger_account_id == account.id,
+                JournalEntry.reversed_by.is_(None),
+            )
+            .all()
+        )
+        for line, je in rows:
+            ym = _bucket_for_je(je)
+            if ym is None or ym != (year, month):
+                continue
+            cred = Decimal(str(line.credit_amount or 0))
+            deb = Decimal(str(line.debit_amount or 0))
+            posted[category] += float(cred - deb)
+
+    return posted
 
 
 def get_member_penalties_balance(
