@@ -6,6 +6,7 @@ import { api } from '@/lib/api';
 import { useAuth } from '@/contexts/AuthContext';
 import UserMenu from '@/components/UserMenu';
 import LoanStatePanel from '@/components/LoanStatePanel';
+import PostedTransactionsPanel from '@/components/PostedTransactionsPanel';
 
 interface Member {
   id: string;
@@ -44,6 +45,7 @@ const emptyForm: FormData = {
 
 export default function ReconcilePage() {
   const { user } = useAuth();
+  const [activeTab, setActiveTab] = useState<'loan_state' | 'declaration' | 'posted_transactions'>('declaration');
   const [members, setMembers] = useState<Member[]>([]);
   const [selectedMemberId, setSelectedMemberId] = useState('');
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -342,11 +344,49 @@ export default function ReconcilePage() {
           </div>
         </div>
 
-        {/* Loan State panel — shown whenever a member is selected, independent of month */}
-        {selectedMemberId && <LoanStatePanel memberId={selectedMemberId} />}
+        {/* Tab toggle — only meaningful when a member is selected */}
+        {selectedMemberId && (
+          <div className="flex gap-2 border-b-2 border-blue-200">
+            {([
+              { key: 'loan_state',          label: 'Loan State' },
+              { key: 'declaration',         label: 'Declaration' },
+              { key: 'posted_transactions', label: 'Posted Transactions' },
+            ] as const).map((t) => (
+              <button
+                key={t.key}
+                type="button"
+                onClick={() => setActiveTab(t.key)}
+                className={`px-4 py-2 text-sm font-semibold rounded-t-lg -mb-0.5 border-b-2 transition-colors ${
+                  activeTab === t.key
+                    ? 'bg-white text-blue-900 border-blue-600'
+                    : 'text-blue-600 hover:text-blue-800 border-transparent'
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        )}
 
-        {/* Form — only visible after Load succeeds */}
-        {loaded && (
+        {/* Loan State tab */}
+        {selectedMemberId && activeTab === 'loan_state' && (
+          <LoanStatePanel memberId={selectedMemberId} />
+        )}
+
+        {/* Posted Transactions tab */}
+        {selectedMemberId && activeTab === 'posted_transactions' && (
+          <PostedTransactionsPanel memberId={selectedMemberId} />
+        )}
+
+        {/* Declaration tab — hint when not yet loaded */}
+        {selectedMemberId && activeTab === 'declaration' && !loaded && (
+          <div className="px-4 py-3 bg-blue-50 border-2 border-blue-200 rounded-xl text-sm text-blue-900">
+            Pick a month above and click <strong>Load</strong> to view or update this member&apos;s declaration for that month.
+          </div>
+        )}
+
+        {/* Declaration tab — the existing form, only visible after Load succeeds */}
+        {selectedMemberId && activeTab === 'declaration' && loaded && (
           <>
             {/* How-it-works note */}
             <div className="px-4 py-3 bg-amber-50 border-2 border-amber-300 rounded-xl text-sm text-amber-900">

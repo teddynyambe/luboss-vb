@@ -2039,6 +2039,138 @@ class RejectDeclarationRequest(BaseModel):
     comment: str
 
 
+class ReverseTransactionRequest(BaseModel):
+    description: str
+
+
+class SplitTransactionRequest(BaseModel):
+    target_category: str  # savings | social_fund | admin_fund | penalty
+    amount: float
+    description: str
+
+
+class MoveTransactionRequest(BaseModel):
+    target_month: str  # YYYY-MM
+    description: str
+
+
+@router.get("/reconcile/transactions/{member_id}")
+def get_member_transactions_endpoint(
+    member_id: str,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """List per-month non-loan ledger lines for a member (Posted Transactions
+    tab on the reconciliation page)."""
+    from app.services.transaction_repair import list_member_transactions
+    try:
+        mid = UUID(member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id")
+    return list_member_transactions(db, mid)
+
+
+@router.post("/reconcile/transactions/{line_id}/reverse")
+def post_reverse_transaction(
+    line_id: str,
+    body: ReverseTransactionRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Mark the parent JournalEntry of a posted transaction line reversed.
+    Mandatory description is recorded as the reversal reason and in the audit log."""
+    from app.services.transaction_repair import reverse_transaction
+    from app.core.audit import write_audit_log
+    try:
+        line_uuid = UUID(line_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid line_id")
+    try:
+        result = reverse_transaction(
+            db=db, line_id=line_uuid, description=body.description, user_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Posted transaction reversed",
+        details=f"line={line_id} reason={body.description[:120]}",
+    )
+    return result
+
+
+@router.post("/reconcile/transactions/{line_id}/split")
+def post_split_transaction(
+    line_id: str,
+    body: SplitTransactionRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Split (reallocate) part or all of a line's amount to a different
+    category on the same member (savings / social_fund / admin_fund / penalty)."""
+    from app.services.transaction_repair import split_transaction
+    from app.core.audit import write_audit_log
+    try:
+        line_uuid = UUID(line_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid line_id")
+    try:
+        result = split_transaction(
+            db=db,
+            line_id=line_uuid,
+            target_category=body.target_category,
+            amount=Decimal(str(body.amount)),
+            description=body.description,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Posted transaction split",
+        details=(
+            f"line={line_id} amount={body.amount} target={body.target_category} "
+            f"reason={body.description[:120]}"
+        ),
+    )
+    return result
+
+
+@router.post("/reconcile/transactions/{line_id}/move")
+def post_move_transaction(
+    line_id: str,
+    body: MoveTransactionRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Change the parent JournalEntry's effective month. Refuses future months."""
+    from app.services.transaction_repair import move_transaction
+    from app.core.audit import write_audit_log
+    try:
+        line_uuid = UUID(line_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid line_id")
+    try:
+        result = move_transaction(
+            db=db,
+            line_id=line_uuid,
+            target_month=body.target_month,
+            description=body.description,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Posted transaction moved",
+        details=f"line={line_id} target_month={body.target_month} reason={body.description[:120]}",
+    )
+    return result
+
+
 @router.post("/reconcile/declaration/{declaration_id}/reject")
 def post_reject_declaration(
     declaration_id: str,

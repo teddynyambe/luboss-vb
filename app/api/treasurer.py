@@ -1494,6 +1494,13 @@ def get_declaration_details_report(
             "status": deposit_proof.status,
             "amount": float(deposit_proof.amount),
             "uploaded_at": deposit_proof.uploaded_at.isoformat() if deposit_proof.uploaded_at else None,
+            "upload_path": deposit_proof.upload_path,
+            # Convenience flag for the UI: true when there's a real uploaded
+            # file (not the "reconciliation" placeholder and not empty).
+            "has_file": bool(
+                deposit_proof.upload_path
+                and deposit_proof.upload_path != "reconciliation"
+            ),
         } if deposit_proof else None,
     }
 
