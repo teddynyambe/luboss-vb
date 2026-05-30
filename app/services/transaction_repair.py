@@ -116,6 +116,19 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
         .all()
     )
 
+    # Build a map of (original line id) -> contra JE for fast lookup.
+    contra_jes = (
+        db.query(JournalEntry)
+        .filter(JournalEntry.source_type == "transaction_reverse")
+        .all()
+    )
+    contra_by_line: dict[str, JournalEntry] = {}
+    contra_je_ids: set[UUID] = set()
+    for c in contra_jes:
+        contra_je_ids.add(c.id)
+        if c.source_ref:
+            contra_by_line[c.source_ref] = c
+
     months: dict[str, dict] = {}
     today_month = (date.today().year, date.today().month)
 
@@ -124,6 +137,10 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
             continue
         category = _account_category(acct.account_name)
         if category is None:
+            continue
+        # Hide contra JEs' own lines — the reversal is shown as a marker on
+        # the original line, not as a separate row.
+        if je.id in contra_je_ids:
             continue
         # Group by entry month.
         if not je.entry_date:
@@ -137,7 +154,21 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
                 "totals": {c: 0.0 for c in CATEGORIES},
             }
         signed_amount = float((line.credit_amount or Decimal("0.00")) - (line.debit_amount or Decimal("0.00")))
-        is_live = je.reversed_by is None and je.reversed_at is None
+        # A line is "live" iff:
+        #   * its parent JE is not reversed (legacy whole-JE reversal), AND
+        #   * no per-line contra entry exists pointing at it.
+        parent_reversed = je.reversed_by is not None or je.reversed_at is not None
+        contra_je = contra_by_line.get(str(line.id))
+        contra_active = contra_je is not None and contra_je.reversed_by is None
+        is_live = not parent_reversed and not contra_active
+        reversal_reason = (
+            je.reversal_reason if parent_reversed
+            else (contra_je.description if contra_active else None)
+        )
+        reversed_at = (
+            je.reversed_at.isoformat() if parent_reversed and je.reversed_at
+            else (contra_je.entry_date.isoformat() if contra_active and contra_je.entry_date else None)
+        )
         months[m_key]["lines"].append({
             "id": str(line.id),
             "journal_entry_id": str(je.id),
@@ -149,8 +180,8 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
             "is_live": is_live,
             "je_description": je.description,
             "je_source_type": je.source_type,
-            "reversed_at": je.reversed_at.isoformat() if je.reversed_at else None,
-            "reversal_reason": je.reversal_reason,
+            "reversed_at": reversed_at,
+            "reversal_reason": reversal_reason,
             "can_act": is_live,
         })
         if is_live:
@@ -196,19 +227,80 @@ def reverse_transaction(
     description: str,
     user_id: UUID,
 ) -> dict:
-    """Mark the underlying JournalEntry reversed. Balance queries already
-    exclude reversed JEs, so the effect is removal of the line."""
+    """Post a contra journal entry that nets out this single line's effect.
+
+    Per-line semantics — the parent JournalEntry stays live and its OTHER
+    lines (e.g. another category in the same deposit) are unaffected. The
+    contra JE has two balanced lines: one against the source account and one
+    against BANK_CASH (the universal counterparty). It's tagged with
+    source_type='transaction_reverse' and source_ref=<line.id> so the list
+    endpoint can mark the original line as reversed in the UI.
+    """
     desc = _require_description(description)
     line, je, account = _load_line_and_entry(db, line_id)
+
+    # Refuse if the parent JE was already reversed (legacy whole-JE reversal)
+    # or if this specific line already has a contra entry.
     if je.reversed_by is not None or je.reversed_at is not None:
-        raise ValueError("This transaction is already reversed.")
-    je.reversed_by = user_id
-    je.reversed_at = datetime.now()
-    je.reversal_reason = desc
+        raise ValueError("This transaction's parent journal entry is already reversed.")
+    existing_contra = db.query(JournalEntry).filter(
+        JournalEntry.source_type == "transaction_reverse",
+        JournalEntry.source_ref == str(line.id),
+        JournalEntry.reversed_by.is_(None),
+    ).first()
+    if existing_contra:
+        raise ValueError("This transaction line has already been reversed.")
+
+    bank_cash = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "BANK_CASH"
+    ).first()
+    if not bank_cash:
+        raise ValueError("BANK_CASH ledger account not found.")
+
+    credit_amt = line.credit_amount or Decimal("0.00")
+    debit_amt = line.debit_amount or Decimal("0.00")
+    if credit_amt <= 0 and debit_amt <= 0:
+        raise ValueError("Cannot reverse a zero-amount line.")
+
+    if credit_amt > 0:
+        # Original was a credit on the member's account → contra debits it
+        # and credits BANK_CASH (cash effectively flows back out).
+        contra_lines = [
+            {"account_id": account.id, "debit_amount": credit_amt,
+             "credit_amount": Decimal("0.00"),
+             "description": f"Reverse {account.account_name}: {desc[:200]}"},
+            {"account_id": bank_cash.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": credit_amt,
+             "description": "Contra for transaction reverse"},
+        ]
+    else:
+        # Original was a debit on the member's account → contra credits it
+        # and debits BANK_CASH.
+        contra_lines = [
+            {"account_id": account.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": debit_amt,
+             "description": f"Reverse {account.account_name}: {desc[:200]}"},
+            {"account_id": bank_cash.id, "debit_amount": debit_amt,
+             "credit_amount": Decimal("0.00"),
+             "description": "Contra for transaction reverse"},
+        ]
+
+    new_je = create_journal_entry(
+        db=db,
+        description=f"Reverse of {account.account_name}: {desc}"[:255],
+        cycle_id=je.cycle_id,
+        source_type="transaction_reverse",
+        source_ref=str(line.id),
+        lines=contra_lines,
+        created_by=user_id,
+    )
+    # Match source JE's effective date so the reversal lands in the same month.
+    if je.entry_date:
+        new_je.entry_date = je.entry_date
     db.commit()
     return {
-        "journal_entry_id": str(je.id),
-        "reversed": True,
+        "contra_journal_entry_id": str(new_je.id),
+        "reversed_line_id": str(line.id),
         "reason": desc,
     }
 

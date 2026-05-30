@@ -1901,32 +1901,13 @@ def get_account_transactions(
                 LedgerAccount.account_name.ilike("%savings%")
             ).first()
             if exc_savings_account:
-                # Treasurer corrections (splits etc.) — any live line on this
-                # member's savings account that isn't already covered above.
-                # Both credits (incoming) and debits (outgoing) shown.
-                covered_sources = ("deposit_approval", "excess_contribution")
-                other_lines = db.query(JournalLine).join(JournalEntry).filter(
-                    JournalLine.ledger_account_id == exc_savings_account.id,
-                    JournalEntry.reversed_by.is_(None),
-                    ~JournalEntry.source_type.in_(covered_sources),
-                ).all()
-                for line in other_lines:
-                    je = line.journal_entry
-                    cred = float(line.credit_amount or 0)
-                    deb = float(line.debit_amount or 0)
-                    if cred == 0 and deb == 0:
-                        continue
-                    transactions.append({
-                        "id": f"adj_{line.id}",
-                        "date": (je.entry_date.date().isoformat() if je.entry_date else date.today().isoformat()),
-                        "description": line.description or je.description or "Treasurer adjustment",
-                        "debit": deb,
-                        "credit": cred,
-                        "amount": cred if cred > 0 else deb,
-                        "is_adjustment": True,
-                        "source_type": je.source_type,
-                    })
-
+                # NOTE: transaction_split / transaction_reverse journal entries
+                # are intentionally NOT surfaced as separate rows here. Those
+                # are internal reclassifications within an existing approved
+                # deposit, so summing them into the "Approved Deposit" column
+                # would double-count the same money. Their impact is shown
+                # instead via the posted_items annotation on the declaration
+                # line ("Savings: K1,950 declared → K2,000 posted").
                 excess_lines = db.query(JournalLine).join(JournalEntry).filter(
                     JournalLine.ledger_account_id == exc_savings_account.id,
                     JournalEntry.source_type == "excess_contribution",
@@ -3145,36 +3126,16 @@ def get_member_savings_history(
             "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
         })
 
-    # Treasurer adjustments on the member's savings account that aren't already
-    # covered above (e.g. transaction_split entries from the Posted Transactions
-    # tool). Both credit-side and debit-side rows are surfaced.
+    # NOTE: transaction_split / transaction_reverse JEs are intentionally NOT
+    # surfaced as separate rows here — they're internal reclassifications
+    # within an existing approved deposit; counting them would inflate the
+    # "Approved Deposit" column. Their effect on category balances is shown
+    # via the posted_items annotation on the declaration line.
     exc_savings_account = db.query(LedgerAccount).filter(
         LedgerAccount.member_id == member_profile.id,
         LedgerAccount.account_name.ilike("%savings%")
     ).first()
     if exc_savings_account:
-        adj_lines = db.query(JournalLine).join(JournalEntry).filter(
-            JournalLine.ledger_account_id == exc_savings_account.id,
-            JournalEntry.reversed_by.is_(None),
-            ~JournalEntry.source_type.in_(("deposit_approval", "excess_contribution")),
-        ).all()
-        for line in adj_lines:
-            je = line.journal_entry
-            cred = float(line.credit_amount or 0)
-            deb = float(line.debit_amount or 0)
-            if cred == 0 and deb == 0:
-                continue
-            transactions.append({
-                "id": f"adj_{line.id}",
-                "date": (je.entry_date.date().isoformat() if je.entry_date else date.today().isoformat()),
-                "description": line.description or je.description or "Treasurer adjustment",
-                "debit": deb,
-                "credit": cred,
-                "amount": cred if cred > 0 else deb,
-                "is_adjustment": True,
-                "source_type": je.source_type,
-            })
-
         excess_lines = db.query(JournalLine).join(JournalEntry).filter(
             JournalLine.ledger_account_id == exc_savings_account.id,
             JournalEntry.source_type == "excess_contribution",

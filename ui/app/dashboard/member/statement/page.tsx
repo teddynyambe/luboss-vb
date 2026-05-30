@@ -260,14 +260,25 @@ export default function MemberStatementPage() {
                                       const post = it.posted;
                                       const differs = post !== undefined && Math.abs(post - decl) > 0.01;
                                       if (decl <= 0 && !(differs && post)) return null;
+                                      // When there's no discrepancy, show one figure.
+                                      // When declared and posted differ, label both explicitly
+                                      // with strike-through on the declared so it can't be
+                                      // misread as the live amount.
+                                      if (!differs) {
+                                        return (
+                                          <div key={it.label}>
+                                            <span className="text-blue-500">{it.label}:</span> {fmt(decl)}
+                                          </div>
+                                        );
+                                      }
                                       return (
-                                        <div key={it.label}>
-                                          <span className="text-blue-500">{it.label}:</span> {fmt(decl)}
-                                          {differs && (
-                                            <span className="ml-1 text-amber-700" title="Posted via reconciliation">
-                                              (posted {fmt(post)})
-                                            </span>
-                                          )}
+                                        <div key={it.label} title="Posted via treasurer reconciliation">
+                                          <span className="text-blue-500">{it.label}:</span>{' '}
+                                          <span className="text-gray-500 line-through">{fmt(decl)}</span>
+                                          <span className="text-blue-500"> declared</span>
+                                          <span className="mx-1 text-amber-600">→</span>
+                                          <span className="font-semibold text-amber-700">{fmt(post)}</span>
+                                          <span className="text-amber-700"> posted</span>
                                         </div>
                                       );
                                     });
