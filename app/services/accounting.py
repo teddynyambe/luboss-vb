@@ -5,7 +5,37 @@ from app.models.member import MemberProfile
 from decimal import Decimal
 from typing import List, Dict
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, date
+
+
+def get_dealing_month_date(db: Session, cycle_id: UUID | None, effective_month: date) -> date:
+    """Return the start-of-dealing-month date for a journal entry.
+
+    The "dealing month" anchors a transaction to a reporting period regardless of
+    when it was actually posted. The day-of-month comes from the cycle's
+    DECLARATION phase `monthly_start_day` (e.g. 15 → May 15 for a May dealing month).
+    Falls back to day 1 if no cycle is supplied or no phase day is configured.
+    """
+    from app.models.cycle import CyclePhase, PhaseType
+
+    day = 1
+    if cycle_id is not None:
+        phase = (
+            db.query(CyclePhase)
+            .filter(
+                CyclePhase.cycle_id == cycle_id,
+                CyclePhase.phase_type == PhaseType.DECLARATION,
+            )
+            .first()
+        )
+        if phase and phase.monthly_start_day:
+            day = int(phase.monthly_start_day)
+
+    # Clamp to a safe day in case the cycle's start_day exceeds the month length.
+    import calendar
+    last_day = calendar.monthrange(effective_month.year, effective_month.month)[1]
+    day = min(day, last_day)
+    return date(effective_month.year, effective_month.month, day)
 
 
 class JournalEntryError(Exception):
@@ -17,6 +47,7 @@ def create_journal_entry(
     db: Session,
     description: str,
     lines: List[Dict],
+    dealing_month: date,
     cycle_id: UUID = None,
     source_ref: str = None,
     source_type: str = None,
@@ -24,8 +55,11 @@ def create_journal_entry(
 ) -> JournalEntry:
     """
     Create a balanced journal entry.
-    
+
     Args:
+        dealing_month: The reporting period this entry is allocated to
+            (start-of-dealing-month date — see ``get_dealing_month_date``).
+            This is independent of ``entry_date`` (the actual posting timestamp).
         lines: List of dicts with keys: account_id, debit_amount, credit_amount, description
     """
     # Validate balance
@@ -48,6 +82,7 @@ def create_journal_entry(
     # Create journal entry
     journal_entry = JournalEntry(
         description=description,
+        dealing_month=dealing_month,
         cycle_id=cycle_id,
         source_ref=source_ref,
         source_type=source_type,
@@ -382,23 +417,10 @@ def compute_posted_breakdown(
 ) -> dict:
     """Return per-category live posted amounts for this member in a given month.
 
-    Each live journal line on the member's category accounts is bucketed by:
-      1. The declaration's effective_month, if the line traces to one (via
-         DepositApproval → DepositProof → Declaration). This handles the
-         common case of a March declaration whose deposit is approved in
-         April — the line still belongs to March.
-      2. For a 'transaction_split' JE, the same trace follows the split's
-         source line back to its declaration.
-      3. Otherwise, JournalEntry.entry_date is used as the fallback (excess
-         transfers and other anchor-less adjustments).
-
-    Returns the sum of (credit − debit) for each of savings / social_fund /
-    admin_fund / penalty that bucketed into the target (year, month).
-    Reversed JEs are excluded.
+    Bucketing is now driven by ``JournalEntry.dealing_month`` — the explicit
+    reporting period each entry is allocated to. Reversed JEs are excluded.
     """
     from app.models.ledger import JournalLine, JournalEntry
-    from app.models.transaction import DepositApproval, DepositProof, Declaration
-    import uuid as _uuid
 
     category_filters = {
         "savings": "%savings%",
@@ -408,50 +430,10 @@ def compute_posted_breakdown(
     }
     posted: dict[str, float] = {k: 0.0 for k in category_filters}
 
-    # Build a JE → (year, month) bucket cache so we don't re-walk the chain
-    # for every line of the same JE.
-    je_bucket_cache: dict[UUID, tuple[int, int] | None] = {}
-
     def _bucket_for_je(je: JournalEntry) -> tuple[int, int] | None:
-        if je.id in je_bucket_cache:
-            return je_bucket_cache[je.id]
-        ym: tuple[int, int] | None = None
-
-        # 1. JE is a deposit approval (or any JE with a matching DepositApproval).
-        approval = db.query(DepositApproval).filter(
-            DepositApproval.journal_entry_id == je.id
-        ).first()
-        if approval:
-            proof = db.query(DepositProof).filter(
-                DepositProof.id == approval.deposit_proof_id
-            ).first()
-            if proof and proof.declaration_id:
-                decl = db.query(Declaration).filter(
-                    Declaration.id == proof.declaration_id
-                ).first()
-                if decl and decl.effective_month:
-                    ym = (decl.effective_month.year, decl.effective_month.month)
-
-        # 2. JE is a split — follow source_ref back to original line's JE.
-        if ym is None and je.source_type == "transaction_split" and je.source_ref:
-            try:
-                src_line_id = _uuid.UUID(je.source_ref)
-                src_line = db.query(JournalLine).filter(JournalLine.id == src_line_id).first()
-                if src_line:
-                    src_je = db.query(JournalEntry).filter(
-                        JournalEntry.id == src_line.journal_entry_id
-                    ).first()
-                    if src_je:
-                        ym = _bucket_for_je(src_je)
-            except (ValueError, TypeError):
-                pass
-
-        # 3. Fallback to the JE's own entry_date.
-        if ym is None and je.entry_date:
-            ym = (je.entry_date.year, je.entry_date.month)
-
-        je_bucket_cache[je.id] = ym
-        return ym
+        if je.dealing_month is None:
+            return None
+        return (je.dealing_month.year, je.dealing_month.month)
 
     for category, name_filter in category_filters.items():
         account = db.query(LedgerAccount).filter(

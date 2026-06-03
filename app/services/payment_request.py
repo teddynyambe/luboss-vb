@@ -1,7 +1,7 @@
 """Service layer for the payment request workflow."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from typing import List, Optional
 from uuid import UUID
@@ -17,7 +17,7 @@ from app.models.payment_request import (
     PaymentRequestStatus,
 )
 from app.models.user import User
-from app.services.accounting import create_journal_entry, get_account_balance
+from app.services.accounting import create_journal_entry, get_account_balance, get_dealing_month_date
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,7 @@ def execute_payment_request(
         db=db,
         description=description,
         lines=lines,
+        dealing_month=get_dealing_month_date(db, pr.cycle_id, date.today()),
         cycle_id=pr.cycle_id,
         source_ref=str(pr.id),
         source_type="payment_request",

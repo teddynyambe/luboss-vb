@@ -1895,59 +1895,12 @@ def get_account_transactions(
                     "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
                 })
             
-            # Include excess contribution transfers (internal reclassifications to savings)
-            exc_savings_account = db.query(LedgerAccount).filter(
-                LedgerAccount.member_id == member_profile.id,
-                LedgerAccount.account_name.ilike("%savings%")
-            ).first()
-            if exc_savings_account:
-                # NOTE: transaction_split / transaction_reverse journal entries
-                # are intentionally NOT surfaced as separate rows here. Those
-                # are internal reclassifications within an existing approved
-                # deposit, so summing them into the "Approved Deposit" column
-                # would double-count the same money. Their impact is shown
-                # instead via the posted_items annotation on the declaration
-                # line ("Savings: K1,950 declared → K2,000 posted").
-                excess_lines = db.query(JournalLine).join(JournalEntry).filter(
-                    JournalLine.ledger_account_id == exc_savings_account.id,
-                    JournalEntry.source_type == "excess_contribution",
-                    JournalEntry.reversed_by.is_(None),
-                    JournalLine.credit_amount > 0,
-                ).all()
-                for line in excess_lines:
-                    je = line.journal_entry
-                    entry_date = (
-                        je.entry_date.date().isoformat()
-                        if je.entry_date else date.today().isoformat()
-                    )
-                    # Determine source fund by checking the debit line's account
-                    excess_source = "unknown"
-                    sibling_debit = db.query(JournalLine).filter(
-                        JournalLine.journal_entry_id == je.id,
-                        JournalLine.debit_amount > 0,
-                        JournalLine.id != line.id,
-                    ).first()
-                    if sibling_debit:
-                        fund_acct = db.query(LedgerAccount).filter(
-                            LedgerAccount.id == sibling_debit.ledger_account_id
-                        ).first()
-                        if fund_acct:
-                            name_lower = (fund_acct.account_name or "").lower()
-                            if "social" in name_lower:
-                                excess_source = "social_fund"
-                            elif "admin" in name_lower:
-                                excess_source = "admin_fund"
-                    transactions.append({
-                        "id": f"excess_{je.id}",
-                        "date": entry_date,
-                        "description": je.description,
-                        "debit": 0.0,
-                        "credit": float(line.credit_amount),
-                        "amount": float(line.credit_amount),
-                        "is_declaration": False,
-                        "is_excess_transfer": True,
-                        "excess_source": excess_source,
-                    })
+            # Excess-contribution / split / reverse JEs are intentionally NOT
+            # surfaced as separate rows. They're internal reclassifications of
+            # money already counted under the originating deposit, so summing
+            # them into the "Approved Deposit" column would double-count.
+            # Their effect is reflected via the declaration row's posted_items
+            # annotation ("Savings: K1,950 declared → K2,000 posted").
 
             # Sort all transactions by date (most recent first)
             transactions.sort(key=lambda x: x["date"], reverse=True)
@@ -3126,55 +3079,12 @@ def get_member_savings_history(
             "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
         })
 
-    # NOTE: transaction_split / transaction_reverse JEs are intentionally NOT
-    # surfaced as separate rows here — they're internal reclassifications
-    # within an existing approved deposit; counting them would inflate the
-    # "Approved Deposit" column. Their effect on category balances is shown
-    # via the posted_items annotation on the declaration line.
-    exc_savings_account = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_profile.id,
-        LedgerAccount.account_name.ilike("%savings%")
-    ).first()
-    if exc_savings_account:
-        excess_lines = db.query(JournalLine).join(JournalEntry).filter(
-            JournalLine.ledger_account_id == exc_savings_account.id,
-            JournalEntry.source_type == "excess_contribution",
-            JournalEntry.reversed_by.is_(None),
-            JournalLine.credit_amount > 0,
-        ).all()
-        for line in excess_lines:
-            je = line.journal_entry
-            entry_date = (
-                je.entry_date.date().isoformat()
-                if je.entry_date else date.today().isoformat()
-            )
-            excess_source = "unknown"
-            sibling_debit = db.query(JournalLine).filter(
-                JournalLine.journal_entry_id == je.id,
-                JournalLine.debit_amount > 0,
-                JournalLine.id != line.id,
-            ).first()
-            if sibling_debit:
-                fund_acct = db.query(LedgerAccount).filter(
-                    LedgerAccount.id == sibling_debit.ledger_account_id
-                ).first()
-                if fund_acct:
-                    name_lower = (fund_acct.account_name or "").lower()
-                    if "social" in name_lower:
-                        excess_source = "social_fund"
-                    elif "admin" in name_lower:
-                        excess_source = "admin_fund"
-            transactions.append({
-                "id": f"excess_{je.id}",
-                "date": entry_date,
-                "description": je.description,
-                "debit": 0.0,
-                "credit": float(line.credit_amount),
-                "amount": float(line.credit_amount),
-                "is_declaration": False,
-                "is_excess_transfer": True,
-                "excess_source": excess_source,
-            })
+    # NOTE: excess_contribution / transaction_split / transaction_reverse JEs are
+    # intentionally NOT surfaced as separate rows — they're internal
+    # reclassifications of money already counted under the originating
+    # deposit. Surfacing them would inflate the "Approved Deposit" column.
+    # Their effect on category balances is reflected via the posted_items
+    # annotation on the declaration row.
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 

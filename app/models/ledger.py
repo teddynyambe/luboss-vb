@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, ForeignKey, DateTime, Numeric, Enum as SQLEnum, Boolean, Text, Index, Uuid, text
+from sqlalchemy import Column, String, ForeignKey, DateTime, Date, Numeric, Enum as SQLEnum, Boolean, Text, Index, Uuid, text
 from sqlalchemy.orm import relationship
 import uuid
 from app.db.base import Base
@@ -40,6 +40,10 @@ class JournalEntry(Base):
 
     id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     entry_date = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"), index=True)
+    # The "dealing month" this entry is allocated to for reporting/reconciliation.
+    # Stored as the start-of-dealing-month date (the cycle's declaration phase monthly_start_day,
+    # e.g. May 15 for a May dealing month when the phase starts on day 15).
+    dealing_month = Column(Date, nullable=False, index=True)
     description = Column(String(255), nullable=False)
     cycle_id = Column(Uuid(as_uuid=True), ForeignKey("cycle.id"), nullable=True, index=True)
     source_ref = Column(String(100), nullable=True)  # For migration traceability (e.g., "old_transaction_id")

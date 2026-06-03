@@ -105,14 +105,15 @@ def _get_member_category_account(
 
 def list_member_transactions(db: Session, member_id: UUID) -> dict:
     """Return all non-loan journal lines tied to this member, grouped by
-    calendar month (the parent JournalEntry's entry_date).
+    the parent JournalEntry's dealing_month (the reporting period the entry
+    is allocated to, independent of when it was actually posted).
     """
     lines = (
         db.query(JournalLine, JournalEntry, LedgerAccount)
         .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
         .join(LedgerAccount, LedgerAccount.id == JournalLine.ledger_account_id)
         .filter(LedgerAccount.member_id == member_id)
-        .order_by(JournalEntry.entry_date.desc(), JournalEntry.id, JournalLine.id)
+        .order_by(JournalEntry.dealing_month.desc(), JournalEntry.entry_date.desc(), JournalEntry.id, JournalLine.id)
         .all()
     )
 
@@ -142,14 +143,14 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
         # the original line, not as a separate row.
         if je.id in contra_je_ids:
             continue
-        # Group by entry month.
-        if not je.entry_date:
+        # Group by dealing month (the reporting period this entry is allocated to).
+        if not je.dealing_month:
             continue
-        m_key = je.entry_date.strftime("%Y-%m")
+        m_key = je.dealing_month.strftime("%Y-%m")
         if m_key not in months:
             months[m_key] = {
                 "month": m_key,
-                "month_label": je.entry_date.strftime("%B %Y"),
+                "month_label": je.dealing_month.strftime("%B %Y"),
                 "lines": [],
                 "totals": {c: 0.0 for c in CATEGORIES},
             }
@@ -288,15 +289,13 @@ def reverse_transaction(
     new_je = create_journal_entry(
         db=db,
         description=f"Reverse of {account.account_name}: {desc}"[:255],
+        dealing_month=je.dealing_month,
         cycle_id=je.cycle_id,
         source_type="transaction_reverse",
         source_ref=str(line.id),
         lines=contra_lines,
         created_by=user_id,
     )
-    # Match source JE's effective date so the reversal lands in the same month.
-    if je.entry_date:
-        new_je.entry_date = je.entry_date
     db.commit()
     return {
         "contra_journal_entry_id": str(new_je.id),
@@ -360,6 +359,7 @@ def split_transaction(
         description=(
             f"Treasurer split {amt} from {src_category} to {target_category}: {desc}"
         )[:255],
+        dealing_month=je.dealing_month,
         cycle_id=je.cycle_id,
         source_type="transaction_split",
         source_ref=str(line.id),
@@ -379,9 +379,6 @@ def split_transaction(
         ],
         created_by=user_id,
     )
-    # Match the source JE's effective date so the split shows in the same month.
-    if je.entry_date:
-        new_je.entry_date = je.entry_date
     db.commit()
     return {
         "new_journal_entry_id": str(new_je.id),
@@ -427,15 +424,19 @@ def move_transaction(
     except Exception:
         new_cycle = None
 
-    old_entry_date = je.entry_date
-    je.entry_date = datetime.combine(target_date, datetime.min.time())
+    # Move the *dealing month* (the reporting bucket) — leave entry_date intact as
+    # the immutable audit trail of when the entry was actually posted.
+    from app.services.accounting import get_dealing_month_date
+    old_dealing = je.dealing_month
+    target_cycle_id = new_cycle.id if new_cycle else je.cycle_id
+    je.dealing_month = get_dealing_month_date(db, target_cycle_id, target_date)
     if new_cycle:
         je.cycle_id = new_cycle.id
 
+    old_label = old_dealing.strftime('%Y-%m') if old_dealing else 'unknown'
     note = (
-        f"[Moved from {old_entry_date.strftime('%Y-%m')} to {target_month} "
+        f"[Moved dealing month from {old_label} to {target_month} "
         f"by treasurer: {desc}]"
-        if old_entry_date else f"[Moved to {target_month} by treasurer: {desc}]"
     )
     je.description = (
         (je.description + " " if je.description else "") + note

@@ -77,6 +77,20 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
   const [reverseRep, setReverseRep] = useState<Repayment | null>(null);
   const [reversing, setReversing] = useState(false);
 
+  // Per-loan repair menu/modal state
+  type RepairAction =
+    | 'reopen'
+    | 'close'
+    | 'reverse_disbursement'
+    | 'reverse_all_reps'
+    | 'move_all_reps';
+  const [openMenuLoanId, setOpenMenuLoanId] = useState<string | null>(null);
+  const [repairLoan, setRepairLoan] = useState<LoanRow | null>(null);
+  const [repairAction, setRepairAction] = useState<RepairAction | null>(null);
+  const [repairReason, setRepairReason] = useState('');
+  const [repairTargetLoanId, setRepairTargetLoanId] = useState('');
+  const [submittingRepair, setSubmittingRepair] = useState(false);
+
   const load = useCallback(() => {
     if (!memberId) {
       setState(null);
@@ -210,6 +224,88 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     }
   };
 
+  const openRepair = (loan: LoanRow, action: RepairAction) => {
+    setRepairLoan(loan);
+    setRepairAction(action);
+    setRepairReason('');
+    setRepairTargetLoanId('');
+    setOpenMenuLoanId(null);
+  };
+
+  const closeRepair = () => {
+    setRepairLoan(null);
+    setRepairAction(null);
+    setRepairReason('');
+    setRepairTargetLoanId('');
+  };
+
+  const submitRepair = async () => {
+    if (!repairLoan || !repairAction) return;
+    const reason = repairReason.trim();
+    if (reason.length < 5) {
+      setError('Please provide a reason (at least 5 characters).');
+      return;
+    }
+    setSubmittingRepair(true);
+    setError(null);
+    try {
+      let res;
+      const base = `/api/chairman/reconcile/loan/${repairLoan.id}`;
+      if (repairAction === 'reopen') {
+        res = await api.post(`${base}/reopen`, { reason });
+      } else if (repairAction === 'close') {
+        res = await api.post(`${base}/close`, { reason });
+      } else if (repairAction === 'reverse_disbursement') {
+        res = await api.post(`${base}/reverse-disbursement`, { reason });
+      } else if (repairAction === 'reverse_all_reps') {
+        res = await api.post(`${base}/reverse-all-repayments`, { reason });
+      } else if (repairAction === 'move_all_reps') {
+        if (!repairTargetLoanId) {
+          setError('Pick a destination loan.');
+          setSubmittingRepair(false);
+          return;
+        }
+        res = await api.post(`${base}/move-all-repayments`, {
+          new_loan_id: repairTargetLoanId,
+          reason,
+        });
+      }
+      if (res?.error) {
+        setError(res.error);
+      } else {
+        closeRepair();
+        load();
+      }
+    } finally {
+      setSubmittingRepair(false);
+    }
+  };
+
+  const repairActionLabel = (a: RepairAction): string => {
+    switch (a) {
+      case 'reopen': return 'Reopen loan';
+      case 'close': return 'Force-close loan';
+      case 'reverse_disbursement': return 'Reverse disbursement';
+      case 'reverse_all_reps': return 'Reverse all repayments';
+      case 'move_all_reps': return 'Move all repayments to another loan';
+    }
+  };
+
+  const repairActionWarning = (a: RepairAction): string => {
+    switch (a) {
+      case 'reopen':
+        return 'Set this loan back to OPEN. Refused if the disbursement JE was already reversed.';
+      case 'close':
+        return 'Force-close this loan. No compensating ledger entry is posted — this only changes status.';
+      case 'reverse_disbursement':
+        return 'Reverses the disbursement journal entry on this loan. Refused if any live repayment is still attached — reverse or move them first.';
+      case 'reverse_all_reps':
+        return 'Reverses every live repayment attached to this loan and rolls each one’s deposit approval back to PENDING.';
+      case 'move_all_reps':
+        return 'Moves every repayment row (live and reversed) from this loan onto another loan owned by the same member. Pick the destination below.';
+    }
+  };
+
   if (!memberId) return null;
   if (loading && !state) {
     return (
@@ -307,12 +403,65 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                   </span>
                 )}
               </div>
-              <div className="text-right">
+              <div className="text-right flex items-start gap-2">
                 <div>
-                  <strong>{fmt(loan.loan_amount)}</strong> @ {loan.percentage_interest}%
+                  <div>
+                    <strong>{fmt(loan.loan_amount)}</strong> @ {loan.percentage_interest}%
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    Disbursed: {loan.disbursement_date || '—'}
+                  </div>
                 </div>
-                <div className="text-xs text-gray-600">
-                  Disbursed: {loan.disbursement_date || '—'}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setOpenMenuLoanId(openMenuLoanId === loan.id ? null : loan.id)}
+                    className="ml-1 px-2 py-0.5 text-gray-500 hover:bg-gray-200 rounded text-base leading-none"
+                    aria-label="Loan repair actions"
+                  >
+                    ⋯
+                  </button>
+                  {openMenuLoanId === loan.id && (
+                    <div
+                      className="absolute right-0 top-full mt-1 z-20 w-60 bg-white border border-gray-300 rounded-lg shadow-lg text-left text-xs"
+                      onMouseLeave={() => setOpenMenuLoanId(null)}
+                    >
+                      {loan.loan_status === 'closed' && (
+                        <button
+                          onClick={() => openRepair(loan, 'reopen')}
+                          className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
+                        >
+                          Reopen loan
+                        </button>
+                      )}
+                      {isActive(loan.loan_status) && (
+                        <button
+                          onClick={() => openRepair(loan, 'close')}
+                          className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
+                        >
+                          Force-close loan
+                        </button>
+                      )}
+                      <button
+                        onClick={() => openRepair(loan, 'reverse_disbursement')}
+                        className="block w-full px-3 py-2 hover:bg-red-50 text-red-700"
+                      >
+                        Reverse disbursement
+                      </button>
+                      <button
+                        onClick={() => openRepair(loan, 'reverse_all_reps')}
+                        className="block w-full px-3 py-2 hover:bg-red-50 text-red-700"
+                      >
+                        Reverse all repayments
+                      </button>
+                      <button
+                        onClick={() => openRepair(loan, 'move_all_reps')}
+                        className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
+                      >
+                        Move all repayments…
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -651,6 +800,73 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 disabled:opacity-50"
               >
                 {savingSplit ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Per-loan repair modal */}
+      {repairLoan && repairAction && state && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-lg mx-4 space-y-4">
+            <h3 className="text-lg font-bold text-blue-900">
+              {repairActionLabel(repairAction)}
+            </h3>
+            <div className="text-xs text-gray-500">
+              Loan <span className="font-mono">{repairLoan.id.slice(0, 8)}</span> ·{' '}
+              {fmt(repairLoan.loan_amount)} · {repairLoan.loan_status}
+            </div>
+            <p className="text-sm text-gray-700">{repairActionWarning(repairAction)}</p>
+
+            {repairAction === 'move_all_reps' && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">
+                  Destination loan
+                </label>
+                <select
+                  value={repairTargetLoanId}
+                  onChange={(e) => setRepairTargetLoanId(e.target.value)}
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                >
+                  <option value="">— pick a loan —</option>
+                  {state.loans
+                    .filter((l) => l.id !== repairLoan.id)
+                    .map((l) => (
+                      <option key={l.id} value={l.id}>
+                        {l.id.slice(0, 8)} · {fmt(l.loan_amount)} · {l.loan_status}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            )}
+
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold text-blue-900">
+                Reason (required, audit logged)
+              </label>
+              <textarea
+                value={repairReason}
+                onChange={(e) => setRepairReason(e.target.value)}
+                rows={3}
+                placeholder="Why are you doing this? Min 5 characters."
+                className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={closeRepair}
+                className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitRepair}
+                disabled={submittingRepair}
+                className="px-5 py-2 bg-red-600 text-white rounded-lg font-semibold text-sm hover:bg-red-700 disabled:opacity-50"
+              >
+                {submittingRepair ? 'Working…' : 'Confirm'}
               </button>
             </div>
           </div>

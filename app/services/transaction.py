@@ -15,7 +15,7 @@ from app.models.transaction import (
     PenaltyType
 )
 from app.models.ledger import LedgerAccount, AccountType
-from app.services.accounting import create_journal_entry, get_account_balance
+from app.services.accounting import create_journal_entry, get_account_balance, get_dealing_month_date
 from app.models.member import MemberProfile
 from uuid import UUID
 from decimal import Decimal
@@ -242,6 +242,7 @@ def create_declaration(
                         db=db,
                         description=f"Initial required amounts for member {member_id} - Cycle {cycle.year}",
                         lines=journal_lines,
+                        dealing_month=get_dealing_month_date(db, cycle_id, effective_month),
                         cycle_id=cycle_id,
                         source_type="cycle_initial_requirement",
                         created_by=None  # System-generated
@@ -371,6 +372,7 @@ def create_declaration(
                                             "description": "Penalty income"
                                         }
                                     ],
+                                    dealing_month=get_dealing_month_date(db, cycle_id, effective_month),
                                     source_ref=str(late_penalty.id),
                                     source_type="penalty",
                                     created_by=system_user_id
@@ -709,11 +711,14 @@ def approve_deposit(
                    f"Desc={line.get('description', 'N/A')}")
     logger.info(f"=== END JOURNAL ENTRY LINES ===")
     
-    # Create journal entry
+    # Create journal entry — dealing_month follows the declaration's effective month,
+    # NOT the approval timestamp, so deposits approved in a later month are still
+    # bucketed under the period they were declared for.
     journal_entry = create_journal_entry(
         db=db,
         description=f"Deposit approval for member {deposit.member_id} - Declaration {declaration.effective_month}",
         lines=lines,
+        dealing_month=get_dealing_month_date(db, deposit.cycle_id, declaration.effective_month),
         cycle_id=deposit.cycle_id,
         source_ref=str(deposit.id),
         source_type="deposit_approval",
@@ -766,7 +771,7 @@ def approve_deposit(
     # The journal lines above already post to the ledger; this record is the
     # source of truth for principal-vs-interest tracking on the Loan object.
     if loan_repayment > Decimal("0.00") or interest_on_loan > Decimal("0.00"):
-        active_loan = (
+        target_loan = (
             db.query(Loan)
             .filter(
                 Loan.member_id == deposit.member_id,
@@ -775,9 +780,30 @@ def approve_deposit(
             .order_by(Loan.created_at.asc())  # oldest active loan first
             .first()
         )
-        if active_loan:
+
+        # Reconciliation fallback: if no active loan exists but the declaration
+        # has a loan repayment, the declaration is almost certainly historical
+        # (a closed loan re-approved after the fact). Attach to the most
+        # recently disbursed closed loan whose disbursement_date is on or
+        # before this declaration's effective month — that's the loan this
+        # payment was always meant for. Without this, the K4k credit lands on
+        # the ledger (LOANS_RECEIVABLE) but no Repayment row is created and
+        # Loan State shows a phantom outstanding balance.
+        if target_loan is None:
+            target_loan = (
+                db.query(Loan)
+                .filter(
+                    Loan.member_id == deposit.member_id,
+                    Loan.loan_status == LoanStatus.CLOSED,
+                    Loan.disbursement_date <= declaration.effective_month,
+                )
+                .order_by(Loan.disbursement_date.desc(), Loan.created_at.desc())
+                .first()
+            )
+
+        if target_loan:
             repayment_record = Repayment(
-                loan_id=active_loan.id,
+                loan_id=target_loan.id,
                 repayment_date=declaration.effective_month,
                 principal_amount=loan_repayment,
                 interest_amount=interest_on_loan,
@@ -892,6 +918,7 @@ def post_excess_contributions(
                 f"Excess {label} contribution K{net_excess:.2f} transferred to savings"
                 f" — {month_label}"
             ),
+            dealing_month=get_dealing_month_date(db, cycle.id, effective_month),
             source_type="excess_contribution",
             source_ref=str(member_id),
             lines=[
@@ -910,8 +937,6 @@ def post_excess_contributions(
             ],
             created_by=approved_by,
         )
-        # Backdate to the effective month (create_journal_entry commits above)
-        je.entry_date = dt.combine(effective_month, dt.min.time())
         db.commit()
 
         result[f"{fund_key}_excess"] = net_excess
@@ -944,6 +969,8 @@ def disburse_loan(
     if loan.loan_status not in [LoanStatus.APPROVED]:
         raise ValueError("Loan must be approved before disbursement")
     
+    disbursement_effective = disbursement_date_override or date.today()
+
     # Create journal entry
     journal_entry = create_journal_entry(
         db=db,
@@ -962,17 +989,18 @@ def disburse_loan(
                 "description": "Bank cash disbursed"
             }
         ],
+        dealing_month=get_dealing_month_date(db, loan.cycle_id, disbursement_effective),
         cycle_id=loan.cycle_id,
         source_ref=str(loan.id),
         source_type="loan_disbursement",
         created_by=disbursed_by
     )
-    
+
     loan.loan_status = LoanStatus.OPEN  # Set to OPEN (active) after disbursement
-    loan.disbursement_date = disbursement_date_override or date.today()
+    loan.disbursement_date = disbursement_effective
     loan.effective_month = loan.disbursement_date
     loan.disbursement_journal_entry_id = journal_entry.id
-    # Backdate the journal entry too so ledger reports for that period are right.
+    # Backdate the actual posting timestamp too so legacy entry_date-based reports stay consistent.
     if disbursement_date_override is not None:
         journal_entry.entry_date = datetime.combine(disbursement_date_override, datetime.min.time())
     
@@ -994,7 +1022,11 @@ def post_repayment(
 ) -> Repayment:
     """Post a loan repayment to ledger."""
     total_amount = principal_amount + interest_amount
-    
+
+    # Look up the loan's cycle so the dealing month uses the cycle's declaration day.
+    loan_obj = db.query(Loan).filter(Loan.id == loan_id).first()
+    loan_cycle_id = loan_obj.cycle_id if loan_obj else None
+
     # Create journal entry
     journal_entry = create_journal_entry(
         db=db,
@@ -1019,6 +1051,8 @@ def post_repayment(
                 "description": "Interest income"
             }
         ],
+        dealing_month=get_dealing_month_date(db, loan_cycle_id, repayment_date),
+        cycle_id=loan_cycle_id,
         source_ref=str(loan_id),
         source_type="repayment",
         created_by=created_by
@@ -1076,6 +1110,9 @@ def approve_penalty(
     if penalty_type.fee_amount is None or penalty_type.fee_amount <= Decimal("0.00"):
         raise ValueError(f"Penalty type '{penalty_type.name}' has invalid fee amount")
     
+    # Penalties bucket into the month they were issued, regardless of approval date.
+    penalty_effective = penalty.date_issued.date() if penalty.date_issued else date.today()
+
     # Create journal entry
     journal_entry = create_journal_entry(
         db=db,
@@ -1094,6 +1131,7 @@ def approve_penalty(
                 "description": "Penalty income"
             }
         ],
+        dealing_month=get_dealing_month_date(db, None, penalty_effective),
         source_ref=str(penalty.id),
         source_type="penalty",
         created_by=approved_by

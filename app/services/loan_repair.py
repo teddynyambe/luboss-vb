@@ -14,7 +14,7 @@ loan rule is enforced everywhere a new Loan would be created.
 from __future__ import annotations
 
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, date
 from uuid import UUID
 
 from sqlalchemy import func
@@ -26,7 +26,7 @@ from app.models.transaction import (
     Declaration, DeclarationStatus,
 )
 from app.models.ledger import JournalEntry, JournalLine, LedgerAccount, AccountType
-from app.services.accounting import create_journal_entry
+from app.services.accounting import create_journal_entry, get_dealing_month_date
 
 
 def _hyphenate_uuid(u: UUID) -> str:
@@ -254,6 +254,8 @@ def consolidate_loans(
         create_journal_entry(
             db=db,
             description=f"Loan consolidation adjustment for loan {keep_loan.id}",
+            dealing_month=get_dealing_month_date(db, keep_loan.cycle_id, date.today()),
+            cycle_id=keep_loan.cycle_id,
             source_type="loan_consolidation",
             source_ref=str(keep_loan.id),
             lines=lines,
@@ -487,6 +489,8 @@ def adjust_repayment_split(
         create_journal_entry(
             db=db,
             description=f"Repayment split adjustment for repayment {rep.id}",
+            dealing_month=je.dealing_month,
+            cycle_id=je.cycle_id,
             source_type="repayment_split_adjustment",
             source_ref=str(rep.id),
             lines=lines,
@@ -503,4 +507,164 @@ def adjust_repayment_split(
         "principal_amount": float(rep.principal_amount),
         "interest_amount": float(rep.interest_amount),
         "total_amount": float(rep.total_amount),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Loan-level repair actions (treasurer "Loan State" panel)
+# ---------------------------------------------------------------------------
+
+def _live_repayments_for_loan(db: Session, loan_id: UUID) -> list[Repayment]:
+    """Repayments whose underlying journal entry is NOT reversed."""
+    rows = (
+        db.query(Repayment, JournalEntry)
+        .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+        .filter(
+            Repayment.loan_id == loan_id,
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.reversed_at.is_(None),
+        )
+        .all()
+    )
+    return [r for r, _ in rows]
+
+
+def reopen_loan(db: Session, loan_id: UUID, reason: str, user_id: UUID) -> dict:
+    """Set a closed loan back to OPEN. Refuses if its disbursement JE has been
+    reversed — that would leave a phantom open loan with no ledger backing."""
+    reason = _require_description(reason)
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+    if loan.loan_status not in (LoanStatus.CLOSED,):
+        raise ValueError(f"loan is not closed (current status: {loan.loan_status.value if loan.loan_status else 'unknown'})")
+    if not _live_disbursement_je(db, loan.id):
+        raise ValueError(
+            "cannot reopen: this loan has no live disbursement journal entry. "
+            "It would be an open loan with no money owed."
+        )
+    loan.loan_status = LoanStatus.OPEN
+    db.commit()
+    return {"id": str(loan.id), "loan_status": loan.loan_status.value, "reason": reason}
+
+
+def close_loan(db: Session, loan_id: UUID, reason: str, user_id: UUID) -> dict:
+    """Force a loan to CLOSED status. Used to retire a loan manually; does not
+    post any compensating ledger entry. Caller's reason is recorded for audit."""
+    reason = _require_description(reason)
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+    if loan.loan_status == LoanStatus.CLOSED:
+        raise ValueError("loan is already closed")
+    loan.loan_status = LoanStatus.CLOSED
+    db.commit()
+    return {"id": str(loan.id), "loan_status": loan.loan_status.value, "reason": reason}
+
+
+def reverse_loan_disbursement(
+    db: Session, loan_id: UUID, reason: str, user_id: UUID
+) -> dict:
+    """Reverse a loan's disbursement journal entry. Refuses if any live
+    repayment is still attached — those would be left orphaned. Treasurer
+    must reverse or move repayments off the loan first."""
+    reason = _require_description(reason)
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+
+    live_reps = _live_repayments_for_loan(db, loan.id)
+    if live_reps:
+        raise ValueError(
+            f"cannot reverse disbursement: {len(live_reps)} live repayment(s) still "
+            f"attached to this loan. Reverse or move them first."
+        )
+
+    disb_je = _live_disbursement_je(db, loan.id)
+    if not disb_je:
+        raise ValueError("no live disbursement journal entry found for this loan")
+
+    disb_je.reversed_by = user_id
+    disb_je.reversed_at = datetime.now()
+    disb_je.reversal_reason = reason
+    loan.loan_status = LoanStatus.CLOSED
+    db.commit()
+    return {
+        "id": str(loan.id),
+        "loan_status": loan.loan_status.value,
+        "reversed_journal_entry_id": str(disb_je.id),
+        "reason": reason,
+    }
+
+
+def reverse_all_repayments_for_loan(
+    db: Session, loan_id: UUID, reason: str, user_id: UUID
+) -> dict:
+    """Bulk: reverse every live repayment attached to a loan. Each repayment's
+    deposit approval is also rolled back (matches single-row reverse_repayment
+    behavior) so the linked declarations return to PENDING for re-upload."""
+    reason = _require_description(reason)
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+
+    live_reps = _live_repayments_for_loan(db, loan.id)
+    if not live_reps:
+        raise ValueError("no live repayments to reverse on this loan")
+
+    reversed_ids: list[str] = []
+    for rep in live_reps:
+        # Delegate to reverse_repayment so DepositProof/Declaration rollback
+        # stays consistent with the per-row action.
+        try:
+            reverse_repayment(db, rep.id, user_id)
+            reversed_ids.append(str(rep.id))
+        except ValueError:
+            # Already reversed by a concurrent action — skip.
+            continue
+
+    return {
+        "loan_id": str(loan.id),
+        "reversed_repayment_ids": reversed_ids,
+        "count": len(reversed_ids),
+        "reason": reason,
+    }
+
+
+def move_all_repayments_for_loan(
+    db: Session,
+    loan_id: UUID,
+    new_loan_id: UUID,
+    reason: str,
+    user_id: UUID,
+) -> dict:
+    """Bulk: re-point every Repayment row currently on `loan_id` to `new_loan_id`.
+    Only moves rows where the new loan belongs to the same member."""
+    reason = _require_description(reason)
+    if loan_id == new_loan_id:
+        raise ValueError("source and target loans are the same")
+
+    src_loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not src_loan:
+        raise ValueError("source loan not found")
+    dst_loan = db.query(Loan).filter(Loan.id == new_loan_id).first()
+    if not dst_loan:
+        raise ValueError("target loan not found")
+    if src_loan.member_id != dst_loan.member_id:
+        raise ValueError("target loan belongs to a different member")
+
+    reps = db.query(Repayment).filter(Repayment.loan_id == loan_id).all()
+    if not reps:
+        raise ValueError("no repayments to move on this loan")
+
+    moved_ids = [str(r.id) for r in reps]
+    for r in reps:
+        r.loan_id = new_loan_id
+    db.commit()
+    return {
+        "from_loan_id": str(loan_id),
+        "to_loan_id": str(new_loan_id),
+        "moved_repayment_ids": moved_ids,
+        "count": len(moved_ids),
+        "reason": reason,
     }

@@ -13,12 +13,6 @@ interface Member {
   user?: { first_name?: string; last_name?: string; email?: string };
 }
 
-interface LoanTerm {
-  term_months: string | null;
-  term_label: string;
-  interest_rate: number;
-}
-
 interface FormData {
   savings_amount: string;
   social_fund: string;
@@ -26,9 +20,6 @@ interface FormData {
   penalties: string;
   interest_on_loan: string;
   loan_repayment: string;
-  loan_amount: string;
-  loan_rate: string;
-  loan_term_months: string;
 }
 
 const emptyForm: FormData = {
@@ -38,9 +29,6 @@ const emptyForm: FormData = {
   penalties: '0',
   interest_on_loan: '0',
   loan_repayment: '0',
-  loan_amount: '0',
-  loan_rate: '0',
-  loan_term_months: '1',
 };
 
 export default function ReconcilePage() {
@@ -60,43 +48,18 @@ export default function ReconcilePage() {
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [newMonth, setNewMonth] = useState('');
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [loanTermOptions, setLoanTermOptions] = useState<string[]>([]);
-  const [creditRatingTerms, setCreditRatingTerms] = useState<LoanTerm[]>([]);
-  const [creditRatingTierName, setCreditRatingTierName] = useState<string>('');
 
   useEffect(() => {
     api.get<Member[]>('/api/chairman/members?status=active').then((res) => {
       if (res.data) setMembers(res.data);
     });
-    api.get<{ term_months: string }[]>('/api/chairman/settings/loan-terms').then((res) => {
-      if (res.data) setLoanTermOptions(res.data.map((t) => t.term_months));
-    });
   }, []);
-
-  // Reset form when member or month changes after a load
-  const fetchMemberLoanTerms = async (memberId: string) => {
-    setCreditRatingTerms([]);
-    setCreditRatingTierName('');
-    if (!memberId) return;
-    try {
-      const res = await api.get<{ available_terms: LoanTerm[]; tier_name?: string; message?: string }>(
-        `/api/chairman/members/${memberId}/loan-terms`
-      );
-      if (res.data && res.data.available_terms) {
-        setCreditRatingTerms(res.data.available_terms);
-        setCreditRatingTierName(res.data.tier_name || '');
-      }
-    } catch {
-      // silently fail — terms dropdown will fall back to manual entry
-    }
-  };
 
   const handleMemberChange = (id: string) => {
     setSelectedMemberId(id);
     setLoaded(false);
     setFormData(emptyForm);
     setMessage(null);
-    fetchMemberLoanTerms(id);
   };
 
   const handleMonthChange = (m: string) => {
@@ -131,22 +94,10 @@ export default function ReconcilePage() {
           loan_repayment: number;
           status: string | null;
         };
-        loan: { loan_amount: number; loan_rate: number; loan_term_months: string };
       }>(`/api/chairman/reconcile?member_id=${selectedMemberId}&month=${monthDate}`);
 
       if (res.data) {
         const d = res.data.declaration;
-        const l = res.data.loan;
-        let loanRate = String(l.loan_rate ?? 0);
-        let loanTermMonths = l.loan_term_months || '1';
-
-        // If credit rating terms available and no existing loan, default to first term
-        if (creditRatingTerms.length > 0 && (l.loan_amount ?? 0) === 0) {
-          const first = creditRatingTerms[0];
-          loanTermMonths = first.term_months || '1';
-          loanRate = String(first.interest_rate);
-        }
-
         setFormData({
           savings_amount: String(d.savings_amount ?? 0),
           social_fund: String(d.social_fund ?? 0),
@@ -154,9 +105,6 @@ export default function ReconcilePage() {
           penalties: String(d.penalties ?? 0),
           interest_on_loan: String(d.interest_on_loan ?? 0),
           loan_repayment: String(d.loan_repayment ?? 0),
-          loan_amount: String(l.loan_amount ?? 0),
-          loan_rate: loanRate,
-          loan_term_months: loanTermMonths,
         });
         setLoaded(true);
       } else {
@@ -187,19 +135,14 @@ export default function ReconcilePage() {
         penalties: parseFloat(formData.penalties) || 0,
         interest_on_loan: parseFloat(formData.interest_on_loan) || 0,
         loan_repayment: parseFloat(formData.loan_repayment) || 0,
-        loan_amount: parseFloat(formData.loan_amount) || 0,
-        loan_rate: parseFloat(formData.loan_rate) || 0,
-        loan_term_months: formData.loan_term_months || '1',
       });
 
       if (!res.error) {
-        const hasLoan = (parseFloat(formData.loan_amount) || 0) > 0;
-        const lines = [
-          'Reconciliation draft saved as pending.',
-          'Member must upload proof of payment via the Payment Proof page.',
-        ];
-        if (hasLoan) lines.push('Loan application is pending — treasurer must approve it.');
-        setMessage({ type: 'success', text: lines.join(' ') });
+        setMessage({
+          type: 'success',
+          text:
+            'Reconciliation draft saved as pending. Member must upload proof of payment via the Payment Proof page.',
+        });
       } else {
         setMessage({ type: 'error', text: res.error || 'Failed to save reconciliation' });
       }
@@ -391,11 +334,11 @@ export default function ReconcilePage() {
             {/* How-it-works note */}
             <div className="px-4 py-3 bg-amber-50 border-2 border-amber-300 rounded-xl text-sm text-amber-900">
               <strong>Reconciliation creates drafts, not ledger postings.</strong> Saving will
-              create or update a <em>pending</em> declaration for this member-month and (if a
-              loan amount is entered) a <em>pending</em> loan application. The member must
-              upload proof of payment via the Payment Proof page, and the treasurer must
-              approve it (and the loan application) through the normal queue before anything
-              touches the ledger.
+              create or update a <em>pending</em> declaration for this member-month. The member
+              must upload proof of payment via the Payment Proof page, and the treasurer must
+              approve it through the normal queue before anything touches the ledger.
+              Retrospective loans must come through the normal member loan-application flow,
+              not reconciliation.
             </div>
 
             {/* Context banner */}
@@ -471,74 +414,6 @@ export default function ReconcilePage() {
                 {field('Penalties (K)', 'penalties')}
                 {field('Loan Repayment (K)', 'loan_repayment')}
                 {field('Interest on Loan (K)', 'interest_on_loan')}
-              </div>
-            </div>
-
-            {/* Loan fields */}
-            <div className="card">
-              <h2 className="text-lg font-bold text-blue-900 mb-4">
-                Loan Applied (leave 0 if none)
-                {creditRatingTierName && (
-                  <span className="ml-2 text-sm font-medium text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">
-                    {creditRatingTierName}
-                  </span>
-                )}
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {field('Loan Amount (K)', 'loan_amount')}
-                {creditRatingTerms.length > 0 ? (
-                  <div className="flex flex-col gap-1">
-                    <label className="text-sm font-semibold text-blue-900">Loan Term &amp; Interest Rate</label>
-                    <select
-                      value={`${formData.loan_term_months}|${formData.loan_rate}`}
-                      onChange={(e) => {
-                        const [term, rate] = e.target.value.split('|');
-                        setFormData((prev) => ({
-                          ...prev,
-                          loan_term_months: term,
-                          loan_rate: rate,
-                        }));
-                      }}
-                      className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    >
-                      {creditRatingTerms.map((t) => {
-                        const termVal = t.term_months || '1';
-                        return (
-                          <option key={`${termVal}-${t.interest_rate}`} value={`${termVal}|${t.interest_rate}`}>
-                            {t.term_label} — {t.interest_rate}% interest
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </div>
-                ) : (
-                  <>
-                    {field('Interest Rate (%)', 'loan_rate')}
-                    <div className="flex flex-col gap-1">
-                      <label className="text-sm font-semibold text-blue-900">Loan Term (Months)</label>
-                      <select
-                        value={formData.loan_term_months}
-                        onChange={(e) => setFormData((prev) => ({ ...prev, loan_term_months: e.target.value }))}
-                        className="px-3 py-2 border-2 border-blue-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      >
-                        {loanTermOptions.length > 0 ? (
-                          loanTermOptions.map((t) => (
-                            <option key={t} value={t}>
-                              {t} {t === '1' ? 'Month' : 'Months'}
-                            </option>
-                          ))
-                        ) : (
-                          <>
-                            <option value="1">1 Month</option>
-                            <option value="2">2 Months</option>
-                            <option value="3">3 Months</option>
-                            <option value="4">4 Months</option>
-                          </>
-                        )}
-                      </select>
-                    </div>
-                  </>
-                )}
               </div>
             </div>
 

@@ -1675,9 +1675,6 @@ class ReconcileRequest(BaseModel):
     penalties: float = 0.0
     interest_on_loan: float = 0.0
     loan_repayment: float = 0.0
-    loan_amount: float = 0.0
-    loan_rate: float = 0.0
-    loan_term_months: str = "1"  # e.g. "1", "2", "3", "4"
 
 
 @router.get("/reconcile")
@@ -1734,11 +1731,10 @@ def get_reconcile(
         "status": declaration.status.value if declaration else None,
     }
 
-    loan_out = {
-        "loan_amount": float(loan.loan_amount or 0) if loan else 0.0,
-        "loan_rate": float(loan.percentage_interest or 0) if loan else 0.0,
-        "loan_term_months": loan.number_of_instalments or "1" if loan else "1",
-    }
+    # Loan info is no longer surfaced via reconciliation — retrospective loans
+    # must come through the member loan-application flow. Returned as empty
+    # for backward compatibility with any older client still reading this key.
+    loan_out = {"loan_amount": 0.0, "loan_rate": 0.0, "loan_term_months": "1"}
 
     return {"declaration": decl_out, "loan": loan_out}
 
@@ -1749,29 +1745,21 @@ def post_reconcile(
     current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
     db: Session = Depends(get_db)
 ):
-    """Backfill a member's monthly declaration and/or loan application.
+    """Backfill a member's monthly declaration as a PENDING draft.
 
-    Reconciliation never posts to the ledger directly anymore. It only creates
-    drafts that flow through the same approval queues as member-initiated
-    actions, eliminating the duplicate-loan / phantom-approved-declaration bug
-    class:
+    Reconciliation never posts to the ledger directly. It only creates a
+    pending Declaration that flows through the same approval queue as
+    member-initiated declarations: the member must upload proof of payment
+    via the Payment Proof page, then the treasurer approves through the
+    pending-deposits queue (that's when the ledger is touched).
 
-      * Declaration is created/updated with status = PENDING. The member is
-        responsible for uploading proof of payment via the normal Payment Proof
-        page. Treasurer then approves through the existing pending-deposits
-        queue (that's when the ledger is touched).
-      * If loan_amount > 0, a LoanApplication with status = PENDING is created.
-        Treasurer approves it through the existing /loans/{application_id}/approve
-        endpoint, which runs the one-active-loan guard and disburses normally.
-
-    If the declaration for the month is already APPROVED, the endpoint refuses
-    and points the operator to the Reports → Reject Declaration flow.
+    Retrospective loan creation through this endpoint has been removed —
+    historical loans that need to be brought into the system must go through
+    the normal member loan-application flow. If the declaration for the
+    month is already APPROVED, the endpoint refuses and points the operator
+    to the Reports → Reject Declaration flow.
     """
-    from app.models.transaction import (
-        Declaration, DeclarationStatus,
-        Loan, LoanStatus,
-        LoanApplication, LoanApplicationStatus,
-    )
+    from app.models.transaction import Declaration, DeclarationStatus
     from app.models.cycle import Cycle, CycleStatus
     from app.core.audit import write_audit_log
     from sqlalchemy import extract, and_
@@ -1797,15 +1785,14 @@ def post_reconcile(
         + (body.penalties or 0.0)
         + (body.interest_on_loan or 0.0)
         + (body.loan_repayment or 0.0)
-        + (body.loan_amount or 0.0)
     )
     if total_inputs <= 0:
         raise HTTPException(
             status_code=400,
             detail=(
                 "Reconciliation has no amounts. Enter at least one non-zero value "
-                "(savings, social fund, admin fund, penalties, interest, loan repayment, "
-                "or loan amount) before saving."
+                "(savings, social fund, admin fund, penalties, interest, loan repayment) "
+                "before saving."
             ),
         )
 
@@ -1868,67 +1855,6 @@ def post_reconcile(
         db.add(declaration)
     db.flush()
 
-    # 3. Loan application (only if loan_amount > 0)
-    created_loan_application_id = None
-    if body.loan_amount > 0:
-        # Avoid duplicate pending applications for the same member.
-        existing_pending_app = db.query(LoanApplication).filter(
-            LoanApplication.member_id == member_uuid,
-            LoanApplication.status == LoanApplicationStatus.PENDING,
-        ).first()
-        if existing_pending_app:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"This member already has a pending loan application "
-                    f"(K{existing_pending_app.amount}, {existing_pending_app.term_months} months). "
-                    "Approve or reject it before reconciling another loan."
-                ),
-            )
-
-        # Avoid creating a duplicate Loan for the same month. If the member
-        # already has an active loan disbursed in this reconciled month, the
-        # treasurer most likely tried to save the form twice — refuse and
-        # point them to the Loan State panel to manage the existing loan.
-        existing_same_month_loan = db.query(Loan).filter(
-            Loan.member_id == member_uuid,
-            Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
-            extract("year", Loan.disbursement_date) == month_date.year,
-            extract("month", Loan.disbursement_date) == month_date.month,
-        ).first()
-        if existing_same_month_loan:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"This member already has an active K{existing_same_month_loan.loan_amount} "
-                    f"loan disbursed in {month_date.strftime('%B %Y')}. "
-                    "Open the Loan State panel to view, consolidate or close it before "
-                    "reconciling another loan for the same month."
-                ),
-            )
-
-        # The single-active-loan rule is enforced at the approval endpoint
-        # (treasurer.py /loans/{application_id}/approve), so creating a pending
-        # application here is safe even if the member has an active loan —
-        # approval will refuse with a clear 409 if so. We still surface a
-        # heads-up to the operator in the response payload.
-        # Backdate the application to the reconciled month so the eventual
-        # Loan inherits the correct borrowing date / maturity. Without this,
-        # application_date defaults to NOW() and the loan would look as if it
-        # were borrowed today instead of during the reconciled period.
-        new_application = LoanApplication(
-            member_id=member_uuid,
-            cycle_id=active_cycle.id,
-            amount=Decimal(str(body.loan_amount)),
-            term_months=body.loan_term_months or "1",
-            notes=f"Created via reconciliation for {month_date.strftime('%B %Y')}",
-            status=LoanApplicationStatus.PENDING,
-            application_date=datetime.combine(month_date, datetime.min.time()),
-        )
-        db.add(new_application)
-        db.flush()
-        created_loan_application_id = str(new_application.id)
-
     # 4. Audit log
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
@@ -1936,21 +1862,18 @@ def post_reconcile(
         action="Reconciliation drafted",
         details=(
             f"member={body.member_id}, month={month_date.strftime('%Y-%m')}, "
-            f"declaration_status=pending, loan_application_id={created_loan_application_id or '-'}"
+            f"declaration_status=pending"
         ),
     )
 
     db.commit()
 
-    next_steps = ["Member must upload proof of payment via Payment Proof page."]
-    if created_loan_application_id:
-        next_steps.append("Loan application is now pending and awaits treasurer approval.")
     return {
         "message": "Reconciliation draft saved. Awaiting member proof + treasurer approval.",
         "declaration_id": str(declaration.id),
         "declaration_status": declaration.status.value,
-        "loan_application_id": created_loan_application_id,
-        "next_steps": next_steps,
+        "loan_application_id": None,
+        "next_steps": ["Member must upload proof of payment via Payment Proof page."],
     }
 
 
@@ -2299,6 +2222,155 @@ def patch_repayment_split(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Per-loan repair actions (treasurer "Loan State" panel kebab menu)
+# ---------------------------------------------------------------------------
+
+class LoanRepairReasonRequest(BaseModel):
+    reason: str
+
+
+class MoveAllRepaymentsRequest(BaseModel):
+    new_loan_id: str
+    reason: str
+
+
+def _audit_loan_repair(current_user: User, action: str, details: str) -> None:
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action=action,
+        details=details,
+    )
+
+
+@router.post("/reconcile/loan/{loan_id}/reopen")
+def post_reopen_loan(
+    loan_id: str,
+    body: LoanRepairReasonRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Set a closed loan back to OPEN. Refused if there's no live disbursement JE."""
+    from app.services.loan_repair import reopen_loan
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = reopen_loan(db=db, loan_id=loan_uuid, reason=body.reason, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(current_user, "Loan reopened", f"loan={loan_id} reason={body.reason}")
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/close")
+def post_close_loan(
+    loan_id: str,
+    body: LoanRepairReasonRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Force a loan to CLOSED. No compensating ledger posting; reason is recorded."""
+    from app.services.loan_repair import close_loan
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = close_loan(db=db, loan_id=loan_uuid, reason=body.reason, user_id=current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(current_user, "Loan force-closed", f"loan={loan_id} reason={body.reason}")
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/reverse-disbursement")
+def post_reverse_loan_disbursement(
+    loan_id: str,
+    body: LoanRepairReasonRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Reverse a loan's disbursement JE. Refused if live repayments still exist."""
+    from app.services.loan_repair import reverse_loan_disbursement
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = reverse_loan_disbursement(
+            db=db, loan_id=loan_uuid, reason=body.reason, user_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user, "Loan disbursement reversed", f"loan={loan_id} reason={body.reason}"
+    )
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/reverse-all-repayments")
+def post_reverse_all_repayments(
+    loan_id: str,
+    body: LoanRepairReasonRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Bulk-reverse every live repayment attached to this loan."""
+    from app.services.loan_repair import reverse_all_repayments_for_loan
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = reverse_all_repayments_for_loan(
+            db=db, loan_id=loan_uuid, reason=body.reason, user_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user,
+        "All repayments reversed for loan",
+        f"loan={loan_id} count={result.get('count', 0)} reason={body.reason}",
+    )
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/move-all-repayments")
+def post_move_all_repayments(
+    loan_id: str,
+    body: MoveAllRepaymentsRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Bulk-move every repayment from this loan to another loan owned by the same member."""
+    from app.services.loan_repair import move_all_repayments_for_loan
+    try:
+        loan_uuid = UUID(loan_id)
+        new_loan_uuid = UUID(body.new_loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+    try:
+        result = move_all_repayments_for_loan(
+            db=db,
+            loan_id=loan_uuid,
+            new_loan_id=new_loan_uuid,
+            reason=body.reason,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user,
+        "All repayments moved between loans",
+        f"from_loan={loan_id} to_loan={body.new_loan_id} count={result.get('count', 0)} reason={body.reason}",
+    )
+    return result
+
+
 class MoveDeclarationMonthRequest(BaseModel):
     member_id: str
     current_month: str  # YYYY-MM-DD
@@ -2384,7 +2456,10 @@ def move_declaration_month(
             source_loan.effective_month = new_date
         db.flush()
 
-    # Update associated journal entries to the new month
+    # Update associated journal entries' dealing month (the reporting bucket).
+    # entry_date is intentionally left alone — it's the immutable record of when
+    # the entry was actually posted; only the period it's allocated to changes.
+    from app.services.accounting import get_dealing_month_date
     deposit_proofs = db.query(DepositProof).filter(
         DepositProof.declaration_id == source_declaration.id
     ).all()
@@ -2397,8 +2472,7 @@ def move_declaration_month(
                 JournalEntry.id == approval.journal_entry_id
             ).first()
             if je and not je.reversed_at:
-                from datetime import datetime as dt
-                je.entry_date = dt.combine(new_date, dt.min.time())
+                je.dealing_month = get_dealing_month_date(db, je.cycle_id, new_date)
                 db.flush()
 
     # Audit

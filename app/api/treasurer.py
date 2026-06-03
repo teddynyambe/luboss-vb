@@ -425,11 +425,13 @@ def reverse_journal_entry(
             "description": f"Reversal: {line.description or 'Original entry'}"
         })
     
-    # Create the reversing journal entry
+    # Create the reversing journal entry — bucket it under the original's dealing month
+    # so the reversal lands in the same reporting period as the entry it reverses.
     reversing_entry = create_journal_entry(
         db=db,
         description=f"Reversal of entry {original_entry.id} - {reason}",
         lines=reversing_lines,
+        dealing_month=original_entry.dealing_month,
         cycle_id=original_entry.cycle_id,
         source_ref=str(original_entry.id),
         source_type="reversal",
@@ -1943,6 +1945,8 @@ def approve_penalty_reversal(
                 db=db,
                 description=f"Penalty reversal: {penalty.penalty_type.name if penalty.penalty_type else 'Unknown'} — {member_name} — {penalty.reversal_reason or ''}",
                 lines=reversal_lines,
+                dealing_month=original_je.dealing_month,
+                cycle_id=original_je.cycle_id,
                 source_ref=str(penalty.id),
                 source_type="penalty_reversal",
                 created_by=current_user.id,
