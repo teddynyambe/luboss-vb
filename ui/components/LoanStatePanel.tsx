@@ -90,13 +90,16 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     | 'restore_disbursement'
     | 'reverse_all_reps'
     | 'move_all_reps'
-    | 'edit_disbursement_date';
+    | 'edit_disbursement_date'
+    | 'edit_terms';
   const [openMenuLoanId, setOpenMenuLoanId] = useState<string | null>(null);
   const [repairLoan, setRepairLoan] = useState<LoanRow | null>(null);
   const [repairAction, setRepairAction] = useState<RepairAction | null>(null);
   const [repairReason, setRepairReason] = useState('');
   const [repairTargetLoanId, setRepairTargetLoanId] = useState('');
   const [repairNewDate, setRepairNewDate] = useState('');
+  const [repairNewTerm, setRepairNewTerm] = useState('');
+  const [repairNewRate, setRepairNewRate] = useState('');
   const [submittingRepair, setSubmittingRepair] = useState(false);
 
   const load = useCallback(() => {
@@ -238,6 +241,8 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairReason('');
     setRepairTargetLoanId('');
     setRepairNewDate(action === 'edit_disbursement_date' ? (loan.disbursement_date || '') : '');
+    setRepairNewTerm(action === 'edit_terms' ? (loan.number_of_instalments || '') : '');
+    setRepairNewRate(action === 'edit_terms' ? String(loan.percentage_interest ?? '') : '');
     setOpenMenuLoanId(null);
   };
 
@@ -247,6 +252,8 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairReason('');
     setRepairTargetLoanId('');
     setRepairNewDate('');
+    setRepairNewTerm('');
+    setRepairNewRate('');
   };
 
   const submitRepair = async () => {
@@ -291,6 +298,21 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
           new_disbursement_date: repairNewDate,
           reason,
         });
+      } else if (repairAction === 'edit_terms') {
+        const termChanged = repairNewTerm && repairNewTerm !== (repairLoan.number_of_instalments || '');
+        const rateChanged =
+          repairNewRate !== '' &&
+          parseFloat(repairNewRate) !== (repairLoan.percentage_interest ?? NaN);
+        if (!termChanged && !rateChanged) {
+          setError('Change the tenure or the interest rate before saving.');
+          setSubmittingRepair(false);
+          return;
+        }
+        res = await api.post(`${base}/edit-terms`, {
+          new_term_months: termChanged ? repairNewTerm : null,
+          new_percentage_interest: rateChanged ? parseFloat(repairNewRate) : null,
+          reason,
+        });
       }
       if (res?.error) {
         setError(res.error);
@@ -312,6 +334,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
       case 'reverse_all_reps': return 'Reverse all repayments';
       case 'move_all_reps': return 'Move all repayments to another loan';
       case 'edit_disbursement_date': return 'Edit disbursement date';
+      case 'edit_terms': return 'Edit loan terms';
     }
   };
 
@@ -331,6 +354,8 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         return 'Moves every repayment row (live and reversed) from this loan onto another loan owned by the same member. Pick the destination below.';
       case 'edit_disbursement_date':
         return 'Changes when this loan is considered to have been disbursed. Re-buckets the disbursement journal entry so the Loan/Revenue report groups it under the right month. For historical/retrospective loans where the exact date isn’t known, the last day of the borrowing month is a sensible convention.';
+      case 'edit_terms':
+        return 'Edit this loan’s tenure (months) and/or interest rate. The expected interest is recomputed and a correcting journal entry is posted for the delta against INTEREST_RECEIVABLE / INTEREST_INCOME, bucketed under the loan’s disbursement month. Repayment dates and amounts are not touched.';
     }
   };
 
@@ -542,6 +567,12 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                         className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
                       >
                         Edit disbursement date…
+                      </button>
+                      <button
+                        onClick={() => openRepair(loan, 'edit_terms')}
+                        className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
+                      >
+                        Edit loan terms…
                       </button>
                     </div>
                   )}
@@ -953,6 +984,68 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 </p>
               </div>
             )}
+
+            {repairAction === 'edit_terms' && (() => {
+              const newTermN = parseInt(repairNewTerm || '0', 10) || 0;
+              const newRateN = parseFloat(repairNewRate || '') || 0;
+              const newExpected = newRateN > 0
+                ? (repairLoan.loan_amount * newRateN) / 100
+                : repairLoan.expected_interest;
+              const oldExpected = repairLoan.expected_interest;
+              const delta = newExpected - oldExpected;
+              return (
+                <div className="flex flex-col gap-2">
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-xs font-semibold text-blue-900">Tenure (months)</label>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1"
+                        value={repairNewTerm}
+                        onChange={(e) => setRepairNewTerm(e.target.value)}
+                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      />
+                      <p className="text-[11px] text-gray-500">
+                        Current: <span className="font-mono">{repairLoan.number_of_instalments || '—'}</span>
+                      </p>
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-xs font-semibold text-blue-900">Interest rate (%)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={repairNewRate}
+                        onChange={(e) => setRepairNewRate(e.target.value)}
+                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      />
+                      <p className="text-[11px] text-gray-500">
+                        Current: <span className="font-mono">{repairLoan.percentage_interest}%</span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
+                    <div className="flex justify-between">
+                      <span className="text-blue-700">Loan amount</span>
+                      <span className="font-semibold text-blue-900">{fmt(repairLoan.loan_amount)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-blue-700">Old expected interest</span>
+                      <span className="font-semibold text-blue-900">{fmt(oldExpected)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-blue-700">New expected interest</span>
+                      <span className="font-semibold text-blue-900">{fmt(newExpected)}</span>
+                    </div>
+                    <div className={`flex justify-between pt-1 mt-1 border-t border-blue-200 ${delta >= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                      <span>Accrual delta (corrective JE)</span>
+                      <span className="font-bold">{delta >= 0 ? '+' : ''}{fmt(delta)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-blue-900">

@@ -792,7 +792,12 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                     readOnly
                     className="w-full bg-gray-100 cursor-not-allowed"
                   />
-                  {declarationWindow.isOpen && declarationWindow.windowClose ? (
+                  {isEditing ? (
+                    <p className="mt-2 text-sm md:text-base text-blue-700">
+                      Editing a {(currentMonthDeclaration?.status || 'pending').toLowerCase()} declaration — the
+                      normal monthly window does not apply.
+                    </p>
+                  ) : declarationWindow.isOpen && declarationWindow.windowClose ? (
                     <p className="mt-2 text-sm md:text-base text-green-700">
                       Declaration window open until {declarationWindow.windowClose.toLocaleDateString('en-US', { day: 'numeric', month: 'long', year: 'numeric' })}
                     </p>
@@ -1028,8 +1033,9 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                           </button>
                           <button
                             type="submit"
-                            disabled={loading || !declarationWindow.isOpen}
+                            disabled={loading}
                             className="btn-primary disabled:opacity-50"
+                            title="Editing a pending or previously rejected declaration is allowed regardless of the declaration window"
                           >
                             {loading ? 'Updating...' : 'Update Declaration'}
                           </button>

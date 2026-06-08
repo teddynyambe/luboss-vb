@@ -456,8 +456,15 @@ def update_declaration(
         if declaration.status != DeclarationStatus.PENDING:
             raise ValueError(f"Cannot edit declaration with status: {declaration.status.value}")
     else:
-        # When editing after rejection, allow editing even if past 20th, but only if status is PENDING or APPROVED
-        if declaration.status not in [DeclarationStatus.PENDING, DeclarationStatus.APPROVED]:
+        # When editing after rejection / for a previously-approved declaration with
+        # a rejected proof, allow editing regardless of date. Status must be PENDING,
+        # APPROVED, or REJECTED — a REJECTED declaration is exactly what the member
+        # should be able to revise from a past month.
+        if declaration.status not in [
+            DeclarationStatus.PENDING,
+            DeclarationStatus.APPROVED,
+            DeclarationStatus.REJECTED,
+        ]:
             raise ValueError(f"Cannot edit declaration with status: {declaration.status.value}")
     
     # Update fields

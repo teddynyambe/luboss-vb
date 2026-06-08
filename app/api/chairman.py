@@ -2240,6 +2240,12 @@ class EditLoanDisbursementDateRequest(BaseModel):
     reason: str
 
 
+class EditLoanTermsRequest(BaseModel):
+    new_term_months: str | None = None
+    new_percentage_interest: float | None = None
+    reason: str
+
+
 def _audit_loan_repair(current_user: User, action: str, details: str) -> None:
     from app.core.audit import write_audit_log
     write_audit_log(
@@ -2398,6 +2404,48 @@ def post_move_all_repayments(
         current_user,
         "All repayments moved between loans",
         f"from_loan={loan_id} to_loan={body.new_loan_id} count={result.get('count', 0)} reason={body.reason}",
+    )
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/edit-terms")
+def post_edit_loan_terms(
+    loan_id: str,
+    body: EditLoanTermsRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Edit a loan's tenure and/or interest rate. Posts a correcting JE for
+    the resulting change in accrued interest so the books stay in sync."""
+    from app.services.loan_repair import edit_loan_terms
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = edit_loan_terms(
+            db=db,
+            loan_id=loan_uuid,
+            new_term_months=body.new_term_months,
+            new_percentage_interest=(
+                Decimal(str(body.new_percentage_interest))
+                if body.new_percentage_interest is not None
+                else None
+            ),
+            reason=body.reason,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user,
+        "Loan terms edited",
+        (
+            f"loan={loan_id} "
+            f"term={result.get('old_term_months')}→{result.get('new_term_months')} "
+            f"rate={result.get('old_percentage_interest')}→{result.get('new_percentage_interest')} "
+            f"interest_delta={result.get('interest_delta')} reason={body.reason}"
+        ),
     )
     return result
 
