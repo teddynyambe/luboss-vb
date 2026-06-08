@@ -2235,6 +2235,11 @@ class MoveAllRepaymentsRequest(BaseModel):
     reason: str
 
 
+class EditLoanDisbursementDateRequest(BaseModel):
+    new_disbursement_date: str   # YYYY-MM-DD
+    reason: str
+
+
 def _audit_loan_repair(current_user: User, action: str, details: str) -> None:
     from app.core.audit import write_audit_log
     write_audit_log(
@@ -2284,6 +2289,32 @@ def post_close_loan(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _audit_loan_repair(current_user, "Loan force-closed", f"loan={loan_id} reason={body.reason}")
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/restore-disbursement")
+def post_restore_loan_disbursement(
+    loan_id: str,
+    body: LoanRepairReasonRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Un-reverse a previously reversed disbursement JE — recovery action for
+    a disbursement that was reversed in error."""
+    from app.services.loan_repair import restore_loan_disbursement
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = restore_loan_disbursement(
+            db=db, loan_id=loan_uuid, reason=body.reason, user_id=current_user.id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user, "Loan disbursement restored", f"loan={loan_id} reason={body.reason}"
+    )
     return result
 
 
@@ -2367,6 +2398,42 @@ def post_move_all_repayments(
         current_user,
         "All repayments moved between loans",
         f"from_loan={loan_id} to_loan={body.new_loan_id} count={result.get('count', 0)} reason={body.reason}",
+    )
+    return result
+
+
+@router.post("/reconcile/loan/{loan_id}/edit-disbursement-date")
+def post_edit_loan_disbursement_date(
+    loan_id: str,
+    body: EditLoanDisbursementDateRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Change a loan's disbursement date. Re-buckets the disbursement JE's
+    dealing_month so the Loan/Revenue report groups the loan under the right
+    month; entry_date (the immutable posting timestamp) is left alone."""
+    from app.services.loan_repair import edit_loan_disbursement_date
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+    try:
+        result = edit_loan_disbursement_date(
+            db=db,
+            loan_id=loan_uuid,
+            new_disbursement_date=body.new_disbursement_date,
+            reason=body.reason,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _audit_loan_repair(
+        current_user,
+        "Loan disbursement date edited",
+        (
+            f"loan={loan_id} from={result.get('old_disbursement_date')} "
+            f"to={body.new_disbursement_date} reason={body.reason}"
+        ),
     )
     return result
 

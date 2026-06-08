@@ -6,6 +6,9 @@ This document explains how the accounting system is structured and all the busin
 1. [Chart of Accounts](#chart-of-accounts)
 2. [Account Creation Process](#account-creation-process)
 3. [System Rules and Validations](#system-rules-and-validations)
+4. [Reconciliation Workflow](#reconciliation-workflow-june-2026)
+5. [Loan State Repair (Treasurer)](#loan-state-repair-treasurer)
+6. [Dealing Month and Posting Date](#dealing-month-and-posting-date)
 
 ---
 
@@ -523,3 +526,113 @@ All rules are enforced at the service layer, ensuring consistent behavior across
 - **Penalty Filtering**: Only APPROVED penalties included in declaration lists
 - **Cycle-Defined Filter**: Respects `auto_apply_penalty` flag for cycle-defined penalties
 - **Date Handling**: Fixed timezone issues in effective month display
+
+---
+
+## Reconciliation Workflow (June 2026)
+
+The Reconciliation page (`/dashboard/reconcile`) lets a treasurer back-fill or correct a member's monthly declaration. Its scope is **declarations only** — it never creates loans, never posts directly to the ledger, and never bypasses the normal approval queue.
+
+### What reconciliation does
+
+Saving the **Declaration** tab creates (or updates) a **PENDING `Declaration`** row for the chosen member + month. From there the normal flow takes over: member uploads proof of payment via the Payment Proof page, treasurer approves it through the pending-deposits queue, and that's when the ledger is touched.
+
+If the declaration for that month is already `APPROVED`, the endpoint refuses and points the operator to Reports → Reject Declaration. Rejecting flips the linked deposit JE to reversed and resets the declaration to `PENDING`, after which reconciliation can update it cleanly.
+
+### What reconciliation does NOT do
+
+- ❌ Create `LoanApplication` records. The "Loan Applied" form was removed (June 2026) — historical/retrospective loans must come through the normal **member loan-application flow**. Loans created retrospectively through reconciliation produced orphan `Loan` rows with no application trail (visible as a "no application" badge in Loan State), bypassed the single-active-loan guard, and were the root cause of duplicate-loan and phantom-disbursement bugs.
+- ❌ Touch the ledger directly. Every approval routes through the normal deposit-approval flow.
+
+> ![Reconciliation Declaration tab](img/reconcile-declaration.png)
+> *Screenshot placeholder — Declaration tab with the savings/social/admin/penalties/interest/loan-repayment inputs and the "Save Reconciliation" button.*
+
+### Tabs
+
+| Tab | Purpose |
+|---|---|
+| **Loan State** | View every loan + repayment for the member, with kebab-menu repair actions (see Loan State Repair section). |
+| **Declaration** | The draft form described above. |
+| **Posted Transactions** | Per-month list of ledger lines on the member's category accounts (savings / social / admin / penalty). Bucketed by **dealing month**, not posting date. Loan disbursements/repayments/interest are intentionally hidden — those live in Loan State. |
+
+---
+
+## Loan State Repair (Treasurer)
+
+The Loan State tab on the reconciliation page shows the member's loans, their ledger-vs-record reconciliation, every repayment with a live/reversed flag, and (June 2026) a **kebab menu (⋯) on each loan** with five repair actions.
+
+> ![Loan State panel with kebab menu](img/loan-state-kebab.png)
+> *Screenshot placeholder — Loan State header with Active loans / Loan amount / Principal paid / Outstanding summary cards; per-loan kebab opens the repair menu.*
+
+### Repair actions
+
+Every action requires a **reason (≥5 chars)** and writes an audit-log entry.
+
+| Action | When to use | Guard |
+|---|---|---|
+| **Reopen loan** | A loan was force-closed (or auto-closed by the system) but you need to attach more repayments to it. | Refused if the loan's disbursement JE has been reversed — that would leave a phantom open loan with no ledger backing. |
+| **Force-close loan** | Manually retire a loan when outstanding is effectively zero or the loan was opened in error. | None — status change only, no compensating ledger entry. |
+| **Reverse disbursement** | Undo a loan disbursement that should never have been posted (the entire loan is being voided). | Refused if any **live repayment** is still attached. Reverse or move those first. |
+| **Reverse all repayments** | Bulk-reverse every live repayment on this loan and roll each linked declaration back to PENDING (for re-upload). | None — each row delegates to the existing per-row reverse logic. |
+| **Move all repayments to another loan** | Re-point every Repayment row from this loan onto another loan owned by the same member. Used when payments were attached to the wrong loan (e.g. after a reject + re-apply cycle). | Destination must belong to the same member. |
+
+### Standard repair sequence
+
+When a member's Loan State shows a "Ledger says K X" warning (ledger and record don't agree), the canonical order is:
+
+1. Identify the bad loan (usually one with a "no application" badge or a misattached repayment).
+2. Move or reverse the repayments off it.
+3. Reverse its disbursement.
+4. Reopen or close the surviving loan as appropriate.
+
+The Consolidate button (shown when there are 2+ active loans) is for **true duplicate loans** — a single disbursement event that produced two `Loan` rows. Don't use it for reject/re-apply scenarios.
+
+> ![Repair confirmation modal](img/loan-repair-modal.png)
+> *Screenshot placeholder — confirmation modal with the action label, warning copy, required-reason textarea, and (for "Move all repayments") the destination-loan dropdown.*
+
+### Automatic Repayment attachment for closed loans
+
+When a member rejects + re-uploads a historical declaration that has a loan-repayment portion, the deposit approval will:
+
+1. First look for an OPEN / DISBURSED loan to attach the new Repayment row to.
+2. If none found, fall back to the **most recently disbursed CLOSED loan** whose `disbursement_date` is on or before the declaration's `effective_month`.
+
+This means re-approving a Feb declaration for a loan that has since been closed will still attach the K_x repayment correctly without manual intervention. If the system picks the wrong closed loan (rare — only when multiple closed loans with overlapping periods exist), use the **Move all repayments** action to re-point.
+
+---
+
+## Dealing Month and Posting Date
+
+`journal_entry` carries two date columns now (June 2026, migration `a7b8c9d0e1f2`):
+
+| Column | Meaning | Used for |
+|---|---|---|
+| `entry_date` | When the entry was actually posted (timestamp, server-default `CURRENT_TIMESTAMP`). Immutable audit trail. | Balance "as-of" queries; member transaction history. |
+| `dealing_month` | The reporting period this entry is allocated to (Date, anchored to the cycle's DECLARATION phase `monthly_start_day`). | Reconciliation grouping; monthly ledger reports; the move-month repair action. |
+
+### Why the split exists
+
+Before `dealing_month`, reconciliation grouped by `entry_date`'s month. A declaration with `effective_month = May` that the treasurer approved on June 2 ended up bucketed under **June** in Posted Transactions and monthly reports — wrong period. With `dealing_month`, the entry's reporting bucket follows the declaration's effective month regardless of when the treasurer happened to click Approve.
+
+### How values are chosen
+
+`create_journal_entry()` requires `dealing_month` at every call site. Sources:
+
+| Operation | `dealing_month` source |
+|---|---|
+| Deposit approval | `declaration.effective_month` |
+| Loan disbursement | `loan.disbursement_date` |
+| Loan repayment | `repayment_date` parameter |
+| Penalty approval | `penalty.date_issued` |
+| Excess contribution transfer | `effective_month` parameter |
+| Reversal / split | source JE's `dealing_month` |
+| Payment request execution | current date |
+
+Helper: `get_dealing_month_date(db, cycle_id, effective_month)` in `app/services/accounting.py` maps an effective month → the cycle's declaration-phase `monthly_start_day` (e.g. May + day-15 = 2026-05-15).
+
+### Move-month action
+
+The treasurer "move transaction to a different month" repair action (in Posted Transactions and the chairman move-declaration-month endpoint) updates **`dealing_month` only**. `entry_date` is intentionally never modified — it's the immutable record of when the entry was actually posted.
+
+> ![Posted Transactions grouped by dealing month](img/posted-transactions-by-dealing-month.png)
+> *Screenshot placeholder — Posted Transactions tab showing per-month buckets keyed by `dealing_month`. Each row's "Date" column still shows the actual `entry_date` so treasurers can see "posted on 6/2 but belongs to May".*

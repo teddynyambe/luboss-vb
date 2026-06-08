@@ -44,6 +44,7 @@ export default function MemberDashboard() {
   const [modalType, setModalType] = useState<'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null>(null);
   const [currentLoan, setCurrentLoan] = useState<any>(null);
   const [loanModalOpen, setLoanModalOpen] = useState(false);
+  const [creditRating, setCreditRating] = useState<any>(null);
 
   useEffect(() => {
     loadStatus();
@@ -59,6 +60,22 @@ export default function MemberDashboard() {
     } catch {
       // no active loan — leave null
     }
+  };
+
+  const loadCreditRating = async (cycleId: string) => {
+    try {
+      const response = await api.get<any>(`/api/member/loans/eligibility/${cycleId}`);
+      if (response.data) setCreditRating(response.data);
+    } catch {
+      setCreditRating(null);
+    }
+  };
+
+  const openLoanModal = () => {
+    if (!currentLoan) return;
+    setLoanModalOpen(true);
+    const cycleId = currentLoan.cycle_id || cycles[0]?.id;
+    if (cycleId && !creditRating) loadCreditRating(cycleId);
   };
 
   const loadStatus = async () => {
@@ -173,7 +190,7 @@ export default function MemberDashboard() {
                       </p>
                     </div>
                     <div
-                      onClick={() => currentLoan && setLoanModalOpen(true)}
+                      onClick={openLoanModal}
                       className={`bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300 ${currentLoan ? 'cursor-pointer hover:ring-2 hover:ring-red-400 hover:shadow-lg transition-all duration-200' : ''}`}
                     >
                       <p className="text-xs md:text-sm text-red-700 font-medium mb-2">Loan Balance</p>
@@ -181,14 +198,37 @@ export default function MemberDashboard() {
                         K{(currentLoan?.loan_amount ?? status.loan_balance).toLocaleString()}
                       </p>
                       {currentLoan ? (
-                        <>
-                          <p className="text-xs md:text-sm text-red-700 font-medium mt-1">
-                            Outstanding: K{currentLoan.outstanding_balance?.toLocaleString()}
+                        <div className="mt-2 space-y-0.5 text-[11px] md:text-xs">
+                          <div className="flex justify-between text-red-700">
+                            <span>Principal outstanding</span>
+                            <span className="font-semibold">
+                              K{currentLoan.outstanding_balance?.toLocaleString()}
+                            </span>
+                          </div>
+                          {currentLoan.interest_expected != null && (
+                            <div className="flex justify-between text-orange-700">
+                              <span>Total interest</span>
+                              <span className="font-medium">
+                                K{currentLoan.interest_expected.toLocaleString()}
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex justify-between text-orange-600">
+                            <span>Interest paid</span>
+                            <span className="font-medium">
+                              K{currentLoan.total_interest_paid?.toLocaleString()}
+                            </span>
+                          </div>
+                          <div className={`flex justify-between ${(currentLoan.interest_outstanding ?? 0) > 0.01 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                            <span>Interest owed</span>
+                            <span className="font-semibold">
+                              K{(currentLoan.interest_outstanding ?? 0).toLocaleString()}
+                            </span>
+                          </div>
+                          <p className="pt-1 mt-1 border-t border-red-300/60 text-[10px] text-red-500 italic">
+                            Tap for details
                           </p>
-                          <p className="text-xs md:text-sm text-red-500 mt-0.5">
-                            Interest paid: K{currentLoan.total_interest_paid?.toLocaleString()}
-                          </p>
-                        </>
+                        </div>
                       ) : (
                         <p className="text-xs md:text-sm text-red-600 mt-1">
                           {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
@@ -243,7 +283,7 @@ export default function MemberDashboard() {
                   </p>
                 </div>
                 <div
-                  onClick={() => currentLoan && setLoanModalOpen(true)}
+                  onClick={openLoanModal}
                   className={`bg-gradient-to-br from-red-100 to-red-200 p-4 md:p-6 rounded-xl border-2 border-red-300 ${currentLoan ? 'cursor-pointer hover:ring-2 hover:ring-red-400 hover:shadow-lg transition-all duration-200' : ''}`}
                 >
                   <p className="text-xs md:text-sm text-red-700 font-medium mb-2">Loan Balance</p>
@@ -251,14 +291,37 @@ export default function MemberDashboard() {
                     K{(currentLoan?.loan_amount ?? status.loan_balance).toLocaleString()}
                   </p>
                   {currentLoan ? (
-                    <>
-                      <p className="text-xs md:text-sm text-red-700 font-medium mt-1">
-                        Outstanding: K{currentLoan.outstanding_balance?.toLocaleString()}
+                    <div className="mt-2 space-y-0.5 text-[11px] md:text-xs">
+                      <div className="flex justify-between text-red-700">
+                        <span>Principal outstanding</span>
+                        <span className="font-semibold">
+                          K{currentLoan.outstanding_balance?.toLocaleString()}
+                        </span>
+                      </div>
+                      {currentLoan.interest_expected != null && (
+                        <div className="flex justify-between text-orange-700">
+                          <span>Total interest</span>
+                          <span className="font-medium">
+                            K{currentLoan.interest_expected.toLocaleString()}
+                          </span>
+                        </div>
+                      )}
+                      <div className="flex justify-between text-orange-600">
+                        <span>Interest paid</span>
+                        <span className="font-medium">
+                          K{currentLoan.total_interest_paid?.toLocaleString()}
+                        </span>
+                      </div>
+                      <div className={`flex justify-between ${(currentLoan.interest_outstanding ?? 0) > 0.01 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        <span>Interest owed</span>
+                        <span className="font-semibold">
+                          K{(currentLoan.interest_outstanding ?? 0).toLocaleString()}
+                        </span>
+                      </div>
+                      <p className="pt-1 mt-1 border-t border-red-300/60 text-[10px] text-red-500 italic">
+                        Tap for details
                       </p>
-                      <p className="text-xs md:text-sm text-red-500 mt-0.5">
-                        Interest paid: K{currentLoan.total_interest_paid?.toLocaleString()}
-                      </p>
-                    </>
+                    </div>
                   ) : (
                     <p className="text-xs md:text-sm text-red-600 mt-1">
                       {status.total_loans_count} {status.total_loans_count === 1 ? 'loan' : 'loans'}
@@ -346,6 +409,15 @@ export default function MemberDashboard() {
                   <h3 className="font-bold text-lg md:text-xl mb-2">Group Report</h3>
                   <p className="text-sm md:text-base text-blue-100">Monthly group savings, loans & profit summary</p>
                 </Link>
+                <Link
+                  href="/dashboard/member/reports/loan-revenue"
+                  className="block p-5 md:p-6 bg-gradient-to-br from-emerald-400 to-emerald-500 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-emerald-600"
+                >
+                  <h3 className="font-bold text-lg md:text-xl mb-2">Loan/Revenue Report</h3>
+                  <p className="text-sm md:text-base text-emerald-50">
+                    Group-wide loans, interest accrued and collected — same report the treasurer sees
+                  </p>
+                </Link>
               </div>
             </div>
           </div>
@@ -409,7 +481,7 @@ export default function MemberDashboard() {
               </div>
 
               {/* Summary row */}
-              <div className="grid grid-cols-3 gap-3 p-4 bg-red-50 border-b border-red-200">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 p-4 bg-red-50 border-b border-red-200">
                 <div className="text-center">
                   <p className="text-xs text-red-600 font-medium">Borrowed</p>
                   <p className="text-lg font-bold text-red-900">K{currentLoan.loan_amount?.toLocaleString()}</p>
@@ -419,10 +491,56 @@ export default function MemberDashboard() {
                   <p className="text-lg font-bold text-red-700">K{currentLoan.outstanding_balance?.toLocaleString()}</p>
                 </div>
                 <div className="text-center">
-                  <p className="text-xs text-red-600 font-medium">Interest Paid</p>
+                  <p className="text-xs text-orange-600 font-medium">Interest Paid</p>
                   <p className="text-lg font-bold text-orange-700">K{currentLoan.total_interest_paid?.toLocaleString()}</p>
+                  {currentLoan.interest_expected != null && (
+                    <p className="text-[10px] text-orange-500 mt-0.5">
+                      of K{currentLoan.interest_expected.toLocaleString()} accrued
+                    </p>
+                  )}
+                </div>
+                <div className="text-center">
+                  <p className="text-xs text-amber-600 font-medium">Interest Owed</p>
+                  <p className={`text-lg font-bold ${(currentLoan.interest_outstanding ?? 0) > 0.01 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                    K{(currentLoan.interest_outstanding ?? 0).toLocaleString()}
+                  </p>
                 </div>
               </div>
+
+              {/* Credit rating summary */}
+              {creditRating?.has_credit_rating && (
+                <div className="px-4 py-3 bg-blue-50 border-b border-blue-200">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <div>
+                      <p className="text-[11px] uppercase tracking-wider text-blue-600 font-semibold">Credit Rating</p>
+                      <p className="text-base font-bold text-blue-900">{creditRating.tier_name}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[11px] text-blue-600 font-medium">Borrowing limit</p>
+                      <p className="text-sm font-bold text-blue-900">
+                        K{creditRating.max_loan_amount?.toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                      </p>
+                      <p className="text-[10px] text-blue-500">
+                        {creditRating.multiplier}× savings (K{creditRating.savings_balance?.toLocaleString(undefined, { maximumFractionDigits: 0 })})
+                      </p>
+                    </div>
+                  </div>
+                  {Array.isArray(creditRating.available_terms) && creditRating.available_terms.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-1">
+                      {creditRating.available_terms.map((t: any, i: number) => (
+                        <span
+                          key={i}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-white border border-blue-300 text-[11px] text-blue-800"
+                        >
+                          <span className="font-semibold">{t.term_label}</span>
+                          <span className="text-blue-500">·</span>
+                          <span>{t.interest_rate}% interest</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Repayment table */}
               <div className="overflow-y-auto flex-1 p-4">

@@ -48,6 +48,12 @@ def create_ledger_accounts(db: Session):
             "description": "Interest income from loans"
         },
         {
+            "account_code": "INTEREST_RECEIVABLE",
+            "account_name": "Interest Receivable",
+            "account_type": AccountType.ASSET,
+            "description": "Interest accrued at loan origination but not yet collected from members"
+        },
+        {
             "account_code": "PENALTY_INCOME",
             "account_name": "Penalty Income",
             "account_type": AccountType.INCOME,

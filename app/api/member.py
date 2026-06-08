@@ -14,7 +14,8 @@ from app.services.accounting import (
     get_member_admin_fund_balance,
     get_member_penalties_balance,
     get_member_social_fund_payments,
-    get_member_admin_fund_payments
+    get_member_admin_fund_payments,
+    get_member_monthly_loan_balances,
 )
 from pydantic import BaseModel
 from typing import Optional, List
@@ -46,6 +47,19 @@ class LoanApplicationCreate(BaseModel):
     term_months: str
     notes: Optional[str] = None
     borrowing_date: Optional[str] = None  # ISO YYYY-MM-DD; sets application_date on the record
+
+
+@router.get("/reports/interest-revenue")
+def get_member_interest_revenue_report(
+    cycle_id: Optional[str] = None,
+    current_user: User = Depends(require_not_admin()),
+    db: Session = Depends(get_db),
+):
+    """Group-wide loan / interest-revenue report — same shape and content as
+    the treasurer's report. Exposed to members so they can see how the group
+    is performing (transparency)."""
+    from app.services.interest_revenue_report import get_interest_revenue_report
+    return get_interest_revenue_report(db, cycle_id=cycle_id)
 
 
 @router.get("/status")
@@ -1593,8 +1607,11 @@ def get_current_loan(
         except (ValueError, TypeError):
             pass
 
+    interest_outstanding = max(Decimal("0.00"), interest_expected - total_interest_paid)
+
     return {
         "id": str(loan.id),
+        "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
         "loan_amount": float(loan.loan_amount),
         "term_months": loan.number_of_instalments or "N/A",
         "interest_rate": float(loan.percentage_interest) if loan.percentage_interest else None,
@@ -1605,6 +1622,8 @@ def get_current_loan(
         "total_interest_paid": float(total_interest_paid),
         "total_paid": float(total_principal_paid + total_interest_paid),
         "outstanding_balance": float(outstanding_balance),
+        "interest_expected": float(interest_expected),
+        "interest_outstanding": float(interest_outstanding),
         "repayments": repayment_items,
     }
 
@@ -1856,6 +1875,7 @@ def get_account_transactions(
             ).order_by(Declaration.created_at.desc()).all()
             
             from app.services.accounting import compute_posted_breakdown as _posted_bd
+            from app.services.accounting import get_reconciliation_notes as _recon_notes
             for declaration in declarations:
                 posted_items = _posted_bd(
                     db, member_profile.id,
@@ -1875,6 +1895,15 @@ def get_account_transactions(
                         for k in declared_items_chk
                     )
                 )
+                reconciliation_notes = (
+                    _recon_notes(
+                        db, member_profile.id,
+                        declaration.effective_month.year,
+                        declaration.effective_month.month,
+                    )
+                    if has_reconciliation_discrepancy
+                    else []
+                )
                 transactions.append({
                     "id": f"declaration_{declaration.id}",
                     "date": declaration.effective_month.isoformat(),
@@ -1893,6 +1922,7 @@ def get_account_transactions(
                     },
                     "posted_items": posted_items,
                     "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
+                    "reconciliation_notes": reconciliation_notes,
                 })
             
             # Excess-contribution / split / reverse JEs are intentionally NOT
@@ -2261,9 +2291,20 @@ def get_account_transactions(
             detail=f"Error fetching {type} transactions: {str(e)}"
         )
     
+    # Per-month loan + interest receivable balances drive the Loan Balance /
+    # Interest Balance columns on the Statement page. Only meaningful for the
+    # "savings" view today, but cheap to include for any type.
+    monthly_loan_balances: list[dict] = []
+    if type == "savings":
+        try:
+            monthly_loan_balances = get_member_monthly_loan_balances(db, member_profile.id)
+        except Exception:
+            monthly_loan_balances = []
+
     return {
         "type": type,
-        "transactions": transactions
+        "transactions": transactions,
+        "monthly_loan_balances": monthly_loan_balances,
     }
 
 
@@ -3043,6 +3084,7 @@ def get_member_savings_history(
     ).order_by(Declaration.created_at.desc()).all()
 
     from app.services.accounting import compute_posted_breakdown as _posted_bd
+    from app.services.accounting import get_reconciliation_notes as _recon_notes
     for declaration in declarations:
         posted_items = _posted_bd(
             db, member_profile.id,
@@ -3058,6 +3100,15 @@ def get_member_savings_history(
         has_reconciliation_discrepancy = (
             declaration.status == DeclarationStatus.APPROVED
             and any(abs(posted_items[k] - declared_check[k]) > 0.01 for k in declared_check)
+        )
+        reconciliation_notes = (
+            _recon_notes(
+                db, member_profile.id,
+                declaration.effective_month.year,
+                declaration.effective_month.month,
+            )
+            if has_reconciliation_discrepancy
+            else []
         )
         transactions.append({
             "id": f"declaration_{declaration.id}",
@@ -3077,6 +3128,7 @@ def get_member_savings_history(
             },
             "posted_items": posted_items,
             "has_reconciliation_discrepancy": has_reconciliation_discrepancy,
+            "reconciliation_notes": reconciliation_notes,
         })
 
     # NOTE: excess_contribution / transaction_split / transaction_reverse JEs are
@@ -3088,9 +3140,15 @@ def get_member_savings_history(
 
     transactions.sort(key=lambda x: x["date"], reverse=True)
 
+    try:
+        monthly_loan_balances = get_member_monthly_loan_balances(db, member_profile.id)
+    except Exception:
+        monthly_loan_balances = []
+
     return {
         "member_name": member_name,
         "member_id": member_id,
         "type": "savings",
         "transactions": transactions,
+        "monthly_loan_balances": monthly_loan_balances,
     }

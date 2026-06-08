@@ -914,12 +914,29 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   <div>
                     <label htmlFor="declared_interest_on_loan" className="block text-base font-semibold text-blue-900 mb-2">
                       Interest on Loan (K)
-                      {memberStatus && (memberStatus.interest_on_loan_due ?? 0) > 0 && (
-                        <span className="ml-2 text-xs font-normal text-amber-600">
-                          Due: {fmtBal(memberStatus.interest_on_loan_due!)}
-                        </span>
-                      )}
                     </label>
+                    {memberStatus && (memberStatus.interest_on_loan_due ?? 0) > 0 && (
+                      <div className="mb-2 flex flex-wrap items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-300 rounded-lg text-sm">
+                        <span className="font-semibold text-amber-900">
+                          Outstanding interest on your loan:
+                        </span>
+                        <span className="font-bold text-amber-900">
+                          {fmtBal(memberStatus.interest_on_loan_due!)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              declared_interest_on_loan: memberStatus.interest_on_loan_due,
+                            }))
+                          }
+                          className="ml-auto px-2.5 py-1 bg-amber-600 text-white text-xs font-semibold rounded hover:bg-amber-700"
+                        >
+                          Use this amount
+                        </button>
+                      </div>
+                    )}
                     <input
                       type="number"
                       id="declared_interest_on_loan"
@@ -931,17 +948,42 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       className="w-full"
                       placeholder="0.00"
                     />
+                    {memberStatus &&
+                      (memberStatus.interest_on_loan_due ?? 0) > 0 &&
+                      (formData.declared_interest_on_loan ?? 0) > 0 &&
+                      (formData.declared_interest_on_loan ?? 0) < (memberStatus.interest_on_loan_due ?? 0) && (
+                        <p className="mt-1 text-xs text-amber-700">
+                          Partial payment — {fmtBal((memberStatus.interest_on_loan_due ?? 0) - (formData.declared_interest_on_loan ?? 0))} will remain outstanding.
+                        </p>
+                      )}
                   </div>
 
                   <div>
                     <label htmlFor="declared_loan_repayment" className="block text-base font-semibold text-blue-900 mb-2">
                       Loan Repayment (K)
-                      {memberStatus && (memberStatus.loan_balance ?? 0) > 0 && (
-                        <span className="ml-2 text-xs font-normal text-amber-600">
-                          Outstanding: {fmtBal(memberStatus.loan_balance!)}
-                        </span>
-                      )}
                     </label>
+                    {memberStatus && (memberStatus.loan_balance ?? 0) > 0 && (
+                      <div className="mb-2 flex flex-wrap items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-300 rounded-lg text-sm">
+                        <span className="font-semibold text-amber-900">
+                          Outstanding loan balance:
+                        </span>
+                        <span className="font-bold text-amber-900">
+                          {fmtBal(memberStatus.loan_balance!)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormData((prev) => ({
+                              ...prev,
+                              declared_loan_repayment: memberStatus.loan_balance,
+                            }))
+                          }
+                          className="ml-auto px-2.5 py-1 bg-amber-600 text-white text-xs font-semibold rounded hover:bg-amber-700"
+                        >
+                          Use this amount
+                        </button>
+                      </div>
+                    )}
                     <input
                       type="number"
                       id="declared_loan_repayment"
@@ -953,6 +995,14 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       className="w-full"
                       placeholder="0.00"
                     />
+                    {memberStatus &&
+                      (memberStatus.loan_balance ?? 0) > 0 &&
+                      (formData.declared_loan_repayment ?? 0) > 0 &&
+                      (formData.declared_loan_repayment ?? 0) < (memberStatus.loan_balance ?? 0) && (
+                        <p className="mt-1 text-xs text-amber-700">
+                          Partial payment — {fmtBal((memberStatus.loan_balance ?? 0) - (formData.declared_loan_repayment ?? 0))} principal will remain outstanding.
+                        </p>
+                      )}
                   </div>
                 </div>
               </div>

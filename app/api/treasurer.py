@@ -19,6 +19,21 @@ from app.core.config import BANK_STATEMENTS_DIR
 router = APIRouter(prefix="/api/treasurer", tags=["treasurer"])
 
 
+@router.get("/reports/interest-revenue")
+def get_interest_revenue_report_endpoint(
+    cycle_id: str | None = None,
+    current_user: User = Depends(require_any_role("Treasurer", "Chairman", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Interest revenue rollup + drill-down.
+
+    Recognises full expected interest at loan origination (accrual basis).
+    Optional cycle_id filter scopes to a single cycle; omit for all-time.
+    """
+    from app.services.interest_revenue_report import get_interest_revenue_report
+    return get_interest_revenue_report(db, cycle_id=cycle_id)
+
+
 @router.get("/deposits/pending")
 def get_pending_deposits(
     current_user: User = Depends(get_current_user),
@@ -758,6 +773,13 @@ def get_active_loans(
     loans = db.query(Loan).filter(
         Loan.loan_status.in_(statuses)
     ).order_by(Loan.created_at.desc()).all()
+
+    # Drop loans whose disbursement JE has been reversed — the Loan row stays
+    # in the DB for audit, but the loan no longer represents real money on the
+    # books and shouldn't appear in any Loans tab (Active / At Risk / Defaulting
+    # / Paid Off). Filtering here once keeps every downstream calc clean.
+    from app.services.loan_repair import loan_has_live_disbursement
+    loans = [L for L in loans if loan_has_live_disbursement(db, L.id)]
 
     result = []
     for loan in loans:
@@ -1528,12 +1550,16 @@ def get_loans_report(
     target_year = target_date.year
     target_month = target_date.month
 
-    # Query all loans disbursed in the target month (both normal OPEN and reconciliation DISBURSED)
+    # Query all loans disbursed in the target month (both normal OPEN and reconciliation DISBURSED).
+    # Skip loans whose disbursement JE has been reversed — those Loan rows
+    # remain in the DB for audit but no longer represent real money.
+    from app.services.loan_repair import loan_has_live_disbursement
     loans = db.query(Loan).filter(
         Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
         extract("year", Loan.disbursement_date) == target_year,
         extract("month", Loan.disbursement_date) == target_month,
     ).order_by(Loan.disbursement_date.asc()).all()
+    loans = [L for L in loans if loan_has_live_disbursement(db, L.id)]
 
     # Track member IDs that already have disbursed loans to avoid duplicates
     disbursed_member_ids = set()

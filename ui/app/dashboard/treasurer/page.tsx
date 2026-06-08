@@ -116,6 +116,7 @@ export default function TreasurerDashboard() {
   const [pendingLoans, setPendingLoans] = useState<PendingLoanApplication[]>([]);
   const [activeLoans, setActiveLoans] = useState<ActiveLoan[]>([]);
   const [loanFilter, setLoanFilter] = useState<'active' | 'at_risk' | 'defaulting' | 'paid'>('active');
+  const [loanNameQuery, setLoanNameQuery] = useState('');
   const [showAllLoans, setShowAllLoans] = useState(false);
   const [showAllDeposits, setShowAllDeposits] = useState(false);
   const [showAllPendingLoans, setShowAllPendingLoans] = useState(false);
@@ -831,12 +832,18 @@ export default function TreasurerDashboard() {
         )}
 
         {/* Quick Actions */}
-        <div className="mb-4 flex gap-3">
+        <div className="mb-4 flex flex-wrap gap-3">
           <Link
             href="/dashboard/reconcile"
             className="inline-flex items-center px-4 py-2 bg-gradient-to-br from-blue-500 to-blue-600 border-2 border-blue-600 text-white rounded-lg font-semibold text-sm hover:from-blue-600 hover:to-blue-700 transition-all"
           >
             Reconciliation
+          </Link>
+          <Link
+            href="/dashboard/treasurer/reports/interest-revenue"
+            className="inline-flex items-center px-4 py-2 bg-gradient-to-br from-emerald-500 to-emerald-600 border-2 border-emerald-600 text-white rounded-lg font-semibold text-sm hover:from-emerald-600 hover:to-emerald-700 transition-all"
+          >
+            Loan/Revenue Report
           </Link>
         </div>
 
@@ -1005,16 +1012,55 @@ export default function TreasurerDashboard() {
                 ))}
               </div>
 
-              {activeLoans.length === 0 ? (
-                <p className="text-blue-700 text-sm text-center py-6">
-                  {loanFilter === 'paid' ? 'No paid-off loans' :
-                   loanFilter === 'at_risk' ? 'No at-risk loans' :
-                   loanFilter === 'defaulting' ? 'No defaulting loans' :
-                   'No active loans'}
-                </p>
-              ) : (
+              {/* Name search */}
+              <div className="mb-3 relative">
+                <input
+                  type="text"
+                  value={loanNameQuery}
+                  onChange={(e) => {
+                    setLoanNameQuery(e.target.value);
+                    setShowAllLoans(false);
+                  }}
+                  placeholder="Filter by first or last name…"
+                  className="w-full px-3 py-2 pr-8 text-sm border-2 border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 placeholder:text-blue-400"
+                />
+                {loanNameQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setLoanNameQuery('')}
+                    aria-label="Clear name filter"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-blue-400 hover:text-blue-700 text-sm"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+
+              {(() => {
+                const q = loanNameQuery.trim().toLowerCase();
+                const filteredLoans = q
+                  ? activeLoans.filter((l) =>
+                      (l.member_name || '').toLowerCase().includes(q),
+                    )
+                  : activeLoans;
+                if (filteredLoans.length === 0) {
+                  return (
+                    <p className="text-blue-700 text-sm text-center py-6">
+                      {q
+                        ? `No loans matching "${loanNameQuery}"`
+                        : loanFilter === 'paid'
+                          ? 'No paid-off loans'
+                          : loanFilter === 'at_risk'
+                            ? 'No at-risk loans'
+                            : loanFilter === 'defaulting'
+                              ? 'No defaulting loans'
+                              : 'No active loans'}
+                    </p>
+                  );
+                }
+                return (
                 <div className="space-y-2 max-h-[460px] overflow-y-auto">
-                  {(showAllLoans ? activeLoans : activeLoans.slice(0, 3)).map((loan) => (
+                  {(showAllLoans ? filteredLoans : filteredLoans.slice(0, 3)).map((loan) => (
                     <div
                       key={loan.id}
                       className="p-3 bg-gradient-to-r from-green-50 to-green-100 border-2 border-green-300 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
@@ -1086,18 +1132,19 @@ export default function TreasurerDashboard() {
                       </div>
                     </div>
                   ))}
-                  {activeLoans.length > 3 && (
+                  {filteredLoans.length > 3 && (
                     <button
                       onClick={() => setShowAllLoans(prev => !prev)}
                       className="w-full text-xs text-blue-600 font-semibold text-center pt-2 hover:text-blue-800 transition-colors"
                     >
                       {showAllLoans
                         ? 'Show less'
-                        : `+${activeLoans.length - 3} more`}
+                        : `+${filteredLoans.length - 3} more`}
                     </button>
                   )}
                 </div>
-              )}
+                );
+              })()}
             </div>
 
             {/* Pending Penalties - Compact Card */}

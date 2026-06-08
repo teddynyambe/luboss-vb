@@ -462,6 +462,71 @@ def compute_posted_breakdown(
     return posted
 
 
+def get_reconciliation_notes(
+    db: Session,
+    member_id: UUID,
+    year: int,
+    month: int,
+) -> list[dict]:
+    """Return human-readable notes from treasurer repair actions that affected
+    this member's category accounts within the given dealing month.
+
+    Used to surface the *actual* reason a posted amount differs from declared
+    (e.g. "Reverse Savings: paid duplicate of K500" rather than the generic
+    "treasurer reconciled" tooltip).
+
+    Looks at JournalEntries with repair-action source_types whose dealing_month
+    matches AND that have at least one line on a ledger account belonging to
+    this member.
+
+    Returns a list of {action, description, dealing_month} sorted by entry_date.
+    Excludes reversed JEs (their effect was undone).
+    """
+    from app.models.ledger import JournalEntry, JournalLine, LedgerAccount
+
+    REPAIR_TYPES = {
+        "transaction_reverse": "Reversed",
+        "transaction_split": "Split",
+        "reversal": "Reversed",
+        "penalty_reversal": "Penalty reversed",
+        "loan_consolidation": "Loan consolidated",
+        "repayment_split_adjustment": "Repayment split adjusted",
+        "interest_accrual_retrofit": "Interest accrual retrofit",
+    }
+
+    member_account_ids = (
+        db.query(LedgerAccount.id)
+        .filter(LedgerAccount.member_id == member_id)
+        .subquery()
+    )
+
+    rows = (
+        db.query(JournalEntry)
+        .join(JournalLine, JournalLine.journal_entry_id == JournalEntry.id)
+        .filter(
+            JournalEntry.source_type.in_(list(REPAIR_TYPES.keys())),
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.reversed_at.is_(None),
+            JournalEntry.dealing_month.isnot(None),
+            func.extract("year", JournalEntry.dealing_month) == year,
+            func.extract("month", JournalEntry.dealing_month) == month,
+            JournalLine.ledger_account_id.in_(member_account_ids),
+        )
+        .distinct()
+        .order_by(JournalEntry.entry_date.asc())
+        .all()
+    )
+
+    return [
+        {
+            "action": REPAIR_TYPES.get(je.source_type or "", je.source_type or "Repair"),
+            "description": je.description or "",
+            "dealing_month": je.dealing_month.isoformat() if je.dealing_month else None,
+        }
+        for je in rows
+    ]
+
+
 def get_member_penalties_balance(
     db: Session,
     member_id: UUID,
@@ -500,3 +565,115 @@ def get_member_penalties_balance(
 
     # LIABILITY: balance = credits - debits
     return max(Decimal("0.00"), total_credits - total_debits)
+
+
+def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]:
+    """Per-month cumulative loan + interest receivable balances for a member.
+
+    For each month from the member's earliest loan disbursement through today,
+    returns the end-of-month outstanding principal and outstanding interest
+    receivable. Outstanding interest follows the **accrual-at-origination**
+    convention: when a loan is disbursed, its full expected interest
+    (loan_amount × rate / 100) becomes receivable; interest payments draw
+    that down.
+
+    Months with no activity still appear, so the frontend can render a
+    continuous timeline.
+
+    Returns: list of dicts ordered oldest-first:
+        {
+            "month": "YYYY-MM-DD",   # first day of the month
+            "loan_balance": float,
+            "interest_balance": float,
+            "loans_disbursed_this_month": [
+                {"loan_id": str, "amount": float, "expected_interest": float},
+                ...
+            ],
+        }
+    """
+    from app.models.transaction import Loan, Repayment
+    from app.models.ledger import JournalEntry
+    from datetime import date as _date
+
+    # Skip loans whose disbursement has been reversed — the loan record stays
+    # in the table after reversal (for audit), but its ledger effect is undone
+    # so it shouldn't carry into running balances.
+    from app.services.loan_repair import loan_has_live_disbursement
+    all_loans = (
+        db.query(Loan)
+        .filter(Loan.member_id == member_id, Loan.disbursement_date.isnot(None))
+        .order_by(Loan.disbursement_date.asc())
+        .all()
+    )
+    loans = [L for L in all_loans if loan_has_live_disbursement(db, L.id)]
+    if not loans:
+        return []
+
+    earliest = min(L.disbursement_date for L in loans)
+    today = _date.today()
+
+    # Walk months from earliest disbursement → current month, inclusive.
+    months: list[_date] = []
+    y, m = earliest.year, earliest.month
+    while (y, m) <= (today.year, today.month):
+        months.append(_date(y, m, 1))
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
+
+    # Pre-compute live repayment totals (non-reversed JE) per loan per month.
+    rep_rows = (
+        db.query(Repayment, JournalEntry)
+        .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+        .filter(
+            Repayment.loan_id.in_([L.id for L in loans]),
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.reversed_at.is_(None),
+        )
+        .all()
+    )
+
+    timeline: list[dict] = []
+    for month_start in months:
+        # Cumulative figures as of end of this month.
+        next_month_start = (
+            _date(month_start.year + 1, 1, 1)
+            if month_start.month == 12
+            else _date(month_start.year, month_start.month + 1, 1)
+        )
+
+        principal_disbursed = Decimal("0.00")
+        interest_accrued = Decimal("0.00")
+        loans_this_month: list[dict] = []
+        for L in loans:
+            if L.disbursement_date >= next_month_start:
+                continue  # not yet disbursed at end of this month
+            principal_disbursed += L.loan_amount or Decimal("0.00")
+            li = (L.loan_amount or Decimal("0.00")) * (L.percentage_interest or Decimal("0.00")) / Decimal("100")
+            interest_accrued += li
+            if (L.disbursement_date.year, L.disbursement_date.month) == (month_start.year, month_start.month):
+                loans_this_month.append({
+                    "loan_id": str(L.id),
+                    "amount": float(L.loan_amount or 0),
+                    "expected_interest": float(li.quantize(Decimal("0.01"))),
+                })
+
+        principal_paid = Decimal("0.00")
+        interest_paid = Decimal("0.00")
+        for rep, _je in rep_rows:
+            if rep.repayment_date and rep.repayment_date < next_month_start:
+                principal_paid += rep.principal_amount or Decimal("0.00")
+                interest_paid += rep.interest_amount or Decimal("0.00")
+
+        loan_balance = max(Decimal("0.00"), principal_disbursed - principal_paid)
+        interest_balance = max(Decimal("0.00"), interest_accrued - interest_paid)
+
+        timeline.append({
+            "month": month_start.isoformat(),
+            "loan_balance": float(loan_balance.quantize(Decimal("0.01"))),
+            "interest_balance": float(interest_balance.quantize(Decimal("0.01"))),
+            "loans_disbursed_this_month": loans_this_month,
+        })
+
+    return timeline

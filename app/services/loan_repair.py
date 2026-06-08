@@ -27,6 +27,7 @@ from app.models.transaction import (
 )
 from app.models.ledger import JournalEntry, JournalLine, LedgerAccount, AccountType
 from app.services.accounting import create_journal_entry, get_dealing_month_date
+from app.services.transaction_repair import _require_description
 
 
 def _hyphenate_uuid(u: UUID) -> str:
@@ -45,6 +46,15 @@ def _live_disbursement_je(db: Session, loan_id: UUID) -> JournalEntry | None:
         )
         .first()
     )
+
+
+def loan_has_live_disbursement(db: Session, loan_id: UUID) -> bool:
+    """True if this loan's disbursement journal entry exists and has NOT been
+    reversed. Use this everywhere you'd otherwise be tempted to show a loan
+    that's been ledger-reversed — those loans should disappear from every
+    user-facing view (Loans cards, reports, balances) even though the Loan
+    row stays in the DB for audit."""
+    return _live_disbursement_je(db, loan_id) is not None
 
 
 def get_member_loan_state(db: Session, member_id: UUID) -> dict:
@@ -107,6 +117,15 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
 
         member_ledger_rep_credits += live_principal
 
+        # Accrual-at-origination: expected interest is the full charge on the loan,
+        # outstanding interest is what's still owed after live payments.
+        expected_interest = (
+            (loan.loan_amount or Decimal("0.00"))
+            * (loan.percentage_interest or Decimal("0.00"))
+            / Decimal("100")
+        ).quantize(Decimal("0.01"))
+        interest_outstanding = max(Decimal("0.00"), expected_interest - live_interest)
+
         loans_payload.append({
             "id": str(loan.id),
             "loan_amount": float(loan.loan_amount or 0),
@@ -120,6 +139,8 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
             "live_principal_paid": float(live_principal),
             "live_interest_paid": float(live_interest),
             "outstanding": float((loan.loan_amount or Decimal("0.00")) - live_principal),
+            "expected_interest": float(expected_interest),
+            "interest_outstanding": float(interest_outstanding),
             "created_at": loan.created_at.isoformat() if loan.created_at else None,
             "repayments": rep_items,
         })
@@ -127,6 +148,22 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
     active_count = sum(
         1 for L in loans
         if L.loan_status in (LoanStatus.OPEN, LoanStatus.DISBURSED)
+    )
+
+    # Interest totals across ALL loans (active + closed). Closed loans with
+    # interest still owed should remain visible in the summary so a treasurer
+    # sees the outstanding receivable they need to chase or write off.
+    total_interest_expected = sum(
+        (Decimal(str(l["expected_interest"])) for l in loans_payload),
+        Decimal("0.00"),
+    )
+    total_interest_paid = sum(
+        (Decimal(str(l["live_interest_paid"])) for l in loans_payload),
+        Decimal("0.00"),
+    )
+    total_interest_outstanding = sum(
+        (Decimal(str(l["interest_outstanding"])) for l in loans_payload),
+        Decimal("0.00"),
     )
 
     return {
@@ -137,6 +174,9 @@ def get_member_loan_state(db: Session, member_id: UUID) -> dict:
             "ledger_disbursed_net": float(member_ledger_disb_net),
             "ledger_repayments_principal": float(member_ledger_rep_credits),
             "ledger_outstanding": float(member_ledger_disb_net - member_ledger_rep_credits),
+            "interest_expected_total": float(total_interest_expected),
+            "interest_paid_total": float(total_interest_paid),
+            "interest_outstanding_total": float(total_interest_outstanding),
         },
     }
 
@@ -562,6 +602,63 @@ def close_loan(db: Session, loan_id: UUID, reason: str, user_id: UUID) -> dict:
     return {"id": str(loan.id), "loan_status": loan.loan_status.value, "reason": reason}
 
 
+def restore_loan_disbursement(
+    db: Session, loan_id: UUID, reason: str, user_id: UUID
+) -> dict:
+    """Un-reverse a loan's disbursement journal entry — the recovery action
+    for a disbursement that was reversed in error. Clears the reversed_by /
+    reversed_at on the most recent reversed disbursement JE for this loan,
+    bringing the K_amount back onto LOANS_RECEIVABLE so the ledger balances
+    against the repayments that may still be attached.
+
+    Refused if a live (un-reversed) disbursement JE already exists — that
+    would mean restoring would double-count the principal.
+    """
+    reason = _require_description(reason)
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+
+    # Refuse if there's already a live disbursement (avoid duplicates).
+    if _live_disbursement_je(db, loan.id) is not None:
+        raise ValueError(
+            "this loan already has a live disbursement journal entry; "
+            "nothing to restore"
+        )
+
+    # Find the most recently reversed disbursement JE for this loan.
+    reversed_je = (
+        db.query(JournalEntry)
+        .filter(
+            JournalEntry.source_type == "loan_disbursement",
+            JournalEntry.source_ref == _hyphenate_uuid(loan.id),
+            JournalEntry.reversed_by.isnot(None),
+        )
+        .order_by(JournalEntry.reversed_at.desc())
+        .first()
+    )
+    if reversed_je is None:
+        raise ValueError(
+            "no reversed disbursement journal entry found for this loan to restore"
+        )
+
+    reversed_je.reversed_by = None
+    reversed_je.reversed_at = None
+    # Stamp the restoration reason onto the JE so the audit trail shows why
+    # the original reversal was undone. Keep the previous text if any.
+    prev = (reversed_je.reversal_reason or "").strip()
+    note = f"[Restored by treasurer: {reason}]"
+    reversed_je.reversal_reason = f"{prev} {note}".strip() if prev else note
+
+    db.commit()
+    return {
+        "id": str(loan.id),
+        "restored_journal_entry_id": str(reversed_je.id),
+        "loan_status": loan.loan_status.value if loan.loan_status else None,
+        "reason": reason,
+    }
+
+
 def reverse_loan_disbursement(
     db: Session, loan_id: UUID, reason: str, user_id: UUID
 ) -> dict:
@@ -666,5 +763,80 @@ def move_all_repayments_for_loan(
         "to_loan_id": str(new_loan_id),
         "moved_repayment_ids": moved_ids,
         "count": len(moved_ids),
+        "reason": reason,
+    }
+
+
+def edit_loan_disbursement_date(
+    db: Session,
+    loan_id: UUID,
+    new_disbursement_date,  # date
+    reason: str,
+    user_id: UUID,
+) -> dict:
+    """Move a loan's disbursement date — useful for retrospective loans where
+    reconciliation defaulted to the approval day instead of the real disbursement.
+
+    Updates, atomically:
+      * Loan.disbursement_date
+      * Loan.effective_month (kept in sync — same field on the Loan model
+        used by reports for "what month did this borrowing belong to")
+      * Loan.repayment_start_date / repayment_end_date if previously derived
+        from disbursement_date (only recomputed when term_months is known and
+        the existing values look like the old default; never overwritten if
+        the treasurer set them manually to something off-grid)
+      * The disbursement JE's dealing_month (the reporting bucket the
+        Treasurer Loan/Revenue report groups by). entry_date is kept as the
+        audit-trail timestamp.
+
+    Repayment dates on this loan are NOT touched — those represent when
+    payments actually came in.
+    """
+    from datetime import date as _date, datetime as _datetime
+    from dateutil.relativedelta import relativedelta
+
+    reason = _require_description(reason)
+
+    if isinstance(new_disbursement_date, str):
+        new_disbursement_date = _date.fromisoformat(new_disbursement_date)
+    if not isinstance(new_disbursement_date, _date):
+        raise ValueError("new_disbursement_date must be a date or YYYY-MM-DD string")
+
+    today = _date.today()
+    if new_disbursement_date > today:
+        raise ValueError("disbursement date cannot be in the future")
+
+    loan = db.query(Loan).filter(Loan.id == loan_id).first()
+    if not loan:
+        raise ValueError("loan not found")
+
+    old_date = loan.disbursement_date
+    loan.disbursement_date = new_disbursement_date
+    loan.effective_month = new_disbursement_date
+
+    # Recompute term-derived window if we previously derived it ourselves.
+    if loan.number_of_instalments:
+        try:
+            term = int(loan.number_of_instalments)
+            if old_date and loan.repayment_start_date == old_date:
+                loan.repayment_start_date = new_disbursement_date
+            if old_date and loan.repayment_end_date == old_date + relativedelta(months=term):
+                loan.repayment_end_date = new_disbursement_date + relativedelta(months=term)
+        except (ValueError, TypeError):
+            pass
+
+    # Re-bucket the disbursement JE so the Loan/Revenue report groups it
+    # under the right month. entry_date stays as the real audit timestamp.
+    disb_je = _live_disbursement_je(db, loan.id)
+    if disb_je is not None:
+        from app.services.accounting import get_dealing_month_date
+        disb_je.dealing_month = get_dealing_month_date(db, loan.cycle_id, new_disbursement_date)
+
+    db.commit()
+    return {
+        "id": str(loan.id),
+        "old_disbursement_date": old_date.isoformat() if old_date else None,
+        "new_disbursement_date": new_disbursement_date.isoformat(),
+        "disbursement_journal_entry_id": str(disb_je.id) if disb_je else None,
         "reason": reason,
     }

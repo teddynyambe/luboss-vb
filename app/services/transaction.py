@@ -673,14 +673,37 @@ def approve_deposit(
                 "description": "Penalties payment"
             })
     
-    # Credit interest income and reduce loan receivable (if accounts provided)
-    if interest_on_loan > 0 and interest_income_account_id:
-        lines.append({
-            "account_id": interest_income_account_id,
-            "debit_amount": Decimal("0.00"),
-            "credit_amount": interest_on_loan,
-            "description": "Interest on loan payment"
-        })
+    # Interest payment draws down INTEREST_RECEIVABLE (the revenue was
+    # recognised in INTEREST_INCOME at loan origination, not here).
+    # Fallback: if INTEREST_RECEIVABLE doesn't exist (pre-accrual data /
+    # dev env without migration), keep the legacy behaviour of crediting
+    # INTEREST_INCOME — the ledger stays balanced either way and a warning
+    # is logged so the operator can run the seed migration.
+    if interest_on_loan > 0:
+        from app.models.ledger import LedgerAccount as _LA
+        interest_receivable = db.query(_LA).filter(
+            _LA.account_code == "INTEREST_RECEIVABLE"
+        ).first()
+        if interest_receivable:
+            lines.append({
+                "account_id": interest_receivable.id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": interest_on_loan,
+                "description": "Interest collected — draws down receivable"
+            })
+        elif interest_income_account_id:
+            import logging
+            logging.getLogger(__name__).warning(
+                "approve_deposit: INTEREST_RECEIVABLE missing; falling back to "
+                "legacy INTEREST_INCOME credit on deposit %s. Run migration "
+                "b8c9d0e1f2a3 to enable accrual-at-origination.", deposit.id,
+            )
+            lines.append({
+                "account_id": interest_income_account_id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": interest_on_loan,
+                "description": "Interest on loan payment (legacy — no receivable account)"
+            })
     
     if loan_repayment > 0 and loans_receivable_account_id:
         # Credit loan receivable (reduces the receivable balance)
@@ -953,12 +976,23 @@ def disburse_loan(
     disbursement_date_override: date = None,
 ) -> Loan:
     """Disburse a loan and post to ledger.
-    
-    Creates journal entry:
-    - Debit: Loans Receivable (asset)
-    - Credit: Bank Cash (asset)
-    
-    The loan is posted to the member's account (visible in loan balance).
+
+    Posts a single balanced journal entry that records BOTH the cash movement
+    and the accrued interest revenue:
+
+    - Dr Loans Receivable           (principal)
+    - Dr Interest Receivable        (full expected interest)
+    - Cr Bank Cash                  (principal disbursed)
+    - Cr Interest Income            (full expected interest, recognised NOW)
+
+    The interest is recognised in full at origination — that's the revenue
+    that backs this month's share-out, regardless of when the member actually
+    pays it. Subsequent interest payments draw down Interest Receivable, not
+    Interest Income.
+
+    Falls back to the pre-accrual two-line shape ONLY if INTEREST_RECEIVABLE
+    or INTEREST_INCOME ledger accounts are missing (e.g. dev environments
+    that haven't run the seed). In that case a warning is logged.
     """
     if isinstance(loan_id, str):
         loan_id = UUID(loan_id)
@@ -968,27 +1002,66 @@ def disburse_loan(
 
     if loan.loan_status not in [LoanStatus.APPROVED]:
         raise ValueError("Loan must be approved before disbursement")
-    
+
     disbursement_effective = disbursement_date_override or date.today()
+
+    # Resolve accrual accounts. Both must be present for the new shape.
+    interest_receivable = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_RECEIVABLE"
+    ).first()
+    interest_income = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME"
+    ).first()
+
+    expected_interest = (
+        (loan.loan_amount or Decimal("0.00"))
+        * (loan.percentage_interest or Decimal("0.00"))
+        / Decimal("100")
+    ).quantize(Decimal("0.01"))
+
+    lines = [
+        {
+            "account_id": loans_receivable_account_id,
+            "debit_amount": loan.loan_amount,
+            "credit_amount": Decimal("0.00"),
+            "description": f"Loan receivable - {loan.member_id}",
+        },
+        {
+            "account_id": bank_cash_account_id,
+            "debit_amount": Decimal("0.00"),
+            "credit_amount": loan.loan_amount,
+            "description": "Bank cash disbursed",
+        },
+    ]
+    if expected_interest > 0 and interest_receivable and interest_income:
+        lines.append({
+            "account_id": interest_receivable.id,
+            "debit_amount": expected_interest,
+            "credit_amount": Decimal("0.00"),
+            "description": (
+                f"Interest receivable — {loan.percentage_interest}% on "
+                f"K{loan.loan_amount} ({loan.number_of_instalments or '?'} mo)"
+            ),
+        })
+        lines.append({
+            "account_id": interest_income.id,
+            "debit_amount": Decimal("0.00"),
+            "credit_amount": expected_interest,
+            "description": "Interest income recognised at origination",
+        })
+    elif expected_interest > 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "disburse_loan: INTEREST_RECEIVABLE or INTEREST_INCOME account missing; "
+            "skipping accrual lines on loan %s. Run scripts/setup_ledger_accounts.py "
+            "and migration b8c9d0e1f2a3.", loan.id,
+        )
 
     # Create journal entry
     journal_entry = create_journal_entry(
         db=db,
         description=f"Loan disbursement for loan {loan.id}",
-        lines=[
-            {
-                "account_id": loans_receivable_account_id,
-                "debit_amount": loan.loan_amount,
-                "credit_amount": Decimal("0.00"),
-                "description": f"Loan receivable - {loan.member_id}"
-            },
-            {
-                "account_id": bank_cash_account_id,
-                "debit_amount": Decimal("0.00"),
-                "credit_amount": loan.loan_amount,
-                "description": "Bank cash disbursed"
-            }
-        ],
+        lines=lines,
         dealing_month=get_dealing_month_date(db, loan.cycle_id, disbursement_effective),
         cycle_id=loan.cycle_id,
         source_ref=str(loan.id),

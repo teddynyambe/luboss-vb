@@ -27,6 +27,8 @@ interface LoanRow {
   live_principal_paid: number;
   live_interest_paid: number;
   outstanding: number;
+  expected_interest: number;
+  interest_outstanding: number;
   created_at: string | null;
   repayments: Repayment[];
 }
@@ -39,6 +41,9 @@ interface LoanState {
     ledger_disbursed_net: number;
     ledger_repayments_principal: number;
     ledger_outstanding: number;
+    interest_expected_total: number;
+    interest_paid_total: number;
+    interest_outstanding_total: number;
   };
 }
 
@@ -82,13 +87,16 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     | 'reopen'
     | 'close'
     | 'reverse_disbursement'
+    | 'restore_disbursement'
     | 'reverse_all_reps'
-    | 'move_all_reps';
+    | 'move_all_reps'
+    | 'edit_disbursement_date';
   const [openMenuLoanId, setOpenMenuLoanId] = useState<string | null>(null);
   const [repairLoan, setRepairLoan] = useState<LoanRow | null>(null);
   const [repairAction, setRepairAction] = useState<RepairAction | null>(null);
   const [repairReason, setRepairReason] = useState('');
   const [repairTargetLoanId, setRepairTargetLoanId] = useState('');
+  const [repairNewDate, setRepairNewDate] = useState('');
   const [submittingRepair, setSubmittingRepair] = useState(false);
 
   const load = useCallback(() => {
@@ -229,6 +237,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairAction(action);
     setRepairReason('');
     setRepairTargetLoanId('');
+    setRepairNewDate(action === 'edit_disbursement_date' ? (loan.disbursement_date || '') : '');
     setOpenMenuLoanId(null);
   };
 
@@ -237,6 +246,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairAction(null);
     setRepairReason('');
     setRepairTargetLoanId('');
+    setRepairNewDate('');
   };
 
   const submitRepair = async () => {
@@ -257,6 +267,8 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         res = await api.post(`${base}/close`, { reason });
       } else if (repairAction === 'reverse_disbursement') {
         res = await api.post(`${base}/reverse-disbursement`, { reason });
+      } else if (repairAction === 'restore_disbursement') {
+        res = await api.post(`${base}/restore-disbursement`, { reason });
       } else if (repairAction === 'reverse_all_reps') {
         res = await api.post(`${base}/reverse-all-repayments`, { reason });
       } else if (repairAction === 'move_all_reps') {
@@ -267,6 +279,16 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         }
         res = await api.post(`${base}/move-all-repayments`, {
           new_loan_id: repairTargetLoanId,
+          reason,
+        });
+      } else if (repairAction === 'edit_disbursement_date') {
+        if (!repairNewDate) {
+          setError('Pick a new disbursement date.');
+          setSubmittingRepair(false);
+          return;
+        }
+        res = await api.post(`${base}/edit-disbursement-date`, {
+          new_disbursement_date: repairNewDate,
           reason,
         });
       }
@@ -286,8 +308,10 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
       case 'reopen': return 'Reopen loan';
       case 'close': return 'Force-close loan';
       case 'reverse_disbursement': return 'Reverse disbursement';
+      case 'restore_disbursement': return 'Restore disbursement';
       case 'reverse_all_reps': return 'Reverse all repayments';
       case 'move_all_reps': return 'Move all repayments to another loan';
+      case 'edit_disbursement_date': return 'Edit disbursement date';
     }
   };
 
@@ -299,10 +323,14 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         return 'Force-close this loan. No compensating ledger entry is posted — this only changes status.';
       case 'reverse_disbursement':
         return 'Reverses the disbursement journal entry on this loan. Refused if any live repayment is still attached — reverse or move them first.';
+      case 'restore_disbursement':
+        return 'Un-reverses a disbursement that was reversed in error. Brings the loan principal back onto the ledger so repayments balance against it. Refused if a live disbursement already exists.';
       case 'reverse_all_reps':
         return 'Reverses every live repayment attached to this loan and rolls each one’s deposit approval back to PENDING.';
       case 'move_all_reps':
         return 'Moves every repayment row (live and reversed) from this loan onto another loan owned by the same member. Pick the destination below.';
+      case 'edit_disbursement_date':
+        return 'Changes when this loan is considered to have been disbursed. Re-buckets the disbursement journal entry so the Loan/Revenue report groups it under the right month. For historical/retrospective loans where the exact date isn’t known, the last day of the borrowing month is a sensible convention.';
     }
   };
 
@@ -348,7 +376,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
       )}
 
       {/* Summary strip */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4 text-sm">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2 text-sm">
         <div className="px-3 py-2 bg-blue-50 rounded">
           <div className="text-xs text-blue-600">Active loans</div>
           <div className={`font-bold ${activeCount > 1 ? 'text-amber-700' : 'text-blue-900'}`}>
@@ -376,18 +404,50 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         </div>
       </div>
 
+      {/* Interest summary strip (accrual basis) */}
+      <div className="grid grid-cols-3 gap-2 mb-4 text-sm">
+        <div className="px-3 py-2 bg-emerald-50 rounded">
+          <div className="text-xs text-emerald-700">Interest accrued (all loans)</div>
+          <div className="font-bold text-emerald-900">{fmt(state.summary.interest_expected_total)}</div>
+        </div>
+        <div className="px-3 py-2 bg-emerald-50 rounded">
+          <div className="text-xs text-emerald-700">Interest paid (live)</div>
+          <div className="font-bold text-emerald-900">{fmt(state.summary.interest_paid_total)}</div>
+        </div>
+        <div
+          className={`px-3 py-2 rounded ${
+            state.summary.interest_outstanding_total > 0.01 ? 'bg-amber-50' : 'bg-emerald-50'
+          }`}
+        >
+          <div className="text-xs text-amber-700">Interest outstanding</div>
+          <div
+            className={`font-bold ${
+              state.summary.interest_outstanding_total > 0.01 ? 'text-amber-900' : 'text-emerald-900'
+            }`}
+          >
+            {fmt(state.summary.interest_outstanding_total)}
+          </div>
+        </div>
+      </div>
+
       {/* Loan rows */}
       <div className="space-y-3">
         {state.loans.map((loan) => (
           <div
             key={loan.id}
             className={`border rounded-lg p-3 ${
-              isActive(loan.loan_status) ? 'border-blue-300 bg-white' : 'border-gray-300 bg-gray-50'
+              !loan.has_live_disbursement_je
+                ? 'border-red-300 bg-red-50/40'
+                : isActive(loan.loan_status)
+                  ? 'border-blue-300 bg-white'
+                  : 'border-gray-300 bg-gray-50'
             }`}
           >
             <div className="flex flex-wrap justify-between gap-2 text-sm">
               <div>
-                <span className="font-mono text-xs text-gray-500">{loan.id.slice(0, 8)}</span>
+                <span className={`font-mono text-xs ${!loan.has_live_disbursement_je ? 'text-gray-400 line-through' : 'text-gray-500'}`}>
+                  {loan.id.slice(0, 8)}
+                </span>
                 <span
                   className={`ml-2 inline-block px-2 py-0.5 rounded text-xs font-semibold ${
                     isActive(loan.loan_status)
@@ -397,6 +457,14 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 >
                   {loan.loan_status}
                 </span>
+                {!loan.has_live_disbursement_je && (
+                  <span
+                    className="ml-2 inline-block px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-800"
+                    title="The disbursement journal entry for this loan has been reversed. The loan no longer contributes to ledger balances or reports — the record remains for audit only."
+                  >
+                    disbursement reversed
+                  </span>
+                )}
                 {!loan.application_id && (
                   <span className="ml-2 inline-block px-2 py-0.5 rounded text-xs bg-amber-100 text-amber-800">
                     no application
@@ -442,12 +510,21 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                           Force-close loan
                         </button>
                       )}
-                      <button
-                        onClick={() => openRepair(loan, 'reverse_disbursement')}
-                        className="block w-full px-3 py-2 hover:bg-red-50 text-red-700"
-                      >
-                        Reverse disbursement
-                      </button>
+                      {loan.has_live_disbursement_je ? (
+                        <button
+                          onClick={() => openRepair(loan, 'reverse_disbursement')}
+                          className="block w-full px-3 py-2 hover:bg-red-50 text-red-700"
+                        >
+                          Reverse disbursement
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => openRepair(loan, 'restore_disbursement')}
+                          className="block w-full px-3 py-2 hover:bg-emerald-50 text-emerald-700"
+                        >
+                          Restore disbursement
+                        </button>
+                      )}
                       <button
                         onClick={() => openRepair(loan, 'reverse_all_reps')}
                         className="block w-full px-3 py-2 hover:bg-red-50 text-red-700"
@@ -459,6 +536,12 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                         className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
                       >
                         Move all repayments…
+                      </button>
+                      <button
+                        onClick={() => openRepair(loan, 'edit_disbursement_date')}
+                        className="block w-full px-3 py-2 hover:bg-blue-50 text-gray-800"
+                      >
+                        Edit disbursement date…
                       </button>
                     </div>
                   )}
@@ -474,6 +557,17 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               </div>
               <div>
                 Outstanding: <strong>{fmt(loan.outstanding)}</strong>
+              </div>
+            </div>
+            <div className="mt-1 grid grid-cols-3 gap-2 text-xs text-emerald-700">
+              <div>
+                Interest accrued: <strong>{fmt(loan.expected_interest)}</strong>
+              </div>
+              <div>
+                Interest paid: <strong>{fmt(loan.live_interest_paid)}</strong>
+              </div>
+              <div className={loan.interest_outstanding > 0.01 ? 'text-amber-700' : ''}>
+                Interest outstanding: <strong>{fmt(loan.interest_outstanding)}</strong>
               </div>
             </div>
 
@@ -838,6 +932,25 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                       </option>
                     ))}
                 </select>
+              </div>
+            )}
+
+            {repairAction === 'edit_disbursement_date' && (
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">
+                  New disbursement date
+                </label>
+                <input
+                  type="date"
+                  value={repairNewDate}
+                  max={new Date().toISOString().slice(0, 10)}
+                  onChange={(e) => setRepairNewDate(e.target.value)}
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                />
+                <p className="text-[11px] text-gray-500">
+                  Current: <span className="font-mono">{repairLoan.disbursement_date || '—'}</span>.
+                  For retrospective loans, the last day of the borrowing month is a sensible convention.
+                </p>
               </div>
             )}
 

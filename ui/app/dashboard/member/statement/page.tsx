@@ -30,6 +30,12 @@ interface PostedItems {
   penalty?: number;
 }
 
+interface ReconciliationNote {
+  action: string;
+  description: string;
+  dealing_month: string | null;
+}
+
 interface SavingsEntry {
   id: string;
   date: string;        // "YYYY-MM-DD" or ISO
@@ -41,13 +47,22 @@ interface SavingsEntry {
   declaration_items?: DeclarationItems;
   posted_items?: PostedItems;
   has_reconciliation_discrepancy?: boolean;
+  reconciliation_notes?: ReconciliationNote[];
   is_excess_transfer?: boolean;
   excess_source?: string; // "social_fund" | "admin_fund"
+}
+
+interface MonthlyLoanBalance {
+  month: string;           // "YYYY-MM-DD" (first of month)
+  loan_balance: number;
+  interest_balance: number;
+  loans_disbursed_this_month: { loan_id: string; amount: number; expected_interest: number }[];
 }
 
 export default function MemberStatementPage() {
   const [bankStatements, setBankStatements] = useState<BankStatementItem[]>([]);
   const [savingsHistory, setSavingsHistory] = useState<SavingsEntry[]>([]);
+  const [monthlyLoanBalances, setMonthlyLoanBalances] = useState<MonthlyLoanBalance[]>([]);
   const [loading, setLoading] = useState(true);
 
   // PDF viewer state
@@ -64,11 +79,18 @@ export default function MemberStatementPage() {
   const loadData = async () => {
     const [stmtsRes, savingsRes] = await Promise.all([
       api.get<{ statements: BankStatementItem[] }>('/api/member/bank-statements'),
-      api.get<{ type: string; transactions: SavingsEntry[] }>('/api/member/transactions?type=savings'),
+      api.get<{
+        type: string;
+        transactions: SavingsEntry[];
+        monthly_loan_balances?: MonthlyLoanBalance[];
+      }>('/api/member/transactions?type=savings'),
     ]);
 
     if (stmtsRes.data) setBankStatements(stmtsRes.data.statements);
-    if (savingsRes.data) setSavingsHistory(savingsRes.data.transactions);
+    if (savingsRes.data) {
+      setSavingsHistory(savingsRes.data.transactions);
+      setMonthlyLoanBalances(savingsRes.data.monthly_loan_balances || []);
+    }
     setLoading(false);
   };
 
@@ -187,6 +209,7 @@ export default function MemberStatementPage() {
                   declarationItems: DeclarationItems | null;
                   postedItems: PostedItems | null;
                   hasDiscrepancy: boolean;
+                  reconciliationNotes: ReconciliationNote[];
                   deposited: number | null;
                 }>();
                 for (const entry of savingsHistory) {
@@ -197,6 +220,7 @@ export default function MemberStatementPage() {
                       declarationItems: null,
                       postedItems: null,
                       hasDiscrepancy: false,
+                      reconciliationNotes: [],
                       deposited: null,
                     });
                   }
@@ -205,6 +229,7 @@ export default function MemberStatementPage() {
                     row.declarationItems = entry.declaration_items ?? null;
                     row.postedItems = entry.posted_items ?? null;
                     row.hasDiscrepancy = !!entry.has_reconciliation_discrepancy;
+                    row.reconciliationNotes = entry.reconciliation_notes ?? [];
                   } else {
                     row.deposited = (row.deposited ?? 0) + entry.amount;
                   }
@@ -218,6 +243,15 @@ export default function MemberStatementPage() {
                 const fmt = (n: number | null) =>
                   n !== null ? `K ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—';
 
+                // Loan/interest balances keyed by "YYYY-MM" for fast lookup per row
+                const balanceByMonth = new Map<string, MonthlyLoanBalance>();
+                for (const b of monthlyLoanBalances) {
+                  balanceByMonth.set(b.month.substring(0, 7), b);
+                }
+                const hasAnyLoanActivity = monthlyLoanBalances.some(
+                  (b) => b.loan_balance > 0 || b.interest_balance > 0 || b.loans_disbursed_this_month.length > 0,
+                );
+
                 return (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
@@ -225,18 +259,40 @@ export default function MemberStatementPage() {
                         <tr className="border-b-2 border-blue-200">
                           <th className="text-left py-2 pr-4 text-blue-700 font-semibold">Month</th>
                           <th className="text-right py-2 pr-4 text-blue-700 font-semibold">Declaration</th>
-                          <th className="text-right py-2 text-blue-700 font-semibold">Approved Deposit</th>
+                          <th className="text-right py-2 pr-4 text-blue-700 font-semibold whitespace-nowrap">Approved Deposit</th>
+                          {hasAnyLoanActivity && (
+                            <>
+                              <th
+                                className="text-right py-2 pr-4 text-blue-700 font-semibold whitespace-nowrap"
+                                title="Outstanding loan principal at end of month (running balance)"
+                              >
+                                Loan Balance
+                              </th>
+                              <th
+                                className="text-right py-2 text-blue-700 font-semibold whitespace-nowrap"
+                                title="Outstanding interest receivable at end of month — full interest is accrued in the borrowing month and drawn down by payments"
+                              >
+                                Interest Balance
+                              </th>
+                            </>
+                          )}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-blue-100">
                         {rows.map((row) => (
                           <tr key={row.month}>
-                            <td className="py-2 pr-4 text-blue-800 whitespace-nowrap">
+                            <td className="py-2 pr-4 text-blue-800 whitespace-nowrap align-top">
                               {formatMonth(row.month)}
                               {row.hasDiscrepancy && (
                                 <span
                                   className="ml-2 text-amber-600"
-                                  title="Posted amounts differ from declared due to treasurer reconciliation. Declared figures (left) are the member's original commitment; actual posted amounts may have been split or reallocated by the treasurer."
+                                  title={
+                                    row.reconciliationNotes.length > 0
+                                      ? row.reconciliationNotes
+                                          .map((n) => `${n.action}: ${n.description}`)
+                                          .join('\n')
+                                      : "Posted amounts differ from declared due to treasurer reconciliation."
+                                  }
                                 >
                                   ⚙
                                 </span>
@@ -283,10 +339,46 @@ export default function MemberStatementPage() {
                                       );
                                     });
                                   })()}
+                                  {row.reconciliationNotes.length > 0 && (
+                                    <div className="mt-1 pt-1 border-t border-amber-200 text-[11px] text-amber-700 space-y-0.5 leading-tight">
+                                      {row.reconciliationNotes.map((n, i) => (
+                                        <div key={i} className="text-left">
+                                          <span className="font-semibold">{n.action}:</span> {n.description}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               ) : '—'}
                             </td>
-                            <td className="py-2 text-right font-semibold text-blue-900 whitespace-nowrap">{fmt(row.deposited)}</td>
+                            <td className="py-2 pr-4 text-right font-semibold text-blue-900 whitespace-nowrap align-top">{fmt(row.deposited)}</td>
+                            {hasAnyLoanActivity && (() => {
+                              const bal = balanceByMonth.get(row.month.substring(0, 7));
+                              const disbursedHere = bal?.loans_disbursed_this_month ?? [];
+                              return (
+                                <>
+                                  <td className="py-2 pr-4 text-right text-blue-800 whitespace-nowrap align-top">
+                                    {bal ? fmt(bal.loan_balance) : '—'}
+                                    {disbursedHere.length > 0 && (
+                                      <div className="text-[10px] font-normal text-emerald-700 mt-0.5">
+                                        +{disbursedHere.map((l) => fmt(l.amount)).join(', ')} new
+                                      </div>
+                                    )}
+                                  </td>
+                                  <td className="py-2 text-right text-blue-800 whitespace-nowrap align-top">
+                                    {bal ? fmt(bal.interest_balance) : '—'}
+                                    {disbursedHere.length > 0 && disbursedHere.some((l) => l.expected_interest > 0) && (
+                                      <div className="text-[10px] font-normal text-emerald-700 mt-0.5">
+                                        +{disbursedHere
+                                          .filter((l) => l.expected_interest > 0)
+                                          .map((l) => fmt(l.expected_interest))
+                                          .join(', ')} accrued
+                                      </div>
+                                    )}
+                                  </td>
+                                </>
+                              );
+                            })()}
                           </tr>
                         ))}
                       </tbody>
@@ -294,7 +386,17 @@ export default function MemberStatementPage() {
                         <tr className="border-t-2 border-blue-300 bg-blue-50">
                           <td className="py-2 pr-4 font-bold text-blue-900">Total</td>
                           <td className="py-2 pr-4 text-right font-bold text-blue-900 whitespace-nowrap">{fmt(totalDeclared)}</td>
-                          <td className="py-2 text-right font-bold text-blue-900 whitespace-nowrap">{fmt(totalDeposited)}</td>
+                          <td className="py-2 pr-4 text-right font-bold text-blue-900 whitespace-nowrap">{fmt(totalDeposited)}</td>
+                          {hasAnyLoanActivity && (
+                            <>
+                              <td className="py-2 pr-4 text-right text-blue-700 whitespace-nowrap text-xs italic">
+                                running
+                              </td>
+                              <td className="py-2 text-right text-blue-700 whitespace-nowrap text-xs italic">
+                                running
+                              </td>
+                            </>
+                          )}
                         </tr>
                       </tfoot>
                     </table>
