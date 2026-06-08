@@ -1868,10 +1868,21 @@ def get_account_transactions(
             # statement keeps showing the declaration on the left even when the
             # corresponding deposit was rejected or reversed (in which case the
             # right-hand "Approved Deposit" column simply shows blank).
+            # Include a declaration if ANY component was declared (not just
+            # savings). A declaration of "K50 penalty + K1,000 interest" with
+            # K0 savings was previously hidden, leaving its approved deposit
+            # orphaned on the right with no declaration column on the left.
+            from sqlalchemy import or_ as _or_
             declarations = db.query(Declaration).filter(
                 Declaration.member_id == member_profile.id,
-                Declaration.declared_savings_amount.isnot(None),
-                Declaration.declared_savings_amount > 0,
+                _or_(
+                    Declaration.declared_savings_amount > 0,
+                    Declaration.declared_social_fund > 0,
+                    Declaration.declared_admin_fund > 0,
+                    Declaration.declared_penalties > 0,
+                    Declaration.declared_loan_repayment > 0,
+                    Declaration.declared_interest_on_loan > 0,
+                ),
             ).order_by(Declaration.created_at.desc()).all()
             
             from app.services.accounting import compute_posted_breakdown as _posted_bd
@@ -3076,11 +3087,20 @@ def get_member_savings_history(
             "amount": float(deposit.amount)
         })
 
-    # Declarations as debit entries
+    # Declarations as debit entries — include any with ANY declared component,
+    # not just savings, so penalty-only / interest-only / loan-repayment-only
+    # declarations show up too.
+    from sqlalchemy import or_ as _or_
     declarations = db.query(Declaration).filter(
         Declaration.member_id == member_profile.id,
-        Declaration.declared_savings_amount.isnot(None),
-        Declaration.declared_savings_amount > 0
+        _or_(
+            Declaration.declared_savings_amount > 0,
+            Declaration.declared_social_fund > 0,
+            Declaration.declared_admin_fund > 0,
+            Declaration.declared_penalties > 0,
+            Declaration.declared_loan_repayment > 0,
+            Declaration.declared_interest_on_loan > 0,
+        ),
     ).order_by(Declaration.created_at.desc()).all()
 
     from app.services.accounting import compute_posted_breakdown as _posted_bd
