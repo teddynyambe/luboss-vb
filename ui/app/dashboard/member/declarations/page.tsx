@@ -652,12 +652,6 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                   </div>
                 )}
 
-                {error && (
-                  <div className="mb-4 md:mb-6 bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
-                    {error}
-                  </div>
-                )}
-
                 {/* Current Month Declaration Display */}
                 {loadingDeclaration ? (
                   <div className="mb-6 text-center py-4">
@@ -1021,6 +1015,14 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                         </p>
                       </div>
                     </div>
+                    {error && (
+                      <div
+                        role="alert"
+                        className="mb-3 bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 rounded-xl text-sm md:text-base font-medium"
+                      >
+                        {error}
+                      </div>
+                    )}
                     <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4">
                       {isEditing ? (
                         <>
@@ -1076,13 +1078,13 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                           <p className="text-sm text-yellow-700">{currentMonthDeclaration.rejected_deposit_proof.treasurer_comment || 'No comment provided'}</p>
                         </div>
                         <p className="text-sm md:text-base text-yellow-800 mb-3">
-                          Your deposit proof has been rejected. After updating your declaration, please go to the <strong>Payment Proof</strong> page to resubmit your deposit proof with any necessary corrections.
+                          Your proof of payment has been rejected. After updating your declaration, please go to the <strong>Proof of Payment (PoP)</strong> page to resubmit it with any necessary corrections.
                         </p>
                         <Link
                           href="/dashboard/member/payment-proof"
                           className="inline-block btn-primary"
                         >
-                          Go to Payment Proof Page
+                          Go to Proof of Payment (PoP)
                         </Link>
                       </div>
                     </div>

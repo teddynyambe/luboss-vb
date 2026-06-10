@@ -59,6 +59,20 @@ export default function PaymentProofPage() {
     }
   }, [activeTab]);
 
+  // Deep-link support: when the URL carries ?declaration=<id> (used by the
+  // To-Do List on the member dashboard), force the upload tab and pre-select
+  // the declaration once it's been loaded into state.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const declId = params.get('declaration');
+    if (!declId) return;
+    setActiveTab('upload');
+    if (declarations.some((d) => d.id === declId)) {
+      setSelectedDeclaration(declId);
+    }
+  }, [declarations]);
+
   // Auto-expand active deposits on initial load
   useEffect(() => {
     if (deposits.length > 0 && expandedDeposits.size === 0) {
@@ -80,20 +94,27 @@ export default function PaymentProofPage() {
       if (response.data && depositsResponse.data) {
         const declarations = Array.isArray(response.data) ? response.data : [];
         const deposits = Array.isArray(depositsResponse.data) ? depositsResponse.data : [];
-        
-        // Get declaration IDs that already have deposit proofs (any status)
-        const declarationsWithProofs = new Set(
+
+        // Declarations that already have a LIVE proof (submitted/awaiting
+        // treasurer or already approved) shouldn't be in the dropdown —
+        // a re-upload there would create a duplicate or conflict.
+        // Declarations whose only proof is REJECTED *should* be selectable
+        // so the member can correct and re-upload.
+        const declarationsWithLiveProof = new Set(
           deposits
-            .filter(d => d.declaration_id)
+            .filter(d => d.declaration_id && (d.status === 'submitted' || d.status === 'approved'))
             .map(d => d.declaration_id!)
         );
-        
-        // Filter: only show PENDING declarations that don't have any proof yet
-        const pendingWithoutProof = declarations.filter(d => 
-          d.status === 'pending' && !declarationsWithProofs.has(d.id)
+
+        // Surface declarations of ANY status that don't have a live proof —
+        // this includes the "0 amounts" case (an approved declaration with
+        // no proof ever uploaded), past pending declarations without proof,
+        // and declarations whose previous proof was rejected.
+        const needsProof = declarations.filter(
+          (d) => !declarationsWithLiveProof.has(d.id),
         );
-        
-        setDeclarations(pendingWithoutProof);
+
+        setDeclarations(needsProof);
       }
     } catch (err) {
       console.error('Error loading declarations:', err);
@@ -174,6 +195,19 @@ export default function PaymentProofPage() {
       setAmount('');
     }
   };
+
+  // Auto-fill the Deposit Amount whenever the selected declaration changes —
+  // catches every selection path (dropdown click, deep-link ?declaration=<id>,
+  // and the browser's default-first-option). Member can still type a different
+  // value over the top.
+  useEffect(() => {
+    if (!selectedDeclaration) return;
+    const declaration = declarations.find((d) => d.id === selectedDeclaration);
+    if (declaration) {
+      setAmount(calculateTotal(declaration).toFixed(2));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDeclaration, declarations]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -439,7 +473,7 @@ export default function PaymentProofPage() {
               <Link href="/dashboard/member" className="text-blue-600 hover:text-blue-800 text-base md:text-lg font-medium">
                 ← Back
               </Link>
-              <h1 className="text-lg md:text-2xl font-bold text-blue-900">Payment Proof</h1>
+              <h1 className="text-lg md:text-2xl font-bold text-blue-900">Proof of Payment (PoP)</h1>
             </div>
             <UserMenu />
           </div>
@@ -480,12 +514,6 @@ export default function PaymentProofPage() {
               {uploadSuccess && (
                 <div className="mb-4 md:mb-6 bg-green-100 border-2 border-green-400 text-green-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
                   ✓ Deposit proof uploaded successfully! Declaration status updated to PROOF. Awaiting treasurer approval. Redirecting to view...
-                </div>
-              )}
-
-              {uploadError && (
-                <div className="mb-4 md:mb-6 bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 md:py-4 rounded-xl text-base md:text-lg font-medium">
-                  {uploadError}
                 </div>
               )}
 
@@ -550,7 +578,9 @@ export default function PaymentProofPage() {
 
                   {selectedDecl && (
                     <div className="bg-blue-50 border-2 border-blue-300 rounded-xl p-4 md:p-5">
-                      <h3 className="text-lg font-bold text-blue-900 mb-3">Declaration Breakdown</h3>
+                      <h3 className="text-lg font-bold text-blue-900 mb-3">
+                        Declaration Breakdown — {formatMonth(selectedDecl.effective_month)}
+                      </h3>
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
                         {selectedDecl.declared_savings_amount !== null && selectedDecl.declared_savings_amount !== undefined && (
                           <div>
@@ -652,20 +682,30 @@ export default function PaymentProofPage() {
                     )}
                   </div>
 
-                  <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4 pt-6 border-t-2 border-blue-200">
-                    <Link
-                      href="/dashboard/member"
-                      className="btn-secondary text-center"
-                    >
-                      Cancel
-                    </Link>
-                    <button
-                      type="submit"
-                      disabled={uploadLoading}
-                      className="btn-primary disabled:opacity-50"
-                    >
-                      {uploadLoading ? 'Uploading...' : 'Upload Proof'}
-                    </button>
+                  <div className="pt-6 border-t-2 border-blue-200">
+                    {uploadError && (
+                      <div
+                        role="alert"
+                        className="mb-3 bg-red-100 border-2 border-red-400 text-red-800 px-4 py-3 rounded-xl text-sm md:text-base font-medium"
+                      >
+                        {uploadError}
+                      </div>
+                    )}
+                    <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4">
+                      <Link
+                        href="/dashboard/member"
+                        className="btn-secondary text-center"
+                      >
+                        Cancel
+                      </Link>
+                      <button
+                        type="submit"
+                        disabled={uploadLoading}
+                        className="btn-primary disabled:opacity-50"
+                      >
+                        {uploadLoading ? 'Uploading...' : 'Upload Proof'}
+                      </button>
+                    </div>
                   </div>
                 </form>
               )}
@@ -735,7 +775,17 @@ export default function PaymentProofPage() {
                       <span className="font-bold">♻️</span> Reconciliation entry (no file)
                     </span>
                   </div>
-                  {deposits.map((deposit) => (
+                  {[...deposits]
+                    .sort((a, b) => {
+                      // Sort by transaction month (effective_month) descending —
+                      // newest month at the top. Fall back to upload date when
+                      // effective_month is missing so a partial row still slots
+                      // somewhere sensible.
+                      const am = a.effective_month || a.uploaded_at || '';
+                      const bm = b.effective_month || b.uploaded_at || '';
+                      return bm.localeCompare(am);
+                    })
+                    .map((deposit) => (
                     <div
                       key={deposit.id}
                       className="bg-white border-2 border-blue-200 rounded-xl p-4 md:p-5 hover:shadow-lg transition-shadow"

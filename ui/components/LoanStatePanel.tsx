@@ -802,7 +802,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <li>
                 The linked <strong>deposit proof</strong> will be set to{' '}
                 <em>rejected</em> and the <strong>declaration</strong> back to <em>pending</em>,
-                so the member can edit and re-upload from the Payment Proof page.
+                so the member can edit and re-upload from the Proof of Payment (PoP) page.
               </li>
               <li>This action does not affect repayments on other loans.</li>
             </ul>

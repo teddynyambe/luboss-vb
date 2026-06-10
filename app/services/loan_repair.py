@@ -361,6 +361,18 @@ def reject_declaration(
             proof.rejected_at = datetime.now()
             proof.treasurer_comment = comment.strip()
             proof_ids_touched.append(str(proof.id))
+        # Whether the proof was APPROVED-and-just-rejected or already REJECTED,
+        # delete the file from disk to avoid accumulating redundant attachments.
+        # The DB row keeps upload_path for audit (column is NOT NULL anyway);
+        # callers serving the file should treat a missing file as "no longer
+        # available" rather than an error.
+        if proof.upload_path:
+            import os
+            try:
+                if os.path.isfile(proof.upload_path):
+                    os.remove(proof.upload_path)
+            except OSError:
+                pass
 
     declaration.status = DeclarationStatus.PENDING
     db.commit()
@@ -416,6 +428,16 @@ def reverse_repayment(
                 (proof.treasurer_comment + "\n" if proof.treasurer_comment else "")
                 + "Auto-rejected after repayment reversal from reconciliation."
             )
+            # Free the file from disk; DB row keeps upload_path for audit
+            # (column is NOT NULL — callers must treat missing files as
+            # "no longer available").
+            if proof.upload_path:
+                import os
+                try:
+                    if os.path.isfile(proof.upload_path):
+                        os.remove(proof.upload_path)
+                except OSError:
+                    pass
             proof_id = str(proof.id)
             if proof.declaration_id:
                 decl = db.query(Declaration).filter(Declaration.id == proof.declaration_id).first()

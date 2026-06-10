@@ -141,7 +141,7 @@ export default function ReconcilePage() {
         setMessage({
           type: 'success',
           text:
-            'Reconciliation draft saved as pending. Member must upload proof of payment via the Payment Proof page.',
+            'Reconciliation draft saved as pending. Member must upload proof of payment via the Proof of Payment (PoP) page.',
         });
       } else {
         setMessage({ type: 'error', text: res.error || 'Failed to save reconciliation' });
@@ -335,7 +335,7 @@ export default function ReconcilePage() {
             <div className="px-4 py-3 bg-amber-50 border-2 border-amber-300 rounded-xl text-sm text-amber-900">
               <strong>Reconciliation creates drafts, not ledger postings.</strong> Saving will
               create or update a <em>pending</em> declaration for this member-month. The member
-              must upload proof of payment via the Payment Proof page, and the treasurer must
+              must upload proof of payment via the Proof of Payment (PoP) page, and the treasurer must
               approve it through the normal queue before anything touches the ledger.
               Retrospective loans must come through the normal member loan-application flow,
               not reconciliation.

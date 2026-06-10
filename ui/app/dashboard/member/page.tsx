@@ -392,7 +392,7 @@ export default function MemberDashboard() {
                         href="/dashboard/member/payment-proof"
                         className="block p-5 md:p-6 bg-gradient-to-br from-blue-300 to-blue-400 text-white rounded-xl shadow-lg hover:shadow-xl active:shadow-inner transform active:scale-95 transition-all duration-200 border-2 border-blue-500"
                       >
-                        <h3 className="font-bold text-lg md:text-xl mb-2">Payment Proof</h3>
+                        <h3 className="font-bold text-lg md:text-xl mb-2">Proof of Payment (PoP)</h3>
                         <p className="text-sm md:text-base text-blue-100">Upload and view deposit proofs</p>
                       </Link>
                 <Link

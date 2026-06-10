@@ -2,13 +2,25 @@
 
 import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import UserMenu from '@/components/UserMenu';
+import { api } from '@/lib/api';
+
+interface TodoItem {
+  kind: string;
+  priority: number;
+  title: string;
+  description: string;
+  link: string;
+  declaration_id?: string;
+  effective_month?: string;
+}
 
 export default function DashboardPage() {
   const { user, loading } = useAuth();
   const router = useRouter();
+  const [todos, setTodos] = useState<TodoItem[]>([]);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -18,6 +30,20 @@ export default function DashboardPage() {
       router.push('/pending');
     }
   }, [user, loading, router]);
+
+  useEffect(() => {
+    if (!loading && user && user.approved) {
+      api
+        .get<{ todos: TodoItem[]; count: number }>('/api/member/todos')
+        .then((res) => {
+          if (res.data) setTodos(res.data.todos || []);
+        })
+        .catch(() => {
+          // Silent — the to-do list is best-effort and only meaningful for users
+          // with a member profile. Non-members simply get an empty list back.
+        });
+    }
+  }, [loading, user]);
 
   if (loading || !user) {
     return (
@@ -42,7 +68,52 @@ export default function DashboardPage() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24">
+      <main className="max-w-7xl mx-auto py-4 md:py-6 px-4 sm:px-6 lg:px-8 pt-20 md:pt-24 space-y-4 md:space-y-6">
+        {/* To-Do List — only rendered when there are pending member actions.
+            Non-member users (treasurer-only, admin-only, etc.) get an empty
+            payload from the backend and never see this card. */}
+        {todos.length > 0 && (
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl md:text-2xl font-bold text-blue-900">Your To-Do List</h2>
+              <span className="px-3 py-1 bg-amber-500 text-white text-sm font-semibold rounded-full">
+                {todos.length} pending
+              </span>
+            </div>
+            <ul className="space-y-2">
+              {todos.map((t, i) => {
+                const tone = (() => {
+                  switch (t.kind) {
+                    case 'declare_current_month': return 'bg-blue-50 border-blue-300 hover:bg-blue-100';
+                    case 'repair_rejected_declaration': return 'bg-red-50 border-red-300 hover:bg-red-100';
+                    case 'submit_pop_current_month': return 'bg-indigo-50 border-indigo-300 hover:bg-indigo-100';
+                    case 'repair_rejected_pop': return 'bg-red-50 border-red-300 hover:bg-red-100';
+                    case 'submit_unsubmitted_pop': return 'bg-amber-50 border-amber-300 hover:bg-amber-100';
+                    default: return 'bg-blue-50 border-blue-300 hover:bg-blue-100';
+                  }
+                })();
+                return (
+                  <li key={i}>
+                    <Link
+                      href={t.link}
+                      className={`flex items-start gap-3 p-3 md:p-4 rounded-lg border-2 ${tone} transition-colors`}
+                    >
+                      <span className="shrink-0 inline-flex items-center justify-center w-7 h-7 rounded-full bg-white border border-current text-xs font-bold">
+                        {i + 1}
+                      </span>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-blue-900">{t.title}</p>
+                        <p className="text-xs md:text-sm text-blue-700 mt-0.5">{t.description}</p>
+                      </div>
+                      <span className="shrink-0 text-blue-700 self-center">→</span>
+                    </Link>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
         <div className="card">
           <h2 className="text-2xl md:text-3xl font-bold text-blue-900 mb-6 md:mb-8">
             Welcome {user?.roles && Array.isArray(user.roles) && user.roles.length > 0 && (

@@ -49,6 +49,181 @@ class LoanApplicationCreate(BaseModel):
     borrowing_date: Optional[str] = None  # ISO YYYY-MM-DD; sets application_date on the record
 
 
+@router.get("/todos")
+def get_member_todos(
+    current_user: User = Depends(require_not_admin()),
+    db: Session = Depends(get_db),
+):
+    """Ordered to-do list of pending actions for the member.
+
+    Ordered by the group's monthly lifecycle:
+      1. Declare for the current month (if missing)
+      2. Revise rejected declarations (any month)
+      3. Submit Proof of Payment (PoP) for the current month declaration
+      4. Resubmit rejected PoP (any past month)
+      5. Submit any missing PoP for past declarations of any status (covers the
+         "0 amounts" case where a declaration is approved but no PoP was ever
+         uploaded)
+
+    Past months with no declaration at all are intentionally skipped — the
+    list is for items the member needs to act on, not historical gaps.
+    """
+    from datetime import date as _date
+    from app.models.transaction import (
+        Declaration, DeclarationStatus, DepositProof, DepositProofStatus,
+    )
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        return {"todos": [], "count": 0}
+
+    today = _date.today()
+    current_month = _date(today.year, today.month, 1)
+    current_month_label = today.strftime("%B %Y")
+
+    # Pull everything once, group in Python — small per-member volumes.
+    declarations = (
+        db.query(Declaration)
+        .filter(Declaration.member_id == member_profile.id)
+        .order_by(Declaration.effective_month.desc())
+        .all()
+    )
+    proofs = (
+        db.query(DepositProof)
+        .filter(DepositProof.member_id == member_profile.id)
+        .all()
+    )
+    proofs_by_declaration: dict = {}
+    for p in proofs:
+        if p.declaration_id:
+            proofs_by_declaration.setdefault(str(p.declaration_id), []).append(p)
+
+    def _has_live_proof(decl_id: str) -> bool:
+        # A "live" proof is one that's either pending treasurer review (SUBMITTED)
+        # or already approved — both block the member from re-uploading.
+        for p in proofs_by_declaration.get(decl_id, []):
+            if p.status in (DepositProofStatus.SUBMITTED.value, DepositProofStatus.APPROVED.value):
+                return True
+        return False
+
+    def _has_rejected_proof(decl_id: str) -> bool:
+        return any(
+            p.status == DepositProofStatus.REJECTED.value
+            for p in proofs_by_declaration.get(decl_id, [])
+        )
+
+    todos: list[dict] = []
+
+    # 1. Declare for current month? Only surface when the declaration window
+    #    is actually open. The window runs from the 15th of the current month
+    #    through the 5th of the next month — same convention as the
+    #    declarations page and as `_can_edit_declaration`. Outside that range,
+    #    prompting a member to declare is misleading.
+    #
+    #    (Note: the cycle_phase model has `monthly_start_day` / `monthly_end_day`
+    #    fields but they're used for dealing-month / reporting-bucket logic
+    #    elsewhere, not for the declaration window. Hardcoding here keeps the
+    #    member-facing prompts consistent with the form's own gating.)
+    window_open = _date(today.year, today.month, 15)
+    if today.month == 12:
+        window_close = _date(today.year + 1, 1, 5)
+    else:
+        window_close = _date(today.year, today.month + 1, 5)
+    declaration_window_open = window_open <= today <= window_close
+
+    current_month_decl = next(
+        (d for d in declarations
+         if d.effective_month.year == today.year and d.effective_month.month == today.month),
+        None,
+    )
+    if current_month_decl is None and declaration_window_open:
+        todos.append({
+            "kind": "declare_current_month",
+            "priority": 1,
+            "title": f"Make your {current_month_label} declaration",
+            "description": (
+                f"The declaration window is open until "
+                f"{window_close.strftime('%-d %B %Y')}. Declare your savings, "
+                "contributions and any loan repayments."
+            ),
+            "link": "/dashboard/member/declarations",
+            "effective_month": current_month.isoformat(),
+        })
+
+    # 2. Revise rejected declarations (any month)
+    for d in declarations:
+        if d.status == DeclarationStatus.REJECTED:
+            todos.append({
+                "kind": "repair_rejected_declaration",
+                "priority": 2,
+                "title": f"Revise {d.effective_month.strftime('%B %Y')} declaration",
+                "description": "This declaration was rejected and needs revision.",
+                "link": f"/dashboard/member/declarations?edit={d.id}&tab=create",
+                "declaration_id": str(d.id),
+                "effective_month": d.effective_month.isoformat(),
+            })
+
+    # 3. Submit PoP for current month declaration (if it exists and has no live proof)
+    if current_month_decl and not _has_live_proof(str(current_month_decl.id)):
+        todos.append({
+            "kind": "submit_pop_current_month",
+            "priority": 3,
+            "title": f"Submit Proof of Payment for {current_month_label}",
+            "description": "Your declaration is recorded — upload your bank/M-pesa proof of payment to complete it.",
+            "link": f"/dashboard/member/payment-proof?declaration={current_month_decl.id}",
+            "declaration_id": str(current_month_decl.id),
+            "effective_month": current_month_decl.effective_month.isoformat(),
+        })
+
+    # 4. Resubmit rejected PoP — past declarations with a REJECTED proof and no
+    #    subsequent live one. Skip if this is already the current month (covered above).
+    for d in declarations:
+        if d.effective_month.year == today.year and d.effective_month.month == today.month:
+            continue
+        decl_id = str(d.id)
+        if _has_rejected_proof(decl_id) and not _has_live_proof(decl_id):
+            todos.append({
+                "kind": "repair_rejected_pop",
+                "priority": 4,
+                "title": f"Resubmit Proof of Payment for {d.effective_month.strftime('%B %Y')}",
+                "description": "Your previous proof of payment was rejected. Upload a corrected one.",
+                "link": f"/dashboard/member/payment-proof?declaration={d.id}",
+                "declaration_id": decl_id,
+                "effective_month": d.effective_month.isoformat(),
+            })
+
+    # 5. Submit missing PoP — past declarations of ANY status with no PoP at all
+    #    (covers the "0 amounts" case where a declaration exists but nothing
+    #    was ever uploaded). Skip current month and skip declarations already
+    #    surfaced in items 2 or 4 above.
+    surfaced_ids = {t.get("declaration_id") for t in todos if t.get("declaration_id")}
+    for d in declarations:
+        if d.effective_month.year == today.year and d.effective_month.month == today.month:
+            continue
+        decl_id = str(d.id)
+        if decl_id in surfaced_ids:
+            continue
+        if proofs_by_declaration.get(decl_id):
+            continue  # has some proof — handled by items 3 or 4
+        todos.append({
+            "kind": "submit_unsubmitted_pop",
+            "priority": 5,
+            "title": f"Submit Proof of Payment for {d.effective_month.strftime('%B %Y')}",
+            "description": f"This {d.status.value} declaration has no proof of payment on file.",
+            "link": f"/dashboard/member/payment-proof?declaration={d.id}",
+            "declaration_id": decl_id,
+            "effective_month": d.effective_month.isoformat(),
+        })
+
+    # Stable sort: by priority first, then by effective_month descending so
+    # the most recent rejected items rise to the top within each priority.
+    todos.sort(key=lambda t: (t["priority"], t.get("effective_month") or ""), reverse=False)
+    # Within each priority, flip month so newer first (priority kept ascending).
+    todos.sort(key=lambda t: (t["priority"], -1 * int((t.get("effective_month") or "0000-00-00").replace("-", ""))))
+
+    return {"todos": todos, "count": len(todos)}
+
+
 @router.get("/reports/interest-revenue")
 def get_member_interest_revenue_report(
     cycle_id: Optional[str] = None,
@@ -2367,21 +2542,61 @@ def upload_deposit_proof(
     if declaration.member_id != member_profile.id:
         raise HTTPException(status_code=403, detail="You can only upload proof for your own declarations")
     
-    if declaration.status != DeclarationStatus.PENDING:
+    # A member can upload a fresh proof for any declaration in a state that
+    # still needs one: PENDING (no proof yet) or REJECTED (treasurer asked
+    # for revision). APPROVED declarations are immutable — the ledger has
+    # already moved against them and the treasurer must reject first.
+    if declaration.status not in (DeclarationStatus.PENDING, DeclarationStatus.REJECTED):
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot upload proof. Declaration status is {declaration.status.value}"
+            detail=(
+                f"Cannot upload proof — declaration status is "
+                f"{declaration.status.value}. Ask the treasurer to reject it "
+                "first if revisions are needed."
+            ),
         )
-    
-    # Check if proof already exists for this declaration
-    existing_proof = db.query(DepositProof).filter(
-        DepositProof.declaration_id == declaration_uuid
+
+    # If an existing proof is still pending or already approved, block — those
+    # are "live" and would conflict with a new upload. If the only existing
+    # proof was REJECTED, replace it (delete the stale file from disk, drop the
+    # row) so the member can submit a corrected version. Re-uploading after a
+    # rejection is the whole point.
+    import os
+    existing_live_proof = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration_uuid,
+        DepositProof.status.in_(
+            [DepositProofStatus.SUBMITTED.value, DepositProofStatus.APPROVED.value]
+        ),
     ).first()
-    if existing_proof:
+    if existing_live_proof:
         raise HTTPException(
             status_code=400,
-            detail="Deposit proof already uploaded for this declaration"
+            detail=(
+                f"A {existing_live_proof.status} proof of payment already "
+                "exists for this declaration. You can resubmit via the "
+                "'View Proofs' tab only if the treasurer rejects the current one."
+            ),
         )
+
+    # Clean up any rejected proofs (file + row) so disk doesn't accumulate
+    # redundant attachments. The audit trail of the rejection lives on the
+    # declaration's status history, not the orphan file.
+    rejected_proofs = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration_uuid,
+        DepositProof.status == DepositProofStatus.REJECTED.value,
+    ).all()
+    for rp in rejected_proofs:
+        if rp.upload_path:
+            try:
+                if os.path.isfile(rp.upload_path):
+                    os.remove(rp.upload_path)
+            except OSError:
+                # If file removal fails (already gone, perms), keep going —
+                # the DB cleanup is more important than the filesystem.
+                pass
+        db.delete(rp)
+    if rejected_proofs:
+        db.flush()
     
     # Get active cycle
     active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
