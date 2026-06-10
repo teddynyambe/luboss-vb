@@ -3045,27 +3045,46 @@ def get_group_summary_report(
     social_accs  = _accounts_by_member("social fund")
     admin_accs   = _accounts_by_member("admin fund")
 
-    # ── helper: aggregate journal credits per account_id ─────────────────────
-    def _credit_sum(acc_ids: list, before: datetime = None, since: datetime = None,
-                    source_type: str = None) -> dict:
+    # ── helper: net balance per account_id (credits − debits) over a window ──
+    # Source-type-agnostic so excess transfers, treasurer splits and any other
+    # legitimate adjustments to a member's savings flow into the totals. The
+    # date filter is on the reporting bucket (dealing_month) rather than the
+    # raw entry_date so a deposit approved in June but declared for May lands
+    # in May's BF for June's report (matches the Statement view).
+    def _net_balance(acc_ids: list,
+                     dealing_lt: date = None,
+                     dealing_ge: date = None,
+                     dealing_lt_strict: date = None) -> dict:
         if not acc_ids:
             return {}
-        q = (
+        q_cr = (
             db.query(JournalLine.ledger_account_id, sqlfunc.sum(JournalLine.credit_amount))
-            .join(JournalEntry)
+            .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
             .filter(
                 JournalLine.ledger_account_id.in_(acc_ids),
-                JournalLine.credit_amount > 0,
-                JournalEntry.reversed_by.is_(None)
+                JournalEntry.reversed_by.is_(None),
             )
         )
-        if source_type:
-            q = q.filter(JournalEntry.source_type == source_type)
-        if before is not None:
-            q = q.filter(JournalEntry.entry_date < before)
-        if since is not None:
-            q = q.filter(JournalEntry.entry_date >= since)
-        return {str(acc_id): float(v or 0) for acc_id, v in q.group_by(JournalLine.ledger_account_id).all()}
+        q_dr = (
+            db.query(JournalLine.ledger_account_id, sqlfunc.sum(JournalLine.debit_amount))
+            .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
+            .filter(
+                JournalLine.ledger_account_id.in_(acc_ids),
+                JournalEntry.reversed_by.is_(None),
+            )
+        )
+        if dealing_lt is not None:
+            q_cr = q_cr.filter(JournalEntry.dealing_month < dealing_lt)
+            q_dr = q_dr.filter(JournalEntry.dealing_month < dealing_lt)
+        if dealing_ge is not None:
+            q_cr = q_cr.filter(JournalEntry.dealing_month >= dealing_ge)
+            q_dr = q_dr.filter(JournalEntry.dealing_month >= dealing_ge)
+        if dealing_lt_strict is not None:
+            q_cr = q_cr.filter(JournalEntry.dealing_month < dealing_lt_strict)
+            q_dr = q_dr.filter(JournalEntry.dealing_month < dealing_lt_strict)
+        credits = {str(a): float(v or 0) for a, v in q_cr.group_by(JournalLine.ledger_account_id).all()}
+        debits  = {str(a): float(v or 0) for a, v in q_dr.group_by(JournalLine.ledger_account_id).all()}
+        return {a: credits.get(a, 0.0) - debits.get(a, 0.0) for a in {*credits, *debits}}
 
     def _member_val(accs: dict, amounts: dict, member_id) -> float:
         acc = accs.get(member_id)
@@ -3075,10 +3094,12 @@ def get_group_summary_report(
     social_ids = [a.id for a in social_accs.values()]
     admin_ids  = [a.id for a in admin_accs.values()]
 
-    sav_bf_map    = _credit_sum(sav_ids,    before=month_start, source_type="deposit_approval")
-    sav_month_map = _credit_sum(sav_ids,    since=month_start, before=month_end, source_type="deposit_approval")
-    social_bf_map = _credit_sum(social_ids, before=month_start, source_type="deposit_approval")
-    admin_bf_map  = _credit_sum(admin_ids,  before=month_start, source_type="deposit_approval")
+    # BF = net balance with dealing_month strictly before target month start
+    sav_bf_map    = _net_balance(sav_ids,    dealing_lt=target_date)
+    social_bf_map = _net_balance(social_ids, dealing_lt=target_date)
+    admin_bf_map  = _net_balance(admin_ids,  dealing_lt=target_date)
+    # This-month delta (used for the interest-share weighting)
+    sav_month_map = _net_balance(sav_ids, dealing_ge=target_date, dealing_lt_strict=next_month_date)
 
     total_savings_bf = sum(_member_val(savings_accs, sav_bf_map, m.id) for m, _ in members_users)
 

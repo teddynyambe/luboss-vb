@@ -149,31 +149,52 @@ export default function GroupReportPage() {
               </button>
             </div>
 
-            <div ref={tableRef} className="overflow-x-auto rounded-xl shadow-lg bg-white">
+            <div
+              ref={tableRef}
+              className="overflow-auto rounded-xl shadow-lg bg-white max-h-[calc(100vh-200px)]"
+            >
               <table className="text-xs whitespace-nowrap border-collapse w-full">
                 <thead>
-                  {/* Group headers */}
+                  {/* Group headers — sticky to the top of the scroll container */}
                   <tr className="bg-blue-700 text-white">
-                    <th className="sticky left-0 z-10 bg-blue-700 px-3 py-2 text-left font-bold border-r border-blue-500" rowSpan={2}>
+                    <th
+                      className="sticky left-0 top-0 z-40 bg-blue-700 px-3 py-2 text-left font-bold border-r border-blue-500"
+                      rowSpan={2}
+                    >
                       #
                     </th>
-                    <th className="sticky left-7 z-10 bg-blue-700 px-3 py-2 text-left font-bold border-r border-blue-500 min-w-[140px]" rowSpan={2}>
+                    <th
+                      className="sticky left-7 top-0 z-40 bg-blue-700 px-3 py-2 text-left font-bold border-r border-blue-500 min-w-[140px]"
+                      rowSpan={2}
+                    >
                       Name
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={5}>
+                    <th
+                      className="sticky top-0 z-30 bg-blue-700 px-2 py-1.5 text-center font-semibold border-r border-blue-500"
+                      colSpan={5}
+                    >
                       Brought Forward
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold border-r border-blue-500" colSpan={7}>
+                    <th
+                      className="sticky top-0 z-30 bg-blue-700 px-2 py-1.5 text-center font-semibold border-r border-blue-500"
+                      colSpan={7}
+                    >
                       This Month
                     </th>
-                    <th className="px-2 py-1.5 text-center font-semibold" colSpan={3}>
+                    <th
+                      className="sticky top-0 z-30 bg-blue-700 px-2 py-1.5 text-center font-semibold"
+                      colSpan={3}
+                    >
                       Month End
                     </th>
                   </tr>
                   <tr className="bg-blue-600 text-white">
-                    {activeCols.map(c => (
-                      <th key={c.key} title={c.title}
-                        className="px-3 py-1.5 text-right font-semibold border-l border-blue-500 min-w-[90px]">
+                    {activeCols.map((c) => (
+                      <th
+                        key={c.key}
+                        title={c.title}
+                        className="sticky top-[34px] z-30 bg-blue-600 px-3 py-1.5 text-right font-semibold border-l border-blue-500 min-w-[90px]"
+                      >
                         {c.label}
                       </th>
                     ))}
@@ -181,12 +202,16 @@ export default function GroupReportPage() {
                 </thead>
                 <tbody>
                   {summary.members.map((row, i) => {
-                    const paid = row.total_deposited > 0 && row.savings_declared > 0
-                      && row.total_deposited >= row.savings_declared;
+                    const paid =
+                      row.total_deposited > 0 &&
+                      row.savings_declared > 0 &&
+                      row.total_deposited >= row.savings_declared;
                     return (
-                      <tr key={row.name}
+                      <tr
+                        key={row.name}
                         className={`border-b border-blue-100 hover:bg-blue-50 transition-colors
-                          ${paid ? 'bg-green-50' : i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}`}>
+                          ${paid ? 'bg-green-50' : i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}`}
+                      >
                         <td className="sticky left-0 z-10 bg-inherit px-2 py-1.5 text-blue-500 border-r border-blue-100 text-right w-7">
                           {i + 1}
                         </td>
@@ -199,9 +224,11 @@ export default function GroupReportPage() {
                             >
                               {row.name}
                             </button>
-                          ) : row.name}
+                          ) : (
+                            row.name
+                          )}
                         </td>
-                        {activeCols.map(c => (
+                        {activeCols.map((c) => (
                           <td key={c.key} className="px-3 py-1.5 text-right text-blue-800 border-l border-blue-50">
                             {fmt(row[c.key] as number)}
                           </td>
@@ -212,12 +239,15 @@ export default function GroupReportPage() {
                 </tbody>
                 <tfoot>
                   <tr className="bg-blue-800 text-white font-bold border-t-2 border-blue-400">
-                    <td className="sticky left-0 z-10 bg-blue-800 px-2 py-2 border-r border-blue-600" />
-                    <td className="sticky left-7 z-10 bg-blue-800 px-3 py-2 border-r border-blue-600">
+                    <td className="sticky left-0 bottom-0 z-40 bg-blue-800 px-2 py-2 border-r border-blue-600" />
+                    <td className="sticky left-7 bottom-0 z-40 bg-blue-800 px-3 py-2 border-r border-blue-600">
                       TOTAL
                     </td>
-                    {activeCols.map(c => (
-                      <td key={c.key} className="px-3 py-2 text-right border-l border-blue-600">
+                    {activeCols.map((c) => (
+                      <td
+                        key={c.key}
+                        className="sticky bottom-0 z-30 bg-blue-800 px-3 py-2 text-right border-l border-blue-600"
+                      >
                         {fmtTotal(summary.totals[c.key] as number)}
                       </td>
                     ))}
