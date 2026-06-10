@@ -311,6 +311,7 @@ def split_transaction(
     amount: Decimal,
     description: str,
     user_id: UUID,
+    penalty_type_id: UUID | None = None,
 ) -> dict:
     """Reallocate `amount` from this line's category to `target_category`.
 
@@ -318,6 +319,13 @@ def split_transaction(
         Debit  source category account  by `amount`
         Credit target category account  by `amount`
     The original line is untouched. Balances on both categories shift.
+
+    When the target category is ``penalty`` and ``penalty_type_id`` is provided,
+    a paid ``PenaltyRecord`` of that type is also created for the member, and
+    the JE description names the penalty type explicitly (e.g. "Penalty —
+    Late Loan Application K150") so the books read clearly instead of using
+    the generic word "Penalty". This is the supported way to tag a paid
+    penalty by type without restructuring the chart of accounts.
     """
     desc = _require_description(description)
     if target_category not in CATEGORIES:
@@ -328,7 +336,14 @@ def split_transaction(
         raise ValueError("Cannot split a reversed transaction.")
 
     src_category = _account_category(src_account.account_name)
-    if src_category == target_category:
+    # Same-category is only legal for penalty → penalty when a specific
+    # penalty type is being attached (the "tag" path below skips the
+    # money-moving JE and just creates a PenaltyRecord).
+    if src_category == target_category and not (
+        src_category == "penalty"
+        and target_category == "penalty"
+        and penalty_type_id is not None
+    ):
         raise ValueError("Target category must differ from the source category.")
 
     member_id = src_account.member_id
@@ -354,37 +369,109 @@ def split_transaction(
             f"Split amount ({amt}) exceeds this line's current value ({source_signed})."
         )
 
-    new_je = create_journal_entry(
-        db=db,
-        description=(
-            f"Treasurer split {amt} from {src_category} to {target_category}: {desc}"
-        )[:255],
-        dealing_month=je.dealing_month,
-        cycle_id=je.cycle_id,
-        source_type="transaction_split",
-        source_ref=str(line.id),
-        lines=[
-            {
-                "account_id": src_account.id,
-                "debit_amount": amt,
-                "credit_amount": Decimal("0.00"),
-                "description": f"Split out to {target_category}",
-            },
-            {
-                "account_id": target_account.id,
-                "debit_amount": Decimal("0.00"),
-                "credit_amount": amt,
-                "description": f"Split in from {src_category}",
-            },
-        ],
-        created_by=user_id,
+    # Resolve penalty type (only meaningful when target is penalty).
+    from app.models.transaction import PenaltyType, PenaltyRecord, PenaltyRecordStatus
+    penalty_type = None
+    if penalty_type_id is not None:
+        if target_category != "penalty":
+            raise ValueError("penalty_type_id is only valid when target_category = 'penalty'")
+        penalty_type = db.query(PenaltyType).filter(PenaltyType.id == penalty_type_id).first()
+        if not penalty_type:
+            raise ValueError("penalty_type not found")
+
+    # Build descriptions that name the specific penalty type when present.
+    target_label = (
+        f"penalty ({penalty_type.name})"
+        if penalty_type is not None
+        else target_category.replace("_", " ")
     )
+    src_label = src_category.replace("_", " ")
+
+    # "Tag" path: source AND target are penalty, plus a specific type is set.
+    # No money moves between accounts — we just create a PenaltyRecord linked
+    # to the *existing* JE so reports can recognise this K_x as the specific
+    # penalty type going forward. Posting a same-account net-zero JE would
+    # only clutter the ledger.
+    tag_mode = (
+        src_category == "penalty"
+        and target_category == "penalty"
+        and penalty_type is not None
+    )
+
+    new_je = None
+    if not tag_mode:
+        header_desc = (
+            f"Split K{amt} from {src_label} → {target_label}: {desc}"
+        )[:255]
+        src_line_desc = f"Reallocated to {target_label}"[:255]
+        if penalty_type is not None:
+            target_line_desc = f"{penalty_type.name} — K{amt} (split from {src_label})"[:255]
+        else:
+            target_line_desc = f"Split in from {src_label}"
+
+        new_je = create_journal_entry(
+            db=db,
+            description=header_desc,
+            dealing_month=je.dealing_month,
+            cycle_id=je.cycle_id,
+            source_type="transaction_split",
+            source_ref=str(line.id),
+            lines=[
+                {
+                    "account_id": src_account.id,
+                    "debit_amount": amt,
+                    "credit_amount": Decimal("0.00"),
+                    "description": src_line_desc,
+                },
+                {
+                    "account_id": target_account.id,
+                    "debit_amount": Decimal("0.00"),
+                    "credit_amount": amt,
+                    "description": target_line_desc,
+                },
+            ],
+            created_by=user_id,
+        )
+
+    # Create the paid PenaltyRecord whether we posted a JE or just tagged.
+    # In tag mode we link it to the existing JE so the books carry the
+    # type-by-type traceability without extra ledger entries.
+    penalty_record_id = None
+    if penalty_type is not None:
+        rec = PenaltyRecord(
+            member_id=member_id,
+            penalty_type_id=penalty_type.id,
+            status=PenaltyRecordStatus.PAID.value,
+            created_by=user_id,
+            approved_by=user_id,
+            approved_at=datetime.now(),
+            journal_entry_id=(new_je.id if new_je is not None else je.id),
+            notes=(
+                (
+                    f"Tagged via Posted Transactions — K{amt} penalty entry on "
+                    f"{je.dealing_month} assigned to type {penalty_type.name}. {desc}"
+                )
+                if tag_mode
+                else (
+                    f"Tagged via Posted Transactions split — "
+                    f"K{amt} reallocated from {src_label} on {je.dealing_month}. {desc}"
+                )
+            )[:1000],
+        )
+        db.add(rec)
+        db.flush()
+        penalty_record_id = str(rec.id)
+
     db.commit()
     return {
-        "new_journal_entry_id": str(new_je.id),
+        "new_journal_entry_id": str(new_je.id) if new_je is not None else None,
+        "tagged_only": tag_mode,
         "amount": float(amt),
         "from_category": src_category,
         "to_category": target_category,
+        "penalty_type_id": str(penalty_type.id) if penalty_type else None,
+        "penalty_type_name": penalty_type.name if penalty_type else None,
+        "penalty_record_id": penalty_record_id,
         "reason": desc,
     }
 

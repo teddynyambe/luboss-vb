@@ -66,6 +66,32 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
   const [splitTarget, setSplitTarget] = useState<Category | ''>('');
   const [splitAmount, setSplitAmount] = useState('');
   const [splitDesc, setSplitDesc] = useState('');
+  const [splitPenaltyTypeId, setSplitPenaltyTypeId] = useState<string>('');
+
+  interface PenaltyTypeOption {
+    id: string;
+    name: string;
+    fee_amount: number;
+    description: string | null;
+  }
+  const [penaltyTypes, setPenaltyTypes] = useState<PenaltyTypeOption[]>([]);
+
+  useEffect(() => {
+    // Lazy-fetch the penalty-type catalog the first time the modal opens with
+    // the penalty target — cheap, but no point loading on every panel render.
+    if (splitTarget === 'penalty' && penaltyTypes.length === 0) {
+      api
+        .get<PenaltyTypeOption[]>('/api/chairman/reconcile/penalty-types')
+        .then((res) => {
+          if (res.data) setPenaltyTypes(res.data);
+        });
+    }
+    // Clear the picked penalty type whenever the target changes off 'penalty'.
+    if (splitTarget !== 'penalty' && splitPenaltyTypeId) {
+      setSplitPenaltyTypeId('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [splitTarget]);
   const [splitBusy, setSplitBusy] = useState(false);
 
   const [moveLine, setMoveLine] = useState<TxLine | null>(null);
@@ -123,17 +149,23 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
     }
     setSplitBusy(true);
     try {
+      if (splitTarget === 'penalty' && !splitPenaltyTypeId) {
+        setError('Pick the specific penalty type before confirming the split.');
+        return;
+      }
       const res = await api.post(
         `/api/chairman/reconcile/transactions/${splitLine.id}/split`,
         {
           target_category: splitTarget,
           amount: amt,
           description: splitDesc.trim(),
+          penalty_type_id: splitTarget === 'penalty' ? splitPenaltyTypeId : null,
         }
       );
       if (res.error) setError(res.error);
       else {
         setSplitLine(null); setSplitDesc(''); setSplitAmount(''); setSplitTarget('');
+        setSplitPenaltyTypeId('');
         load();
       }
     } finally { setSplitBusy(false); }
@@ -324,8 +356,16 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
                   className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm">
                   <option value="">Pick…</option>
                   {(['savings','social_fund','admin_fund','penalty'] as Category[])
-                    .filter((c) => c !== splitLine.category)
-                    .map((c) => <option key={c} value={c}>{CATEGORY_LABEL[c]}</option>)}
+                    // Same-category split is only useful for penalty → penalty
+                    // (the "tag a specific penalty type" path). Keep it filtered
+                    // out for the other categories where it'd be a no-op.
+                    .filter((c) => c !== splitLine.category || c === 'penalty')
+                    .map((c) => (
+                      <option key={c} value={c}>
+                        {CATEGORY_LABEL[c]}
+                        {c === splitLine.category && c === 'penalty' ? ' (tag a specific type)' : ''}
+                      </option>
+                    ))}
                 </select>
               </div>
               <div>
@@ -335,6 +375,30 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
                   className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm" />
               </div>
             </div>
+            {splitTarget === 'penalty' && (
+              <div>
+                <label className="block text-xs font-semibold text-blue-900">
+                  Penalty type <span className="text-red-600">*</span>
+                </label>
+                <select
+                  value={splitPenaltyTypeId}
+                  onChange={(e) => setSplitPenaltyTypeId(e.target.value)}
+                  className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                >
+                  <option value="">Pick the specific penalty type…</option>
+                  {penaltyTypes.map((pt) => (
+                    <option key={pt.id} value={pt.id}>
+                      {pt.name} — K{pt.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-[11px] text-gray-500">
+                  {splitLine.category === 'penalty'
+                    ? 'Source is already a Penalty line — nothing moves on the ledger. The K_x is just tagged with this specific penalty type so reports can recognise income by type.'
+                    : 'The split is tagged with this type and a paid PenaltyRecord is created, so reports can show penalty income by specific type.'}
+                </p>
+              </div>
+            )}
             <label className="block text-xs font-semibold text-blue-900">Reason (required)</label>
             <textarea
               rows={3}
@@ -347,7 +411,13 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
               <button onClick={() => setSplitLine(null)} disabled={splitBusy}
                 className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800">Cancel</button>
               <button onClick={doSplit}
-                disabled={splitBusy || !splitTarget || tooShort(splitDesc) || !splitAmount}
+                disabled={
+                  splitBusy ||
+                  !splitTarget ||
+                  tooShort(splitDesc) ||
+                  !splitAmount ||
+                  (splitTarget === 'penalty' && !splitPenaltyTypeId)
+                }
                 className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 disabled:opacity-50">
                 {splitBusy ? 'Splitting…' : 'Confirm Split'}
               </button>

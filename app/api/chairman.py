@@ -1970,6 +1970,11 @@ class SplitTransactionRequest(BaseModel):
     target_category: str  # savings | social_fund | admin_fund | penalty
     amount: float
     description: str
+    # Optional — only used when target_category = 'penalty'. Tags the split as
+    # a specific penalty type so the books (and the per-type penalty report)
+    # can recognise revenue against the right category instead of a generic
+    # "Penalty" line.
+    penalty_type_id: str | None = None
 
 
 class MoveTransactionRequest(BaseModel):
@@ -2038,6 +2043,12 @@ def post_split_transaction(
         line_uuid = UUID(line_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid line_id")
+    penalty_type_uuid = None
+    if body.penalty_type_id:
+        try:
+            penalty_type_uuid = UUID(body.penalty_type_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid penalty_type_id")
     try:
         result = split_transaction(
             db=db,
@@ -2046,6 +2057,7 @@ def post_split_transaction(
             amount=Decimal(str(body.amount)),
             description=body.description,
             user_id=current_user.id,
+            penalty_type_id=penalty_type_uuid,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2055,10 +2067,35 @@ def post_split_transaction(
         action="Posted transaction split",
         details=(
             f"line={line_id} amount={body.amount} target={body.target_category} "
+            f"penalty_type={result.get('penalty_type_name') or '-'} "
             f"reason={body.description[:120]}"
         ),
     )
     return result
+
+
+@router.get("/reconcile/penalty-types")
+def get_penalty_types_for_split(
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Active PenaltyType catalog for the Split modal's type picker."""
+    from app.models.transaction import PenaltyType
+    types = (
+        db.query(PenaltyType)
+        .filter(PenaltyType.enabled == "1")
+        .order_by(PenaltyType.name.asc())
+        .all()
+    )
+    return [
+        {
+            "id": str(t.id),
+            "name": t.name,
+            "fee_amount": float(t.fee_amount or 0),
+            "description": t.description,
+        }
+        for t in types
+    ]
 
 
 @router.post("/reconcile/transactions/{line_id}/move")

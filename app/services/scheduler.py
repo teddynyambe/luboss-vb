@@ -16,10 +16,11 @@ from app.db.base import SessionLocal
 from app.models.transaction import (
     Declaration, DeclarationStatus, Loan, LoanStatus,
 )
-from app.models.cycle import Cycle, CycleStatus
+from app.models.cycle import Cycle, CycleStatus  # noqa: F401 — kept for future use
 from app.models.member import MemberProfile, MemberStatus
 from app.models.user import User, UserRoleEnum
-from app.services.transaction import post_excess_contributions
+# post_excess_contributions used to be called from this scheduler — disabled
+# (see _transfer_excess_contributions stub below).
 
 logger = logging.getLogger(__name__)
 
@@ -92,57 +93,18 @@ def _close_paid_off_loans(db) -> List[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Job 2: Transfer excess admin/social fund contributions to savings
+# Job 2: Transfer excess admin/social fund contributions to savings — DISABLED
 # ---------------------------------------------------------------------------
+# This job used to sweep overpayments on Social Fund / Admin Fund into the
+# member's Savings account. It produced negative balances on monthly reports
+# and made reconciliation painful, so it has been turned off. If a real
+# reclassification is needed, the treasurer can do it manually via Posted
+# Transactions → Split. We keep the function as a stub returning an empty
+# list so the orchestrator below doesn't need any changes.
 
 def _transfer_excess_contributions(db) -> List[dict]:
-    """For every active member, transfer any excess social/admin fund to savings.
-
-    Returns a list of dicts describing each transfer (for the report email).
-    """
-    active_cycle = db.query(Cycle).filter(
-        Cycle.status == CycleStatus.ACTIVE,
-    ).first()
-    if not active_cycle:
-        return []
-
-    approved_by = active_cycle.created_by
-
-    active_members = db.query(MemberProfile).filter(
-        MemberProfile.status == MemberStatus.ACTIVE,
-    ).all()
-
-    transfers: List[dict] = []
-    for member in active_members:
-        result = post_excess_contributions(
-            db=db,
-            member_id=member.id,
-            cycle=active_cycle,
-            effective_month=active_cycle.start_date,
-            approved_by=approved_by,
-        )
-        social_excess = float(result["social_excess"])
-        admin_excess = float(result["admin_excess"])
-
-        if social_excess > 0 or admin_excess > 0:
-            user = db.query(User).filter(User.id == member.user_id).first()
-            member_name = "Unknown"
-            if user:
-                member_name = f"{(user.first_name or '').strip().title()} {(user.last_name or '').strip().title()}".strip()
-
-            transfers.append({
-                "member_name": member_name,
-                "social_excess": social_excess,
-                "admin_excess": admin_excess,
-            })
-
-    if transfers:
-        logger.info(
-            "Scheduler transferred excess contributions for %d member(s)",
-            len(transfers),
-        )
-
-    return transfers
+    """Excess-contribution sweep is disabled. Returns no transfers."""
+    return []
 
 
 # ---------------------------------------------------------------------------
