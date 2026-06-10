@@ -157,6 +157,43 @@ export default function DeclarationsPage() {
     // Delay to ensure cycles are loaded first
     setTimeout(checkEditParam, 500);
     loadCurrentMonthDeclaration();
+
+    // If the member has a rejected (or pending) declaration that needs
+    // revision, pull the most recent one into edit mode automatically.
+    // Without this, the page lands on a fresh-create form for the *current*
+    // month — which gets the Submit button greyed because the window for
+    // the current month isn't necessarily open. The treasurer-rejection
+    // flow is the most common path here, so we make sure it Just Works.
+    //
+    // We only auto-load when there's no explicit ?edit=<id> URL param
+    // (checkEditParam above already handles that case).
+    const autoLoadRejected = async () => {
+      if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('edit')) {
+        return;
+      }
+      try {
+        const response = await memberApi.getDeclarations();
+        if (!response.data) return;
+        const declarations = Array.isArray(response.data) ? response.data : [];
+        const needsRevision = declarations
+          .filter(
+            (d) =>
+              (d.status || '').toLowerCase() === 'rejected' ||
+              (d.status || '').toLowerCase() === 'pending' ||
+              !!d.rejected_deposit_proof,
+          )
+          .sort((a, b) =>
+            (b.effective_month || '').localeCompare(a.effective_month || ''),
+          );
+        if (needsRevision.length > 0) {
+          loadDeclarationForEdit(needsRevision[0].id);
+          setActiveTab('create');
+        }
+      } catch {
+        // best-effort
+      }
+    };
+    setTimeout(autoLoadRejected, 700);
   }, []);
 
   // Check for late declaration penalty when cycle or effective month changes (only for new declarations)
