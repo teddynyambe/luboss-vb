@@ -1788,6 +1788,17 @@ async def update_bank_statement(
         with open(file_path, "wb") as f:
             f.write(content)
 
+        # Clean up the previous file so we don't accumulate orphans on disk
+        # whenever a treasurer/chairman corrects a mistaken upload.
+        old_path = stmt.upload_path
+        if old_path:
+            try:
+                import os
+                if os.path.isfile(old_path) and old_path != str(file_path):
+                    os.remove(old_path)
+            except OSError:
+                pass
+
         stmt.upload_path = str(file_path)
 
     db.commit()

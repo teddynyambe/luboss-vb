@@ -155,6 +155,54 @@ export default function TreasurerDashboard() {
   const [bankStmtFile, setBankStmtFile] = useState<File | null>(null);
   const [bankStmtMonth, setBankStmtMonth] = useState('');
   const [bankStmtDesc, setBankStmtDesc] = useState('');
+
+  // Inline-edit state for the bank statements list (no modal): which row is
+  // being edited + buffered values for that row. Saves call the same PUT
+  // endpoint the modal already uses.
+  const [inlineEditStmtId, setInlineEditStmtId] = useState<string | null>(null);
+  const [inlineStmtMonth, setInlineStmtMonth] = useState('');
+  const [inlineStmtDesc, setInlineStmtDesc] = useState('');
+  const [inlineStmtFile, setInlineStmtFile] = useState<File | null>(null);
+  const [inlineStmtSaving, setInlineStmtSaving] = useState(false);
+
+  const startInlineEditStmt = (stmt: BankStatementItem) => {
+    setInlineEditStmtId(stmt.id);
+    setInlineStmtMonth(stmt.statement_month.substring(0, 7)); // YYYY-MM
+    setInlineStmtDesc(stmt.description || '');
+    setInlineStmtFile(null);
+  };
+
+  const cancelInlineEditStmt = () => {
+    setInlineEditStmtId(null);
+    setInlineStmtFile(null);
+  };
+
+  const saveInlineEditStmt = async (stmtId: string) => {
+    if (!inlineStmtMonth) {
+      setMessage({ type: 'error', text: 'Please select a month.' });
+      return;
+    }
+    setInlineStmtSaving(true);
+    try {
+      const formData = new FormData();
+      formData.append('month', `${inlineStmtMonth}-01`);
+      formData.append('description', inlineStmtDesc || '');
+      if (inlineStmtFile) formData.append('file', inlineStmtFile);
+      const response = await api.putFormData(`/api/treasurer/bank-statements/${stmtId}`, formData);
+      if (response.error) {
+        setMessage({ type: 'error', text: response.error });
+      } else {
+        setMessage({ type: 'success', text: 'Bank statement updated.' });
+        cancelInlineEditStmt();
+        await loadReports();
+      }
+    } catch (err: unknown) {
+      setMessage({ type: 'error', text: err instanceof Error ? err.message : 'Error saving bank statement' });
+    } finally {
+      setInlineStmtSaving(false);
+      setTimeout(() => setMessage(null), 5000);
+    }
+  };
   const [uploadingStmt, setUploadingStmt] = useState(false);
 
   // Penalty Reversals state
@@ -1538,27 +1586,95 @@ export default function TreasurerDashboard() {
                     <p className="text-purple-700 text-sm text-center py-4">No bank statements for this cycle</p>
                   ) : (
                     <div className="space-y-2 max-h-[300px] overflow-y-auto">
-                      {bankStatements.map((stmt, index) => (
-                        <div key={stmt.id} className="flex items-center gap-2 py-1 text-sm font-mono">
-                          <span className="text-purple-600 w-6 text-right">{String(index + 1).padStart(2, ' ')}.</span>
-                          <span className="flex-1 text-purple-900 font-semibold">{formatMonth(stmt.statement_month)}</span>
-                          {stmt.description && (
-                            <span className="text-purple-700 text-xs truncate max-w-[180px]">{stmt.description}</span>
-                          )}
-                          <button
-                            onClick={() => handleViewStatement(stmt)}
-                            className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-semibold hover:bg-purple-200 transition-colors flex-shrink-0"
+                      {bankStatements.map((stmt, index) => {
+                        const isEditing = inlineEditStmtId === stmt.id;
+                        if (!isEditing) {
+                          return (
+                            <div key={stmt.id} className="flex items-center gap-2 py-1 text-sm font-mono">
+                              <span className="text-purple-600 w-6 text-right">{String(index + 1).padStart(2, ' ')}.</span>
+                              <span className="flex-1 text-purple-900 font-semibold">{formatMonth(stmt.statement_month)}</span>
+                              {stmt.description && (
+                                <span className="text-purple-700 text-xs truncate max-w-[180px]">{stmt.description}</span>
+                              )}
+                              <button
+                                onClick={() => handleViewStatement(stmt)}
+                                className="px-2 py-1 bg-purple-100 text-purple-700 rounded text-xs font-semibold hover:bg-purple-200 transition-colors flex-shrink-0"
+                              >
+                                View
+                              </button>
+                              <button
+                                onClick={() => startInlineEditStmt(stmt)}
+                                className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-semibold hover:bg-gray-200 transition-colors flex-shrink-0"
+                              >
+                                Edit
+                              </button>
+                            </div>
+                          );
+                        }
+                        return (
+                          <div
+                            key={stmt.id}
+                            className="rounded-lg border-2 border-purple-300 bg-purple-50/50 p-3 space-y-2 text-sm"
                           >
-                            View
-                          </button>
-                          <button
-                            onClick={() => openEditStmtModal(stmt)}
-                            className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs font-semibold hover:bg-gray-200 transition-colors flex-shrink-0"
-                          >
-                            Edit
-                          </button>
-                        </div>
-                      ))}
+                            <div className="flex items-center gap-2 text-xs font-semibold text-purple-700">
+                              <span className="w-6 text-right">{String(index + 1).padStart(2, ' ')}.</span>
+                              <span>Editing — {formatMonth(stmt.statement_month)} (current)</span>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              <label className="flex flex-col gap-1">
+                                <span className="text-xs font-semibold text-purple-700">Month</span>
+                                <input
+                                  type="month"
+                                  value={inlineStmtMonth}
+                                  onChange={(e) => setInlineStmtMonth(e.target.value)}
+                                  className="px-2 py-1 border-2 border-purple-300 rounded text-sm"
+                                />
+                              </label>
+                              <label className="flex flex-col gap-1">
+                                <span className="text-xs font-semibold text-purple-700">Description</span>
+                                <input
+                                  type="text"
+                                  value={inlineStmtDesc}
+                                  onChange={(e) => setInlineStmtDesc(e.target.value)}
+                                  placeholder="e.g. 05 May to 10 June"
+                                  className="px-2 py-1 border-2 border-purple-300 rounded text-sm"
+                                />
+                              </label>
+                            </div>
+                            <label className="flex flex-col gap-1">
+                              <span className="text-xs font-semibold text-purple-700">
+                                Replace file (optional)
+                              </span>
+                              <input
+                                type="file"
+                                accept=".pdf,.jpg,.jpeg,.png"
+                                onChange={(e) => setInlineStmtFile(e.target.files?.[0] ?? null)}
+                                className="text-xs"
+                              />
+                              <span className="text-[11px] text-purple-600">
+                                Leave empty to keep the existing file.
+                                {stmt.filename && <> Current: <span className="font-mono">{stmt.filename}</span></>}
+                              </span>
+                            </label>
+                            <div className="flex justify-end gap-2">
+                              <button
+                                onClick={cancelInlineEditStmt}
+                                disabled={inlineStmtSaving}
+                                className="px-3 py-1 text-xs font-semibold text-gray-700 hover:text-gray-900"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => saveInlineEditStmt(stmt.id)}
+                                disabled={inlineStmtSaving}
+                                className="px-3 py-1 bg-purple-600 text-white rounded text-xs font-semibold hover:bg-purple-700 disabled:opacity-50"
+                              >
+                                {inlineStmtSaving ? 'Saving…' : 'Save changes'}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
