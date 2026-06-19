@@ -1956,6 +1956,12 @@ def post_consolidate_loans(
 
 class MoveRepaymentRequest(BaseModel):
     new_loan_id: str
+    # Optional partial-amount move: when either is provided, only that
+    # portion of the source repayment is carved off and re-attributed to
+    # new_loan_id. The source repayment is shrunk in place. When both are
+    # omitted (or both zero), the whole repayment is re-pointed as before.
+    move_principal: float | None = None
+    move_interest: float | None = None
 
 
 class RejectDeclarationRequest(BaseModel):
@@ -2199,25 +2205,48 @@ def post_move_repayment(
     current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
     db: Session = Depends(get_db),
 ):
-    """Re-point a repayment to a different loan belonging to the same member."""
-    from app.services.loan_repair import move_repayment_to_loan
+    """Re-point a repayment to a different loan belonging to the same member.
+
+    When move_principal or move_interest is provided (and non-zero), only that
+    portion is carved off the source repayment and a new repayment is created
+    on new_loan_id; the source repayment shrinks in place. Otherwise the whole
+    repayment is re-pointed.
+    """
+    from app.services.loan_repair import move_repayment_to_loan, move_repayment_portion
     from app.core.audit import write_audit_log
     try:
         rep_uuid = UUID(repayment_id)
         new_loan_uuid = UUID(body.new_loan_id)
     except (ValueError, TypeError):
         raise HTTPException(status_code=400, detail="Invalid UUID")
+
+    move_p = Decimal(str(body.move_principal)) if body.move_principal is not None else Decimal("0")
+    move_i = Decimal(str(body.move_interest)) if body.move_interest is not None else Decimal("0")
+    is_partial = move_p > 0 or move_i > 0
     try:
-        result = move_repayment_to_loan(
-            db=db, repayment_id=rep_uuid, new_loan_id=new_loan_uuid, user_id=current_user.id
-        )
+        if is_partial:
+            result = move_repayment_portion(
+                db=db,
+                repayment_id=rep_uuid,
+                new_loan_id=new_loan_uuid,
+                move_principal=move_p,
+                move_interest=move_i,
+                user_id=current_user.id,
+            )
+        else:
+            result = move_repayment_to_loan(
+                db=db, repayment_id=rep_uuid, new_loan_id=new_loan_uuid, user_id=current_user.id
+            )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
         user_role=current_user.role.value if current_user.role else "chairman",
-        action="Repayment moved between loans",
-        details=f"repayment={repayment_id} new_loan={body.new_loan_id}",
+        action="Repayment portion moved between loans" if is_partial else "Repayment moved between loans",
+        details=(
+            f"repayment={repayment_id} new_loan={body.new_loan_id} "
+            f"P={move_p} I={move_i}"
+        ) if is_partial else f"repayment={repayment_id} new_loan={body.new_loan_id}",
     )
     return result
 

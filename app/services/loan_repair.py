@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from datetime import datetime, date
+import uuid
 from uuid import UUID
 
 from sqlalchemy import func
@@ -483,6 +484,157 @@ def move_repayment_to_loan(
     }
 
 
+def move_repayment_portion(
+    db: Session,
+    repayment_id: UUID,
+    new_loan_id: UUID,
+    move_principal: Decimal,
+    move_interest: Decimal,
+    user_id: UUID,
+) -> dict:
+    """Carve a portion of a repayment (P and/or I) off the source loan and
+    create a matching repayment on a different loan belonging to the same
+    member. The source repayment is shrunk by the moved amounts in place.
+
+    Use case: a single deposit was applied entirely to loan A's interest
+    when part of it should have settled loan B's interest balance. The
+    treasurer moves the interest portion across without un-doing the
+    member-level cash receipt.
+
+    Org-level ledger totals (BANK_CASH, LOANS_RECEIVABLE, INTEREST_INCOME)
+    are unchanged — the carved-out cash already hit BANK_CASH and the
+    interest income / principal credit already posted. Only the per-loan
+    attribution moves. A balanced no-op JE is posted to satisfy the
+    Repayment.journal_entry_id FK on the newly-created row and to leave a
+    full audit trail of the move.
+    """
+    move_principal = Decimal(str(move_principal or 0)).quantize(Decimal("0.01"))
+    move_interest = Decimal(str(move_interest or 0)).quantize(Decimal("0.01"))
+    if move_principal < 0 or move_interest < 0:
+        raise ValueError("moved amounts cannot be negative")
+    if move_principal == 0 and move_interest == 0:
+        raise ValueError("must move at least some principal or interest")
+
+    rep = db.query(Repayment).filter(Repayment.id == repayment_id).first()
+    if not rep:
+        raise ValueError("repayment not found")
+
+    src_je = db.query(JournalEntry).filter(JournalEntry.id == rep.journal_entry_id).first()
+    if not src_je or src_je.reversed_by is not None:
+        raise ValueError(
+            "cannot move a portion of a repayment whose journal entry is reversed or missing"
+        )
+
+    new_loan = db.query(Loan).filter(Loan.id == new_loan_id).first()
+    if not new_loan:
+        raise ValueError("target loan not found")
+    src_loan = db.query(Loan).filter(Loan.id == rep.loan_id).first()
+    if not src_loan:
+        raise ValueError("source loan not found")
+    if new_loan.id == src_loan.id:
+        raise ValueError("target loan is the same as the source loan")
+    if new_loan.member_id != src_loan.member_id:
+        raise ValueError("target loan belongs to a different member")
+
+    cur_p = Decimal(str(rep.principal_amount or 0))
+    cur_i = Decimal(str(rep.interest_amount or 0))
+    if move_principal > cur_p:
+        raise ValueError(
+            f"move_principal ({move_principal}) exceeds repayment principal ({cur_p})"
+        )
+    if move_interest > cur_i:
+        raise ValueError(
+            f"move_interest ({move_interest}) exceeds repayment interest ({cur_i})"
+        )
+    move_total = (move_principal + move_interest).quantize(Decimal("0.01"))
+
+    loans_rec = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+    ).first()
+    int_inc = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME"
+    ).first()
+    if move_principal > 0 and not loans_rec:
+        raise ValueError("LOANS_RECEIVABLE ledger account missing")
+    if move_interest > 0 and not int_inc:
+        raise ValueError("INTEREST_INCOME ledger account missing")
+
+    # Balanced no-op JE documenting the carve-out. Per leg debits + credits
+    # the same account so org-level balances are untouched. The new
+    # Repayment row's FK points at this JE.
+    lines: list = []
+    if move_principal > 0:
+        lines += [
+            {"account_id": loans_rec.id, "debit_amount": move_principal,
+             "credit_amount": Decimal("0.00"),
+             "description": f"Carve-out: principal moved to loan {str(new_loan.id)[:8]}"},
+            {"account_id": loans_rec.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": move_principal,
+             "description": f"Carve-out: principal moved from loan {str(src_loan.id)[:8]}"},
+        ]
+    if move_interest > 0:
+        lines += [
+            {"account_id": int_inc.id, "debit_amount": move_interest,
+             "credit_amount": Decimal("0.00"),
+             "description": f"Carve-out: interest moved to loan {str(new_loan.id)[:8]}"},
+            {"account_id": int_inc.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": move_interest,
+             "description": f"Carve-out: interest moved from loan {str(src_loan.id)[:8]}"},
+        ]
+
+    new_rep_id = uuid.uuid4()
+    carve_je = create_journal_entry(
+        db=db,
+        description=(
+            f"Repayment carve-out — P={move_principal} I={move_interest} "
+            f"from rep {str(rep.id)[:8]} (loan {str(src_loan.id)[:8]}) → "
+            f"new rep {str(new_rep_id)[:8]} (loan {str(new_loan.id)[:8]})"
+        )[:255],
+        lines=lines,
+        dealing_month=src_je.dealing_month,
+        cycle_id=src_je.cycle_id,
+        source_type="repayment_carve_out",
+        source_ref=str(new_rep_id),
+        created_by=user_id,
+    )
+
+    new_rep = Repayment(
+        id=new_rep_id,
+        loan_id=new_loan.id,
+        repayment_date=rep.repayment_date,
+        principal_amount=move_principal,
+        interest_amount=move_interest,
+        total_amount=move_total,
+        journal_entry_id=carve_je.id,
+    )
+    db.add(new_rep)
+
+    rep.principal_amount = cur_p - move_principal
+    rep.interest_amount = cur_i - move_interest
+    rep.total_amount = (rep.principal_amount + rep.interest_amount).quantize(Decimal("0.01"))
+
+    db.commit()
+    db.refresh(rep)
+    db.refresh(new_rep)
+    return {
+        "source_repayment_id": str(rep.id),
+        "source_loan_id": str(src_loan.id),
+        "source_remaining": {
+            "principal_amount": float(rep.principal_amount),
+            "interest_amount": float(rep.interest_amount),
+            "total_amount": float(rep.total_amount),
+        },
+        "new_repayment_id": str(new_rep.id),
+        "new_loan_id": str(new_loan.id),
+        "moved": {
+            "principal_amount": float(move_principal),
+            "interest_amount": float(move_interest),
+            "total_amount": float(move_total),
+        },
+        "carve_out_journal_entry_id": str(carve_je.id),
+    }
+
+
 def adjust_repayment_split(
     db: Session,
     repayment_id: UUID,
@@ -847,6 +999,15 @@ def edit_loan_terms(
     old_rate = Decimal(str(loan.percentage_interest or 0))
     old_amount = Decimal(str(loan.loan_amount or 0))
 
+    # Principal delta is computed against the LIVE LEDGER-DISBURSED amount, not
+    # against loan.loan_amount. This means a single edit will rebalance the
+    # ledger even when loan.loan_amount has previously been edited out of band
+    # (leaving the ledger orphaned at the original disbursement figure).
+    current_ledger_disbursed = Decimal("0.00")
+    for ln in disb_je.lines:
+        if ln.account and ln.account.account_code.startswith("LOANS_RECEIVABLE"):
+            current_ledger_disbursed += Decimal(str(ln.debit_amount or 0))
+
     if new_term_months is not None:
         try:
             term_int = int(new_term_months)
@@ -875,7 +1036,7 @@ def edit_loan_terms(
     old_expected = (old_amount * old_rate / Decimal("100")).quantize(Decimal("0.01"))
     new_expected = (new_amount * new_rate / Decimal("100")).quantize(Decimal("0.01"))
     interest_delta = (new_expected - old_expected).quantize(Decimal("0.01"))
-    principal_delta = (new_amount - old_amount).quantize(Decimal("0.01"))
+    principal_delta = (new_amount - current_ledger_disbursed).quantize(Decimal("0.01"))
 
     correction_je_id = None
     if principal_delta != Decimal("0.00") or interest_delta != Decimal("0.00"):
@@ -951,7 +1112,8 @@ def edit_loan_terms(
                 description=(
                     f"Loan terms adjustment — K{old_amount}/{old_term}mo @ {old_rate}% → "
                     f"K{loan.loan_amount}/{loan.number_of_instalments}mo @ {new_rate}% "
-                    f"(principal Δ={principal_delta}, interest Δ={interest_delta})"
+                    f"(ledger K{current_ledger_disbursed}→K{new_amount}, "
+                    f"principal Δ={principal_delta}, interest Δ={interest_delta})"
                 )[:255],
                 lines=lines,
                 dealing_month=get_dealing_month_date(db, loan.cycle_id, disbursement_date),
@@ -967,6 +1129,8 @@ def edit_loan_terms(
         "id": str(loan.id),
         "old_loan_amount": float(old_amount),
         "new_loan_amount": float(loan.loan_amount or 0),
+        "old_ledger_disbursed": float(current_ledger_disbursed),
+        "new_ledger_disbursed": float(new_amount),
         "old_term_months": old_term,
         "new_term_months": loan.number_of_instalments,
         "old_percentage_interest": float(old_rate),

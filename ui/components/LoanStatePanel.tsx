@@ -77,6 +77,8 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
   const [moveRep, setMoveRep] = useState<Repayment | null>(null);
   const [moveTargetLoanId, setMoveTargetLoanId] = useState('');
   const [movingRep, setMovingRep] = useState(false);
+  const [movePrincipal, setMovePrincipal] = useState('');
+  const [moveInterest, setMoveInterest] = useState('');
 
   // Reverse-repayment modal state
   const [reverseRep, setReverseRep] = useState<Repayment | null>(null);
@@ -194,19 +196,40 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
   const openMoveRepayment = (rep: Repayment) => {
     setMoveRep(rep);
     setMoveTargetLoanId('');
+    setMovePrincipal('');
+    setMoveInterest('');
   };
 
   const submitMoveRepayment = async () => {
     if (!moveRep || !moveTargetLoanId) return;
+    const moveP = parseFloat(movePrincipal) || 0;
+    const moveI = parseFloat(moveInterest) || 0;
+    const isPartial = moveP > 0 || moveI > 0;
+    if (isPartial) {
+      if (moveP > (moveRep.principal_amount || 0) + 0.005) {
+        setError('Principal to move exceeds the repayment principal.');
+        return;
+      }
+      if (moveI > (moveRep.interest_amount || 0) + 0.005) {
+        setError('Interest to move exceeds the repayment interest.');
+        return;
+      }
+    }
     setMovingRep(true);
     try {
       const res = await api.post(
         `/api/chairman/reconcile/repayment/${moveRep.id}/move`,
-        { new_loan_id: moveTargetLoanId }
+        {
+          new_loan_id: moveTargetLoanId,
+          move_principal: isPartial ? moveP : null,
+          move_interest: isPartial ? moveI : null,
+        }
       );
       if (res.error) setError(res.error);
       else {
         setMoveRep(null);
+        setMovePrincipal('');
+        setMoveInterest('');
         load();
       }
     } finally {
@@ -306,9 +329,14 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         const rateChanged =
           repairNewRate !== '' &&
           parseFloat(repairNewRate) !== (repairLoan.percentage_interest ?? NaN);
+        // Submit when the entered amount differs from EITHER the current
+        // loan_amount OR the ledger-disbursed figure — the backend bases the
+        // principal correction on ledger_disbursed, so an out-of-sync loan
+        // can be rebalanced even when loan_amount already matches the input.
         const amountChanged =
           repairNewAmount !== '' &&
-          parseFloat(repairNewAmount) !== (repairLoan.loan_amount ?? NaN);
+          (parseFloat(repairNewAmount) !== (repairLoan.loan_amount ?? NaN)
+            || parseFloat(repairNewAmount) !== (repairLoan.ledger_disbursed ?? NaN));
         if (!termChanged && !rateChanged && !amountChanged) {
           setError('Change the loan amount, tenure, or interest rate before saving.');
           setSubmittingRepair(false);
@@ -851,9 +879,10 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
           <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4 space-y-4">
             <h3 className="text-lg font-bold text-blue-900">Move Repayment to a Different Loan</h3>
             <p className="text-sm text-gray-700">
-              Moving a K{(moveRep.principal_amount + moveRep.interest_amount).toFixed(2)} repayment
-              dated {moveRep.repayment_date || '—'}. The journal entry stays intact; only the
-              loan attribution changes.
+              Source: <strong>K{(moveRep.principal_amount + moveRep.interest_amount).toFixed(2)}</strong>{' '}
+              repayment dated {moveRep.repayment_date || '—'} (P K{moveRep.principal_amount.toFixed(2)} / I K{moveRep.interest_amount.toFixed(2)}).
+              Leave the amount fields blank to move the whole row; fill them in to carve off a portion
+              while the source row shrinks in place.
             </p>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-blue-900">Target loan</label>
@@ -872,6 +901,64 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                   ))}
               </select>
             </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">Principal to move (K)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0.00 (blank = none)"
+                  value={movePrincipal}
+                  onChange={(e) => setMovePrincipal(e.target.value)}
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                />
+                <p className="text-[11px] text-gray-500">
+                  Available: <span className="font-mono">{fmt(moveRep.principal_amount)}</span>
+                </p>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">Interest to move (K)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0.00 (blank = none)"
+                  value={moveInterest}
+                  onChange={(e) => setMoveInterest(e.target.value)}
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                />
+                <p className="text-[11px] text-gray-500">
+                  Available: <span className="font-mono">{fmt(moveRep.interest_amount)}</span>
+                </p>
+              </div>
+            </div>
+            {(() => {
+              const moveP = parseFloat(movePrincipal) || 0;
+              const moveI = parseFloat(moveInterest) || 0;
+              const isPartial = moveP > 0 || moveI > 0;
+              if (!isPartial) {
+                return (
+                  <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800">
+                    Whole repayment will be re-pointed to the target loan. Source row removed from current loan.
+                  </div>
+                );
+              }
+              const remP = (moveRep.principal_amount || 0) - moveP;
+              const remI = (moveRep.interest_amount || 0) - moveI;
+              return (
+                <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
+                  <div className="flex justify-between">
+                    <span className="text-blue-700">Carved off → target</span>
+                    <span className="font-semibold text-blue-900">P {fmt(moveP)} · I {fmt(moveI)} · Total {fmt(moveP + moveI)}</span>
+                  </div>
+                  <div className={`flex justify-between ${remP < -0.005 || remI < -0.005 ? 'text-rose-700' : 'text-blue-700'}`}>
+                    <span>Source row after move</span>
+                    <span className="font-semibold">P {fmt(remP)} · I {fmt(remI)} · Total {fmt(remP + remI)}</span>
+                  </div>
+                </div>
+              );
+            })()}
             <div className="flex justify-end gap-3 pt-2">
               <button
                 onClick={() => setMoveRep(null)}
@@ -1011,7 +1098,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 ? (newAmountN * newRateN) / 100
                 : repairLoan.expected_interest;
               const oldExpected = repairLoan.expected_interest;
-              const principalDelta = newAmountN - repairLoan.loan_amount;
+              const principalDelta = newAmountN - repairLoan.ledger_disbursed;
               const interestDelta = newExpected - oldExpected;
               return (
                 <div className="flex flex-col gap-2">
@@ -1061,7 +1148,11 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                   </div>
                   <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
                     <div className="flex justify-between">
-                      <span className="text-blue-700">New loan amount</span>
+                      <span className="text-blue-700">Ledger disbursed (now)</span>
+                      <span className="font-semibold text-blue-900">{fmt(repairLoan.ledger_disbursed)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-blue-700">New loan amount → ledger</span>
                       <span className="font-semibold text-blue-900">{fmt(newAmountN)}</span>
                     </div>
                     <div className={`flex justify-between ${Math.abs(principalDelta) < 0.005 ? 'text-blue-700' : principalDelta > 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
