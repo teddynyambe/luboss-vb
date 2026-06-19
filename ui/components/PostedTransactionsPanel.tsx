@@ -23,6 +23,7 @@ interface TxLine {
   is_live: boolean;
   je_description: string | null;
   je_source_type: string | null;
+  note: string | null;
   reversed_at: string | null;
   reversal_reason: string | null;
   can_act: boolean;
@@ -260,7 +261,7 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
                       <td className="py-1.5 px-2 text-xs">
                         {!l.is_live && l.reversal_reason
                           ? <span title={l.reversal_reason}>Reversed: {l.reversal_reason}</span>
-                          : (l.je_description || '').slice(0, 60)}
+                          : <span title={l.je_description || ''}>{l.note || (l.je_description || '').slice(0, 60)}</span>}
                       </td>
                       <td className="py-1.5 px-2 text-right relative">
                         {l.can_act && (

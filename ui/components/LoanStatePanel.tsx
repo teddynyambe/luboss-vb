@@ -100,6 +100,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
   const [repairNewDate, setRepairNewDate] = useState('');
   const [repairNewTerm, setRepairNewTerm] = useState('');
   const [repairNewRate, setRepairNewRate] = useState('');
+  const [repairNewAmount, setRepairNewAmount] = useState('');
   const [submittingRepair, setSubmittingRepair] = useState(false);
 
   const load = useCallback(() => {
@@ -243,6 +244,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairNewDate(action === 'edit_disbursement_date' ? (loan.disbursement_date || '') : '');
     setRepairNewTerm(action === 'edit_terms' ? (loan.number_of_instalments || '') : '');
     setRepairNewRate(action === 'edit_terms' ? String(loan.percentage_interest ?? '') : '');
+    setRepairNewAmount(action === 'edit_terms' ? String(loan.loan_amount ?? '') : '');
     setOpenMenuLoanId(null);
   };
 
@@ -254,6 +256,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
     setRepairNewDate('');
     setRepairNewTerm('');
     setRepairNewRate('');
+    setRepairNewAmount('');
   };
 
   const submitRepair = async () => {
@@ -303,14 +306,18 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         const rateChanged =
           repairNewRate !== '' &&
           parseFloat(repairNewRate) !== (repairLoan.percentage_interest ?? NaN);
-        if (!termChanged && !rateChanged) {
-          setError('Change the tenure or the interest rate before saving.');
+        const amountChanged =
+          repairNewAmount !== '' &&
+          parseFloat(repairNewAmount) !== (repairLoan.loan_amount ?? NaN);
+        if (!termChanged && !rateChanged && !amountChanged) {
+          setError('Change the loan amount, tenure, or interest rate before saving.');
           setSubmittingRepair(false);
           return;
         }
         res = await api.post(`${base}/edit-terms`, {
           new_term_months: termChanged ? repairNewTerm : null,
           new_percentage_interest: rateChanged ? parseFloat(repairNewRate) : null,
+          new_loan_amount: amountChanged ? parseFloat(repairNewAmount) : null,
           reason,
         });
       }
@@ -470,8 +477,20 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
           >
             <div className="flex flex-wrap justify-between gap-2 text-sm">
               <div>
-                <span className={`font-mono text-xs ${!loan.has_live_disbursement_je ? 'text-gray-400 line-through' : 'text-gray-500'}`}>
-                  {loan.id.slice(0, 8)}
+                <span
+                  className={`text-xs font-semibold ${
+                    !loan.has_live_disbursement_je ? 'text-gray-400 line-through' : 'text-gray-700'
+                  }`}
+                >
+                  {loan.disbursement_date
+                    ? new Date(loan.disbursement_date + 'T00:00:00').toLocaleDateString('en-US', {
+                        month: 'long',
+                        year: 'numeric',
+                      })
+                    : 'Undisbursed'}{' '}
+                  <span className="font-mono text-gray-400 font-normal">
+                    ({loan.id.slice(0, 8)})
+                  </span>
                 </span>
                 <span
                   className={`ml-2 inline-block px-2 py-0.5 rounded text-xs font-semibold ${
@@ -986,16 +1005,31 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
             )}
 
             {repairAction === 'edit_terms' && (() => {
-              const newTermN = parseInt(repairNewTerm || '0', 10) || 0;
               const newRateN = parseFloat(repairNewRate || '') || 0;
+              const newAmountN = parseFloat(repairNewAmount || '') || repairLoan.loan_amount;
               const newExpected = newRateN > 0
-                ? (repairLoan.loan_amount * newRateN) / 100
+                ? (newAmountN * newRateN) / 100
                 : repairLoan.expected_interest;
               const oldExpected = repairLoan.expected_interest;
-              const delta = newExpected - oldExpected;
+              const principalDelta = newAmountN - repairLoan.loan_amount;
+              const interestDelta = newExpected - oldExpected;
               return (
                 <div className="flex flex-col gap-2">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="flex flex-col gap-1">
+                      <label className="text-xs font-semibold text-blue-900">Loan amount (K)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={repairNewAmount}
+                        onChange={(e) => setRepairNewAmount(e.target.value)}
+                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      />
+                      <p className="text-[11px] text-gray-500">
+                        Current: <span className="font-mono">{fmt(repairLoan.loan_amount)}</span>
+                      </p>
+                    </div>
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-semibold text-blue-900">Tenure (months)</label>
                       <input
@@ -1027,8 +1061,12 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                   </div>
                   <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
                     <div className="flex justify-between">
-                      <span className="text-blue-700">Loan amount</span>
-                      <span className="font-semibold text-blue-900">{fmt(repairLoan.loan_amount)}</span>
+                      <span className="text-blue-700">New loan amount</span>
+                      <span className="font-semibold text-blue-900">{fmt(newAmountN)}</span>
+                    </div>
+                    <div className={`flex justify-between ${Math.abs(principalDelta) < 0.005 ? 'text-blue-700' : principalDelta > 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                      <span>Principal delta (corrective JE)</span>
+                      <span className="font-bold">{principalDelta >= 0 ? '+' : ''}{fmt(principalDelta)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-blue-700">Old expected interest</span>
@@ -1038,9 +1076,9 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                       <span className="text-blue-700">New expected interest</span>
                       <span className="font-semibold text-blue-900">{fmt(newExpected)}</span>
                     </div>
-                    <div className={`flex justify-between pt-1 mt-1 border-t border-blue-200 ${delta >= 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
-                      <span>Accrual delta (corrective JE)</span>
-                      <span className="font-bold">{delta >= 0 ? '+' : ''}{fmt(delta)}</span>
+                    <div className={`flex justify-between pt-1 mt-1 border-t border-blue-200 ${Math.abs(interestDelta) < 0.005 ? 'text-blue-700' : interestDelta > 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                      <span>Interest accrual delta</span>
+                      <span className="font-bold">{interestDelta >= 0 ? '+' : ''}{fmt(interestDelta)}</span>
                     </div>
                   </div>
                 </div>

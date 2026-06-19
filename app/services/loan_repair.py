@@ -796,34 +796,44 @@ def edit_loan_terms(
     new_percentage_interest: Decimal | None,
     reason: str,
     user_id: UUID,
+    new_loan_amount: Decimal | None = None,
 ) -> dict:
-    """Edit a loan's term (number_of_instalments) and/or interest rate.
+    """Edit a loan's principal, term, and/or interest rate.
 
-    The expected interest changes with the rate — so this also posts a
-    correcting JE for the delta so the accrual books stay in sync:
+    Posts a single correcting JE that reconciles BOTH the principal and the
+    accrued interest with the new terms:
 
-      delta = (new_amount × new_rate) − (old_amount × old_rate)
+      principal_delta = new_amount − old_amount
+      interest_delta  = (new_amount × new_rate) − (old_amount × old_rate)
 
-    If delta > 0:  Dr INTEREST_RECEIVABLE, Cr INTEREST_INCOME   (recognise more income)
-    If delta < 0:  Dr INTEREST_INCOME,     Cr INTEREST_RECEIVABLE (un-recognise income)
+    Principal correction:
+        principal_delta > 0  →  Dr LOANS_RECEIVABLE / Cr BANK_CASH
+        principal_delta < 0  →  Dr BANK_CASH        / Cr LOANS_RECEIVABLE
+    Interest correction:
+        interest_delta  > 0  →  Dr INTEREST_RECEIVABLE / Cr INTEREST_INCOME
+        interest_delta  < 0  →  Dr INTEREST_INCOME     / Cr INTEREST_RECEIVABLE
 
-    The correcting JE's dealing_month is the loan's disbursement month so the
-    Loan/Revenue report shows the corrected accrual under the right period.
+    The correcting JE's dealing_month is the loan's disbursement month so
+    the Loan/Revenue report groups the correction under the right period.
 
-    Refused if the loan's disbursement JE has been reversed — fix that first.
-    Repayment dates and amounts are NOT touched.
+    Refused if the loan's disbursement JE has been reversed — restore the
+    disbursement first. Repayment dates and amounts are not touched.
 
-    At least one of new_term_months or new_percentage_interest must be set.
-    Pass the other as None to leave it unchanged.
+    At least one of new_loan_amount, new_term_months, new_percentage_interest
+    must be set. Pass the others as None to leave them unchanged.
     """
     reason = _require_description(reason)
     loan = db.query(Loan).filter(Loan.id == loan_id).first()
     if not loan:
         raise ValueError("loan not found")
 
-    if new_term_months is None and new_percentage_interest is None:
+    if (
+        new_term_months is None
+        and new_percentage_interest is None
+        and new_loan_amount is None
+    ):
         raise ValueError(
-            "nothing to change — specify a new term, a new interest rate, or both"
+            "nothing to change — specify a new amount, term, interest rate, or any combination"
         )
 
     disb_je = _live_disbursement_je(db, loan.id)
@@ -835,12 +845,9 @@ def edit_loan_terms(
 
     old_term = loan.number_of_instalments
     old_rate = Decimal(str(loan.percentage_interest or 0))
-    old_expected = (
-        (loan.loan_amount or Decimal("0.00")) * old_rate / Decimal("100")
-    ).quantize(Decimal("0.01"))
+    old_amount = Decimal(str(loan.loan_amount or 0))
 
     if new_term_months is not None:
-        # Sanity-check that it parses, but store as string (the column is String).
         try:
             term_int = int(new_term_months)
         except (TypeError, ValueError):
@@ -857,38 +864,77 @@ def edit_loan_terms(
     else:
         new_rate = old_rate
 
-    new_expected = (
-        (loan.loan_amount or Decimal("0.00")) * new_rate / Decimal("100")
-    ).quantize(Decimal("0.01"))
+    if new_loan_amount is not None:
+        new_amount = Decimal(str(new_loan_amount))
+        if new_amount < 0:
+            raise ValueError("new_loan_amount cannot be negative")
+        loan.loan_amount = new_amount
+    else:
+        new_amount = old_amount
 
-    delta = (new_expected - old_expected).quantize(Decimal("0.01"))
+    old_expected = (old_amount * old_rate / Decimal("100")).quantize(Decimal("0.01"))
+    new_expected = (new_amount * new_rate / Decimal("100")).quantize(Decimal("0.01"))
+    interest_delta = (new_expected - old_expected).quantize(Decimal("0.01"))
+    principal_delta = (new_amount - old_amount).quantize(Decimal("0.01"))
 
     correction_je_id = None
-    if delta != Decimal("0.00"):
+    if principal_delta != Decimal("0.00") or interest_delta != Decimal("0.00"):
+        loans_rec = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+        ).first()
+        bank_cash = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == "BANK_CASH"
+        ).first()
         int_rec = db.query(LedgerAccount).filter(
             LedgerAccount.account_code == "INTEREST_RECEIVABLE"
         ).first()
         int_inc = db.query(LedgerAccount).filter(
             LedgerAccount.account_code == "INTEREST_INCOME"
         ).first()
-        if not int_rec or not int_inc:
+        if principal_delta != Decimal("0.00") and (not loans_rec or not bank_cash):
             raise ValueError(
-                "INTEREST_RECEIVABLE or INTEREST_INCOME ledger account missing; "
+                "LOANS_RECEIVABLE or BANK_CASH ledger account missing — "
+                "run scripts/setup_ledger_accounts.py"
+            )
+        if interest_delta != Decimal("0.00") and (not int_rec or not int_inc):
+            raise ValueError(
+                "INTEREST_RECEIVABLE or INTEREST_INCOME ledger account missing — "
                 "run scripts/setup_ledger_accounts.py"
             )
 
-        amount = abs(delta)
-        if delta > 0:
-            lines = [
-                {"account_id": int_rec.id, "debit_amount": amount,
+        lines: list = []
+        if principal_delta > 0:
+            lines += [
+                {"account_id": loans_rec.id, "debit_amount": principal_delta,
+                 "credit_amount": Decimal("0.00"),
+                 "description": "Adjust loan principal up (terms edited)"},
+                {"account_id": bank_cash.id, "debit_amount": Decimal("0.00"),
+                 "credit_amount": principal_delta,
+                 "description": "Bank cash — additional disbursement (terms edited)"},
+            ]
+        elif principal_delta < 0:
+            amount = -principal_delta
+            lines += [
+                {"account_id": bank_cash.id, "debit_amount": amount,
+                 "credit_amount": Decimal("0.00"),
+                 "description": "Bank cash — reversal of over-disbursed principal (terms edited)"},
+                {"account_id": loans_rec.id, "debit_amount": Decimal("0.00"),
+                 "credit_amount": amount,
+                 "description": "Adjust loan principal down (terms edited)"},
+            ]
+
+        if interest_delta > 0:
+            lines += [
+                {"account_id": int_rec.id, "debit_amount": interest_delta,
                  "credit_amount": Decimal("0.00"),
                  "description": "Adjust interest receivable up (terms edited)"},
                 {"account_id": int_inc.id, "debit_amount": Decimal("0.00"),
-                 "credit_amount": amount,
+                 "credit_amount": interest_delta,
                  "description": "Recognise additional interest income (terms edited)"},
             ]
-        else:
-            lines = [
+        elif interest_delta < 0:
+            amount = -interest_delta
+            lines += [
                 {"account_id": int_inc.id, "debit_amount": amount,
                  "credit_amount": Decimal("0.00"),
                  "description": "Un-recognise interest income (terms edited)"},
@@ -897,34 +943,38 @@ def edit_loan_terms(
                  "description": "Adjust interest receivable down (terms edited)"},
             ]
 
-        from datetime import date as _date_cls
-        disbursement_date = loan.disbursement_date or _date_cls.today()
-        correction_je = create_journal_entry(
-            db=db,
-            description=(
-                f"Loan terms adjustment — {old_term}mo @ {old_rate}% → "
-                f"{loan.number_of_instalments}mo @ {new_rate}% "
-                f"(expected interest {old_expected} → {new_expected})"
-            )[:255],
-            lines=lines,
-            dealing_month=get_dealing_month_date(db, loan.cycle_id, disbursement_date),
-            cycle_id=loan.cycle_id,
-            source_ref=str(loan.id),
-            source_type="loan_terms_adjustment",
-            created_by=user_id,
-        )
-        correction_je_id = str(correction_je.id)
+        if lines:
+            from datetime import date as _date_cls
+            disbursement_date = loan.disbursement_date or _date_cls.today()
+            correction_je = create_journal_entry(
+                db=db,
+                description=(
+                    f"Loan terms adjustment — K{old_amount}/{old_term}mo @ {old_rate}% → "
+                    f"K{loan.loan_amount}/{loan.number_of_instalments}mo @ {new_rate}% "
+                    f"(principal Δ={principal_delta}, interest Δ={interest_delta})"
+                )[:255],
+                lines=lines,
+                dealing_month=get_dealing_month_date(db, loan.cycle_id, disbursement_date),
+                cycle_id=loan.cycle_id,
+                source_ref=str(loan.id),
+                source_type="loan_terms_adjustment",
+                created_by=user_id,
+            )
+            correction_je_id = str(correction_je.id)
 
     db.commit()
     return {
         "id": str(loan.id),
+        "old_loan_amount": float(old_amount),
+        "new_loan_amount": float(loan.loan_amount or 0),
         "old_term_months": old_term,
         "new_term_months": loan.number_of_instalments,
         "old_percentage_interest": float(old_rate),
         "new_percentage_interest": float(new_rate),
         "old_expected_interest": float(old_expected),
         "new_expected_interest": float(new_expected),
-        "interest_delta": float(delta),
+        "principal_delta": float(principal_delta),
+        "interest_delta": float(interest_delta),
         "correction_journal_entry_id": correction_je_id,
         "reason": reason,
     }

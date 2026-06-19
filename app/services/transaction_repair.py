@@ -103,11 +103,89 @@ def _get_member_category_account(
     ).first()
 
 
+CATEGORY_LABEL = {
+    "savings": "Savings",
+    "social_fund": "Social Fund",
+    "admin_fund": "Admin Fund",
+    "penalty": "Penalty",
+}
+
+
+def _humanise_note(
+    source_type: str | None,
+    category: str,
+    dealing_month,
+    member_name: str,
+    signed_amount: float,
+    je_description: str | None,
+    line_description: str | None,
+) -> str:
+    """Build a member-facing note for a journal line.
+
+    Designed for Posted Transactions — collapses raw stuff like
+    "Deposit approval for member fbe2758f-…" into "May 2026 Savings deposit
+    for Simon Mugala". Falls back to the line/JE description for unrecognised
+    source types so we never lose information.
+    """
+    cat = CATEGORY_LABEL.get(category, category.replace("_", " ").title())
+    month_label = dealing_month.strftime("%B %Y") if dealing_month else ""
+    who = member_name or "member"
+    src = (source_type or "").strip()
+
+    if src == "deposit_approval":
+        return f"{month_label} — {cat} deposit for {who}".strip(" —")
+    if src == "excess_contribution":
+        direction = "transfer in" if signed_amount > 0 else "transfer out"
+        return f"{month_label} — {cat} excess {direction} for {who}".strip(" —")
+    if src == "transaction_split":
+        # Prefer the line-level description which already names the target
+        # ("Late Loan Application — K150 (split from social fund)" etc.).
+        return (line_description or je_description or f"{month_label} — {cat} split").strip()
+    if src == "transaction_reverse":
+        return (line_description or je_description or f"{month_label} — {cat} reversal").strip()
+    if src == "penalty":
+        return f"{month_label} — {cat} charged to {who}".strip(" —")
+    if src == "penalty_reversal":
+        return f"{month_label} — {cat} reversal for {who}".strip(" —")
+    if src == "cycle_initial_requirement":
+        return f"{month_label} — opening {cat} requirement for {who}".strip(" —")
+
+    # Fallback: prefer line description, then JE description (still better
+    # than nothing). UUIDs are stripped for readability.
+    import re as _re
+    fallback = (line_description or je_description or f"{cat} entry").strip()
+    fallback = _re.sub(
+        r"\b[0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{12}\b",
+        "",
+        fallback,
+    )
+    fallback = _re.sub(r"\s{2,}", " ", fallback).strip(" -—")
+    if member_name and member_name not in fallback:
+        fallback = f"{fallback} — {member_name}".strip(" —")
+    return fallback
+
+
 def list_member_transactions(db: Session, member_id: UUID) -> dict:
     """Return all non-loan journal lines tied to this member, grouped by
     the parent JournalEntry's dealing_month (the reporting period the entry
     is allocated to, independent of when it was actually posted).
     """
+    # Resolve the member's display name once so we can build readable notes
+    # ("Joshua Banda — Savings for May 2026") instead of leaking UUIDs in
+    # historical JE descriptions like "Deposit approval for member fbe2…".
+    from app.models.member import MemberProfile
+    from app.models.user import User
+    member_name = ""
+    prof_row = (
+        db.query(MemberProfile, User)
+        .join(User, User.id == MemberProfile.user_id)
+        .filter(MemberProfile.id == member_id)
+        .first()
+    )
+    if prof_row:
+        _prof, _u = prof_row
+        member_name = f"{(_u.first_name or '').strip()} {(_u.last_name or '').strip()}".strip()
+
     lines = (
         db.query(JournalLine, JournalEntry, LedgerAccount)
         .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
@@ -181,6 +259,10 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
             "is_live": is_live,
             "je_description": je.description,
             "je_source_type": je.source_type,
+            "note": _humanise_note(
+                je.source_type, category, je.dealing_month, member_name, signed_amount,
+                je.description, line.description,
+            ),
             "reversed_at": reversed_at,
             "reversal_reason": reversal_reason,
             "can_act": is_live,

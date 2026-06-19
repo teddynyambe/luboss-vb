@@ -2280,6 +2280,7 @@ class EditLoanDisbursementDateRequest(BaseModel):
 class EditLoanTermsRequest(BaseModel):
     new_term_months: str | None = None
     new_percentage_interest: float | None = None
+    new_loan_amount: float | None = None
     reason: str
 
 
@@ -2469,6 +2470,11 @@ def post_edit_loan_terms(
                 if body.new_percentage_interest is not None
                 else None
             ),
+            new_loan_amount=(
+                Decimal(str(body.new_loan_amount))
+                if body.new_loan_amount is not None
+                else None
+            ),
             reason=body.reason,
             user_id=current_user.id,
         )
@@ -2479,8 +2485,10 @@ def post_edit_loan_terms(
         "Loan terms edited",
         (
             f"loan={loan_id} "
+            f"amount={result.get('old_loan_amount')}→{result.get('new_loan_amount')} "
             f"term={result.get('old_term_months')}→{result.get('new_term_months')} "
             f"rate={result.get('old_percentage_interest')}→{result.get('new_percentage_interest')} "
+            f"principal_delta={result.get('principal_delta')} "
             f"interest_delta={result.get('interest_delta')} reason={body.reason}"
         ),
     )

@@ -744,9 +744,31 @@ def approve_deposit(
     # Create journal entry — dealing_month follows the declaration's effective month,
     # NOT the approval timestamp, so deposits approved in a later month are still
     # bucketed under the period they were declared for.
+    # Resolve the member's display name once for the description (UUIDs are
+    # noise in audit logs and the Posted Transactions feed). Falls back to a
+    # short member_id stub if there's no profile/user (shouldn't happen in
+    # practice).
+    _member_label = str(deposit.member_id)[:8]
+    try:
+        from app.models.member import MemberProfile as _MP
+        from app.models.user import User as _U
+        _row = (
+            db.query(_MP, _U)
+            .join(_U, _U.id == _MP.user_id)
+            .filter(_MP.id == deposit.member_id)
+            .first()
+        )
+        if _row:
+            _prof, _u = _row
+            _name = f"{(_u.first_name or '').strip()} {(_u.last_name or '').strip()}".strip()
+            if _name:
+                _member_label = _name
+    except Exception:
+        pass
+    _month_label = declaration.effective_month.strftime("%B %Y")
     journal_entry = create_journal_entry(
         db=db,
-        description=f"Deposit approval for member {deposit.member_id} - Declaration {declaration.effective_month}",
+        description=f"{_month_label} deposit for {_member_label}",
         lines=lines,
         dealing_month=get_dealing_month_date(db, deposit.cycle_id, declaration.effective_month),
         cycle_id=deposit.cycle_id,
