@@ -157,43 +157,14 @@ export default function DeclarationsPage() {
     // Delay to ensure cycles are loaded first
     setTimeout(checkEditParam, 500);
     loadCurrentMonthDeclaration();
-
-    // If the member has a rejected (or pending) declaration that needs
-    // revision, pull the most recent one into edit mode automatically.
-    // Without this, the page lands on a fresh-create form for the *current*
-    // month — which gets the Submit button greyed because the window for
-    // the current month isn't necessarily open. The treasurer-rejection
-    // flow is the most common path here, so we make sure it Just Works.
-    //
-    // We only auto-load when there's no explicit ?edit=<id> URL param
-    // (checkEditParam above already handles that case).
-    const autoLoadRejected = async () => {
-      if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('edit')) {
-        return;
-      }
-      try {
-        const response = await memberApi.getDeclarations();
-        if (!response.data) return;
-        const declarations = Array.isArray(response.data) ? response.data : [];
-        const needsRevision = declarations
-          .filter(
-            (d) =>
-              (d.status || '').toLowerCase() === 'rejected' ||
-              (d.status || '').toLowerCase() === 'pending' ||
-              !!d.rejected_deposit_proof,
-          )
-          .sort((a, b) =>
-            (b.effective_month || '').localeCompare(a.effective_month || ''),
-          );
-        if (needsRevision.length > 0) {
-          loadDeclarationForEdit(needsRevision[0].id);
-          setActiveTab('create');
-        }
-      } catch {
-        // best-effort
-      }
-    };
-    setTimeout(autoLoadRejected, 700);
+    // NOTE: The previous version auto-loaded the most-recent pending/rejected
+    // declaration here so a Submit button wouldn't be greyed for that month.
+    // It backfired — clicking "Make your June 2026 declaration" from the
+    // To-Do list also has no ?edit param, which made the form silently swap
+    // to whichever rejected past month was found. The To-Do list now passes
+    // an explicit ?edit=<id> for each rejected/pending declaration, so the
+    // member always lands on exactly the month they clicked, never a random
+    // past one.
   }, []);
 
   // Check for late declaration penalty when cycle or effective month changes (only for new declarations)

@@ -175,10 +175,23 @@ def get_member_todos(
             "effective_month": current_month_decl.effective_month.isoformat(),
         })
 
-    # 4. Resubmit rejected PoP — past declarations with a REJECTED proof and no
-    #    subsequent live one. Skip if this is already the current month (covered above).
+    # PoP-related items below only fire when the member genuinely committed
+    # to a declaration: status PROOF (PoP submitted, possibly rejected by
+    # treasurer) or APPROVED (declaration accepted, but file may be missing).
+    # PENDING declarations skip here — those are "draft" states; if revision
+    # is needed they should go through item 2 once treasurer rejects them.
+    # REJECTED declarations also skip — those need the declaration itself
+    # revised (item 2) before any new PoP is meaningful. This matches the
+    # policy that retrospective declarations are not allowed: if the member
+    # didn't actually commit, no PoP follow-up should be surfaced.
+    PoP_RELEVANT_STATUSES = (DeclarationStatus.PROOF, DeclarationStatus.APPROVED)
+
+    # 4. Resubmit rejected PoP — past declarations in PROOF/APPROVED status
+    #    with a REJECTED proof and no subsequent live one. Skip current month.
     for d in declarations:
         if d.effective_month.year == today.year and d.effective_month.month == today.month:
+            continue
+        if d.status not in PoP_RELEVANT_STATUSES:
             continue
         decl_id = str(d.id)
         if _has_rejected_proof(decl_id) and not _has_live_proof(decl_id):
@@ -192,13 +205,15 @@ def get_member_todos(
                 "effective_month": d.effective_month.isoformat(),
             })
 
-    # 5. Submit missing PoP — past declarations of ANY status with no PoP at all
-    #    (covers the "0 amounts" case where a declaration exists but nothing
-    #    was ever uploaded). Skip current month and skip declarations already
-    #    surfaced in items 2 or 4 above.
+    # 5. Submit missing PoP — APPROVED-but-no-PoP "0 amounts" case. Only fires
+    #    for APPROVED declarations specifically: that's the state where the
+    #    declaration is on the books but no proof was ever uploaded. PROOF
+    #    status already has *something* on file, so it won't surface here.
     surfaced_ids = {t.get("declaration_id") for t in todos if t.get("declaration_id")}
     for d in declarations:
         if d.effective_month.year == today.year and d.effective_month.month == today.month:
+            continue
+        if d.status != DeclarationStatus.APPROVED:
             continue
         decl_id = str(d.id)
         if decl_id in surfaced_ids:
@@ -209,7 +224,7 @@ def get_member_todos(
             "kind": "submit_unsubmitted_pop",
             "priority": 5,
             "title": f"Submit Proof of Payment for {d.effective_month.strftime('%B %Y')}",
-            "description": f"This {d.status.value} declaration has no proof of payment on file.",
+            "description": "This approved declaration has no proof of payment on file.",
             "link": f"/dashboard/member/payment-proof?declaration={d.id}",
             "declaration_id": decl_id,
             "effective_month": d.effective_month.isoformat(),
