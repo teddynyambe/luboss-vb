@@ -41,11 +41,23 @@ interface SavingsEntry {
   excess_source?: string;
 }
 
+interface RepaymentThisMonth {
+  loan_id: string;
+  loan_label: string;
+  date: string;
+  principal: number;
+  interest: number;
+  total: number;
+  was_carved_out: boolean;
+  narration: string | null;
+}
+
 interface MonthlyLoanBalance {
   month: string;
   loan_balance: number;
   interest_balance: number;
   loans_disbursed_this_month: { loan_id: string; amount: number; expected_interest: number }[];
+  repayments_this_month?: RepaymentThisMonth[];
 }
 
 interface MemberDetailModalProps {
@@ -334,8 +346,62 @@ export default function MemberDetailModal({
                                     ))}
                                   </div>
                                 )}
+                                {(() => {
+                                  const bal = balanceByMonth.get(row.month.substring(0, 7));
+                                  const reps = bal?.repayments_this_month ?? [];
+                                  if (reps.length === 0) return null;
+                                  return (
+                                    <div className="mt-1 pt-1 border-t border-blue-200 text-[11px] text-blue-700 space-y-0.5 leading-tight text-left">
+                                      <div className="font-semibold text-blue-800">Posted to loans:</div>
+                                      {reps.map((r, i) => (
+                                        <div key={i} className={r.was_carved_out ? 'text-amber-700' : ''}>
+                                          <span className="font-semibold">{r.loan_label}:</span>{' '}
+                                          {r.principal > 0 && <span>P {fmt(r.principal)}</span>}
+                                          {r.principal > 0 && r.interest > 0 && <span> · </span>}
+                                          {r.interest > 0 && <span>I {fmt(r.interest)}</span>}
+                                          {r.was_carved_out && (
+                                            <span
+                                              className="ml-1 text-amber-700"
+                                              title={r.narration || 'Moved by treasurer'}
+                                            >
+                                              (moved by treasurer)
+                                            </span>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  );
+                                })()}
                               </div>
-                            ) : '—'}
+                            ) : (() => {
+                              // No declaration row for this month but a carve-out repayment
+                              // may still have landed here (e.g. interest moved in from
+                              // another loan). Show those so the member sees the activity.
+                              const bal = balanceByMonth.get(row.month.substring(0, 7));
+                              const reps = bal?.repayments_this_month ?? [];
+                              if (reps.length === 0) return '—';
+                              return (
+                                <div className="text-[11px] text-blue-700 space-y-0.5 leading-tight text-left">
+                                  <div className="font-semibold text-blue-800">Posted to loans:</div>
+                                  {reps.map((r, i) => (
+                                    <div key={i} className={r.was_carved_out ? 'text-amber-700' : ''}>
+                                      <span className="font-semibold">{r.loan_label}:</span>{' '}
+                                      {r.principal > 0 && <span>P {fmt(r.principal)}</span>}
+                                      {r.principal > 0 && r.interest > 0 && <span> · </span>}
+                                      {r.interest > 0 && <span>I {fmt(r.interest)}</span>}
+                                      {r.was_carved_out && (
+                                        <span
+                                          className="ml-1 text-amber-700"
+                                          title={r.narration || 'Moved by treasurer'}
+                                        >
+                                          (moved by treasurer)
+                                        </span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              );
+                            })()}
                           </td>
                           <td className="py-2 pr-4 text-right font-semibold text-blue-900 whitespace-nowrap align-top">{fmt(row.deposited)}</td>
                           {hasAnyLoanActivity && (() => {

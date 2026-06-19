@@ -589,6 +589,22 @@ def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]
                 {"loan_id": str, "amount": float, "expected_interest": float},
                 ...
             ],
+            "repayments_this_month": [
+                {
+                    "loan_id": str,
+                    "loan_label": str,         # e.g. "April 2026 (c11452f2)"
+                    "date": "YYYY-MM-DD",
+                    "principal": float,
+                    "interest": float,
+                    "total": float,
+                    "was_carved_out": bool,    # True if this is a portion moved
+                                               # in from another loan via the
+                                               # treasurer's carve-out tool
+                    "narration": str | None,   # human-readable JE description
+                                               # when was_carved_out is True
+                },
+                ...
+            ],
         }
     """
     from app.models.transaction import Loan, Repayment
@@ -634,6 +650,16 @@ def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]
         .all()
     )
 
+    # Pre-build a label for each loan ("April 2026 (c11452f2)") so per-month
+    # repayment rows are immediately readable to the member.
+    def _loan_label(L) -> str:
+        short = str(L.id)[:8]
+        if L.disbursement_date:
+            return f"{L.disbursement_date.strftime('%B %Y')} ({short})"
+        return short
+
+    loan_lookup = {L.id: L for L in loans}
+
     timeline: list[dict] = []
     for month_start in months:
         # Cumulative figures as of end of this month.
@@ -661,10 +687,33 @@ def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]
 
         principal_paid = Decimal("0.00")
         interest_paid = Decimal("0.00")
-        for rep, _je in rep_rows:
+        reps_this_month: list[dict] = []
+        for rep, je in rep_rows:
             if rep.repayment_date and rep.repayment_date < next_month_start:
                 principal_paid += rep.principal_amount or Decimal("0.00")
                 interest_paid += rep.interest_amount or Decimal("0.00")
+            # Group by the month the repayment was DATED in (matches the rows
+            # the member sees on their statement). Carve-out source_type is
+            # set by move_repayment_portion in loan_repair.py.
+            if rep.repayment_date and (
+                rep.repayment_date.year == month_start.year
+                and rep.repayment_date.month == month_start.month
+            ):
+                src_loan = loan_lookup.get(rep.loan_id)
+                was_carved = (je.source_type == "repayment_carve_out")
+                reps_this_month.append({
+                    "loan_id": str(rep.loan_id),
+                    "loan_label": _loan_label(src_loan) if src_loan else str(rep.loan_id)[:8],
+                    "date": rep.repayment_date.isoformat(),
+                    "principal": float((rep.principal_amount or Decimal("0.00")).quantize(Decimal("0.01"))),
+                    "interest": float((rep.interest_amount or Decimal("0.00")).quantize(Decimal("0.01"))),
+                    "total": float((rep.total_amount or Decimal("0.00")).quantize(Decimal("0.01"))),
+                    "was_carved_out": was_carved,
+                    "narration": (je.description or None) if was_carved else None,
+                })
+
+        # Sort: carve-out lines after originals; within each, by loan label.
+        reps_this_month.sort(key=lambda r: (r["was_carved_out"], r["loan_label"]))
 
         loan_balance = max(Decimal("0.00"), principal_disbursed - principal_paid)
         interest_balance = max(Decimal("0.00"), interest_accrued - interest_paid)
@@ -674,6 +723,7 @@ def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]
             "loan_balance": float(loan_balance.quantize(Decimal("0.01"))),
             "interest_balance": float(interest_balance.quantize(Decimal("0.01"))),
             "loans_disbursed_this_month": loans_this_month,
+            "repayments_this_month": reps_this_month,
         })
 
     return timeline
