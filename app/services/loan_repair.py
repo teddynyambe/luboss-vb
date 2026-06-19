@@ -1004,7 +1004,7 @@ def edit_loan_terms(
     # ledger even when loan.loan_amount has previously been edited out of band
     # (leaving the ledger orphaned at the original disbursement figure).
     current_ledger_disbursed = Decimal("0.00")
-    for ln in disb_je.lines:
+    for ln in disb_je.journal_lines:
         if ln.account and ln.account.account_code.startswith("LOANS_RECEIVABLE"):
             current_ledger_disbursed += Decimal(str(ln.debit_amount or 0))
 
