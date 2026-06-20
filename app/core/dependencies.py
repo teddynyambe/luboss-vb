@@ -114,8 +114,6 @@ def require_role(role_name: str):
 require_admin = require_role("Admin")
 require_chairman = require_role("Chairman")
 require_vice_chairman = require_role("Vice-Chairman")
-require_treasurer = require_role("Treasurer")
-require_compliance = require_role("Compliance")
 require_member = require_role("Member")
 
 
@@ -133,6 +131,15 @@ def require_any_role(*role_names: str):
             detail=f"User does not have any of the required roles: {', '.join(role_names)}"
         )
     return role_checker
+
+
+# Treasurer and Compliance gates implicitly admit Chairman, because the
+# Chairman role oversees both functions and must be able to step in.
+# Defining them in terms of require_any_role keeps every existing
+# `Depends(require_treasurer)` / `Depends(require_compliance)` site working
+# without churn — Chairman just passes the same gate.
+require_treasurer = require_any_role("Treasurer", "Chairman")
+require_compliance = require_any_role("Compliance", "Chairman")
 
 
 def require_not_admin():

@@ -121,18 +121,27 @@ def run_scheduled_tasks() -> None:
         if not closed_loans and not excess_transfers:
             return
 
-        # Collect all treasurer emails
-        treasurers = db.query(User).filter(
-            User.role == UserRoleEnum.TREASURER,
+        # Collect Treasurer + Chairman emails. Chairman oversees the
+        # treasurer function and must see the same auto-close / transfer
+        # activity so nothing happens to the books without their visibility.
+        recipients = db.query(User).filter(
+            User.role.in_([UserRoleEnum.TREASURER, UserRoleEnum.CHAIRMAN]),
         ).all()
-        treasurer_emails = [t.email for t in treasurers if t.email]
+        # De-duplicate while preserving order (a single user could in theory
+        # appear twice if held both legacy and RBAC role variants).
+        seen: set[str] = set()
+        to_emails: list[str] = []
+        for u in recipients:
+            if u.email and u.email not in seen:
+                seen.add(u.email)
+                to_emails.append(u.email)
 
-        if not treasurer_emails:
+        if not to_emails:
             return
 
         from app.core.email import send_scheduler_report
         send_scheduler_report(
-            to_emails=treasurer_emails,
+            to_emails=to_emails,
             closed_loans=closed_loans,
             excess_transfers=excess_transfers,
         )
