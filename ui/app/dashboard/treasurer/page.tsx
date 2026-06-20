@@ -2414,15 +2414,15 @@ export default function TreasurerDashboard() {
       {showLoanApprovalModal && loanToApprove && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={cancelApproveLoan}>
           <div
-            className="bg-white rounded-xl shadow-2xl max-w-md w-full"
+            className="bg-white rounded-xl shadow-2xl max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="bg-green-600 text-white px-6 py-4 rounded-t-xl">
+            <div className="bg-green-600 text-white px-6 py-4 rounded-t-xl shrink-0">
               <h2 className="text-xl md:text-2xl font-bold">Confirm Loan Approval</h2>
             </div>
 
-            <div className="p-6 md:p-8">
-              <div className="mb-6">
+            <div className="flex-1 overflow-y-auto p-6 md:p-8">
+              <div>
                 <p className="text-base md:text-lg text-blue-900 mb-4">
                   Are you sure you want to approve and disburse this loan?
                 </p>
@@ -2510,33 +2510,33 @@ export default function TreasurerDashboard() {
                   </p>
                 </div>
               </div>
+            </div>
 
-              <div className="flex flex-col sm:flex-row justify-end gap-3 pt-4 border-t-2 border-gray-200">
-                <button
-                  type="button"
-                  onClick={cancelApproveLoan}
-                  disabled={approvingLoan === loanToApprove.id}
-                  className="btn-secondary disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => confirmApproveLoan(loanApprovalForce)}
-                  disabled={approvingLoan === loanToApprove.id}
-                  className={`px-4 py-2 md:px-6 md:py-3 border-2 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200 ${
-                    loanApprovalForce
-                      ? 'bg-gradient-to-br from-amber-500 to-amber-600 border-amber-600 hover:from-amber-600 hover:to-amber-700'
-                      : 'bg-gradient-to-br from-green-500 to-green-600 border-green-600 hover:from-green-600 hover:to-green-700'
-                  }`}
-                >
-                  {approvingLoan === loanToApprove.id
-                    ? 'Approving...'
-                    : loanApprovalForce
-                      ? 'Confirm Override & Disburse'
-                      : 'Approve & Disburse Loan'}
-                </button>
-              </div>
+            <div className="shrink-0 flex flex-col sm:flex-row justify-end gap-3 p-4 md:p-6 border-t-2 border-gray-200 bg-white">
+              <button
+                type="button"
+                onClick={cancelApproveLoan}
+                disabled={approvingLoan === loanToApprove.id}
+                className="btn-secondary disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmApproveLoan(loanApprovalForce)}
+                disabled={approvingLoan === loanToApprove.id}
+                className={`px-4 py-2 md:px-6 md:py-3 border-2 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold transition-all duration-200 ${
+                  loanApprovalForce
+                    ? 'bg-gradient-to-br from-amber-500 to-amber-600 border-amber-600 hover:from-amber-600 hover:to-amber-700'
+                    : 'bg-gradient-to-br from-green-500 to-green-600 border-green-600 hover:from-green-600 hover:to-green-700'
+                }`}
+              >
+                {approvingLoan === loanToApprove.id
+                  ? 'Approving...'
+                  : loanApprovalForce
+                    ? 'Confirm Override & Disburse'
+                    : 'Approve & Disburse Loan'}
+              </button>
             </div>
           </div>
         </div>
