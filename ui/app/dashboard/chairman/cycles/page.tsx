@@ -593,7 +593,7 @@ export default function ManageCyclesPage() {
                       Social Fund Required (Annual)
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="social_fund_required"
                       name="social_fund_required"
                       value={socialFundRequired}
@@ -610,7 +610,7 @@ export default function ManageCyclesPage() {
                       Admin Fund Required (Annual)
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="admin_fund_required"
                       name="admin_fund_required"
                       value={adminFundRequired}
@@ -642,7 +642,7 @@ export default function ManageCyclesPage() {
                           Start Day *
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="declarationStartDay"
                           min="1"
                           max="31"
@@ -657,7 +657,7 @@ export default function ManageCyclesPage() {
                           End Day (Optional)
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="declarationEndDay"
                           min="1"
                           max="31"
@@ -715,7 +715,7 @@ export default function ManageCyclesPage() {
                           Start Day *
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="loanApplicationStartDay"
                           min="1"
                           max="31"
@@ -730,7 +730,7 @@ export default function ManageCyclesPage() {
                           End Day (Optional)
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="loanApplicationEndDay"
                           min="1"
                           max="31"
@@ -788,7 +788,7 @@ export default function ManageCyclesPage() {
                           Start Day *
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="depositsStartDay"
                           min="1"
                           max="31"
@@ -803,7 +803,7 @@ export default function ManageCyclesPage() {
                           End Day (Optional)
                         </label>
                         <input
-                          type="number"
+                          type="number" inputMode="decimal"
                           id="depositsEndDay"
                           min="1"
                           max="31"
@@ -933,7 +933,7 @@ export default function ManageCyclesPage() {
                               Tier Order *
                             </label>
                             <input
-                              type="number"
+                              type="number" inputMode="decimal"
                               value={tier.tier_order}
                               onChange={(e) => handleUpdateTier(tierIndex, 'tier_order', parseInt(e.target.value) || 1)}
                               required
@@ -959,7 +959,7 @@ export default function ManageCyclesPage() {
                               Borrowing Multiplier *
                             </label>
                             <input
-                              type="number"
+                              type="number" inputMode="decimal"
                               step="0.01"
                               min="0"
                               value={tier.multiplier}
@@ -1011,7 +1011,7 @@ export default function ManageCyclesPage() {
                                   </label>
                                   <div className="flex gap-2">
                                     <input
-                                      type="number"
+                                      type="number" inputMode="decimal"
                                       step="0.01"
                                       min="0"
                                       max="100"

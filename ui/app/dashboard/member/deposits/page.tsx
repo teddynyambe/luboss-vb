@@ -290,7 +290,7 @@ export default function UploadDepositProofPage() {
                   Deposit Amount (K) *
                 </label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   id="amount"
                   step="0.01"
                   min="0"

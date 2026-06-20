@@ -78,7 +78,7 @@ export default function AdminDashboard() {
                     SMTP Port
                   </label>
                   <input
-                    type="number"
+                    type="number" inputMode="decimal"
                     value={settings.SMTP_PORT || ''}
                     onChange={(e) => setSettings({ ...settings, SMTP_PORT: e.target.value })}
                     className="w-full"

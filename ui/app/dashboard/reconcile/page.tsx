@@ -199,7 +199,7 @@ export default function ReconcilePage() {
     <div className="flex flex-col gap-1">
       <label className="text-sm font-semibold text-blue-900">{label}</label>
       <input
-        type="number"
+        type="number" inputMode="decimal"
         min="0"
         step="0.01"
         value={formData[key]}

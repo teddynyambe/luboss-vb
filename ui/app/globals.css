@@ -43,6 +43,25 @@ textarea {
   @apply px-4 py-3 text-base border-2 border-blue-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-500 min-h-[48px];
 }
 
+/* Numeric inputs — strip the spinner arrows so a stray tap/scroll
+ * can't bump a money value. Pairs with inputMode="decimal" on the
+ * input elements so phones still pop the numeric keypad. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;       /* Firefox */
+  appearance: textfield;
+}
+/* Block the mouse-wheel from silently changing a focused number input —
+ * the classic "I scrolled the page and my amount changed" bug. */
+input[type="number"]:focus {
+  /* No CSS hook for wheel events; handled by a small global JS listener
+   * registered in components that need it. CSS marker kept for clarity. */
+}
+
 /* Card styles */
 .card {
   @apply bg-white rounded-xl shadow-lg p-6 border border-blue-100;

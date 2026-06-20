@@ -631,7 +631,7 @@ export default function PaymentProofPage() {
                       Deposit Amount (K) *
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="amount"
                       step="0.01"
                       min="0"
@@ -914,7 +914,7 @@ export default function PaymentProofPage() {
                                         Deposit Amount (K) (Optional)
                                       </label>
                                       <input
-                                        type="number"
+                                        type="number" inputMode="decimal"
                                         id="resubmit_amount"
                                         step="0.01"
                                         min="0"

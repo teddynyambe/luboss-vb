@@ -111,7 +111,7 @@ export default function SettingsPage() {
 
               <div className="flex gap-3 items-center">
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   min="1"
                   max="60"
                   value={newTerm}

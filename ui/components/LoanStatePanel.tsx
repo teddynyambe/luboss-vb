@@ -763,7 +763,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">New loan amount (K)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   step="0.01"
                   value={newAmount}
                   onChange={(e) => setNewAmount(e.target.value)}
@@ -773,7 +773,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">Interest rate (%)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   step="0.01"
                   value={newRate}
                   onChange={(e) => setNewRate(e.target.value)}
@@ -905,7 +905,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">Principal to move (K)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   min="0"
                   step="0.01"
                   placeholder="0.00 (blank = none)"
@@ -920,7 +920,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">Interest to move (K)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   min="0"
                   step="0.01"
                   placeholder="0.00 (blank = none)"
@@ -992,7 +992,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">Principal (K)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   step="0.01"
                   value={editPrincipal}
                   onChange={(e) => {
@@ -1006,7 +1006,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">Interest (K)</label>
                 <input
-                  type="number"
+                  type="number" inputMode="decimal"
                   step="0.01"
                   value={editInterest}
                   onChange={(e) => {
@@ -1106,7 +1106,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-semibold text-blue-900">Loan amount (K)</label>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         min="0"
                         step="0.01"
                         value={repairNewAmount}
@@ -1120,7 +1120,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-semibold text-blue-900">Tenure (months)</label>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         min="1"
                         step="1"
                         value={repairNewTerm}
@@ -1134,7 +1134,7 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-semibold text-blue-900">Interest rate (%)</label>
                       <input
-                        type="number"
+                        type="number" inputMode="decimal"
                         min="0"
                         step="0.01"
                         value={repairNewRate}

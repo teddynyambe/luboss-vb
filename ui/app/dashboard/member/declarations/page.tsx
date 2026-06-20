@@ -819,7 +819,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       Savings Amount (K)
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_savings_amount"
                       name="declared_savings_amount"
                       step="0.01"
@@ -841,7 +841,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       )}
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_social_fund"
                       name="declared_social_fund"
                       step="0.01"
@@ -863,7 +863,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       )}
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_admin_fund"
                       name="declared_admin_fund"
                       step="0.01"
@@ -882,7 +882,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       ) : null}
                     </label>
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_penalties"
                       name="declared_penalties"
                       step="0.01"
@@ -945,7 +945,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       </div>
                     )}
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_interest_on_loan"
                       name="declared_interest_on_loan"
                       step="0.01"
@@ -992,7 +992,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       </div>
                     )}
                     <input
-                      type="number"
+                      type="number" inputMode="decimal"
                       id="declared_loan_repayment"
                       name="declared_loan_repayment"
                       step="0.01"

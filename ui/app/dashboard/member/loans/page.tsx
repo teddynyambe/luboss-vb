@@ -735,7 +735,7 @@ export default function LoanApplicationPage() {
                     Loan Amount (K) *
                   </label>
                   <input
-                    type="number"
+                    type="number" inputMode="decimal"
                     id="modal_amount"
                     name="amount"
                     step="0.01"

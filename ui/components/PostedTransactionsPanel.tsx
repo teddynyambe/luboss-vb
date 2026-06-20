@@ -371,7 +371,7 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
               </div>
               <div>
                 <label className="block text-xs font-semibold text-blue-900">Amount (K)</label>
-                <input type="number" step="0.01" min="0" value={splitAmount}
+                <input type="number" inputMode="decimal" step="0.01" min="0" value={splitAmount}
                   onChange={(e) => setSplitAmount(e.target.value)}
                   className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm" />
               </div>

@@ -321,7 +321,7 @@ export default function PaymentRequestsPage() {
                 <div>
                   <label className="block text-sm font-semibold text-blue-900 mb-1">Amount (K) *</label>
                   <input
-                    type="number"
+                    type="number" inputMode="decimal"
                     step="0.01"
                     min="0.01"
                     value={formAmount}
