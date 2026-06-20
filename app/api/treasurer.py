@@ -1056,6 +1056,11 @@ class ApproveLoanRequest(BaseModel):
     amount: Optional[float] = None         # disbursed amount (overrides application.amount)
     term_months: Optional[str] = None      # actual term (overrides application.term_months)
     note: Optional[str] = None             # reason for the variation; appended to application.notes
+    # Optional surcharge penalty — when set, a pending PenaltyRecord of this
+    # type is created against the member at disbursement (e.g. "Emergency
+    # Loan" K150 for out-of-window borrowing). The member will see and pay
+    # it on their next declaration just like any other pending penalty.
+    surcharge_penalty_type_id: Optional[str] = None
 
 
 @router.post("/loans/{application_id}/approve")
@@ -1235,16 +1240,57 @@ def approve_loan_application(
     _loan_user = db.query(UserModel).filter(UserModel.id == _loan_member.user_id).first() if _loan_member else None
     _loan_name = f"{_loan_user.first_name or ''} {_loan_user.last_name or ''}".strip() if _loan_user else str(application.member_id)
     from app.core.audit import write_audit_log
+    from app.models.transaction import PenaltyRecordStatus
+
+    # Optional surcharge penalty (e.g. Emergency Loan K150). Created PENDING so
+    # the member sees it on their next declaration and pays for it like any
+    # other pending penalty. Surcharge is independent of the loan's ledger
+    # post — it lands in the standard penalty bucket so the existing
+    # declaration / deposit / approve_penalty flow handles posting.
+    surcharge_record_id = None
+    surcharge_name = None
+    if body and body.surcharge_penalty_type_id:
+        try:
+            surcharge_uuid = UUID(body.surcharge_penalty_type_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid surcharge_penalty_type_id format")
+        surcharge_type = db.query(PenaltyType).filter(
+            PenaltyType.id == surcharge_uuid,
+            PenaltyType.enabled == "1",
+        ).first()
+        if not surcharge_type:
+            raise HTTPException(
+                status_code=404,
+                detail="Surcharge penalty type not found or disabled",
+            )
+        surcharge_record = PenaltyRecord(
+            member_id=application.member_id,
+            penalty_type_id=surcharge_type.id,
+            status=PenaltyRecordStatus.PENDING.value,
+            created_by=current_user.id,
+            notes=f"Auto-issued at loan disbursement (loan {str(loan.id)[:8]}, K{application.amount})",
+        )
+        db.add(surcharge_record)
+        db.commit()
+        db.refresh(surcharge_record)
+        surcharge_record_id = str(surcharge_record.id)
+        surcharge_name = surcharge_type.name
+
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
         user_role=current_user.role.value if current_user.role else "treasurer",
         action="Loan approved & disbursed",
-        details=f"member={_loan_name}, amount=K {application.amount}"
+        details=(
+            f"member={_loan_name}, amount=K {application.amount}"
+            + (f", surcharge={surcharge_name}" if surcharge_name else "")
+        ),
     )
     return {
         "message": "Loan approved, disbursed, and posted to member's account successfully",
         "loan_id": str(loan.id),
-        "application_id": str(application.id)
+        "application_id": str(application.id),
+        "surcharge_penalty_id": surcharge_record_id,
+        "surcharge_penalty_name": surcharge_name,
     }
 
 

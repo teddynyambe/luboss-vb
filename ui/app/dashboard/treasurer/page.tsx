@@ -141,6 +141,11 @@ export default function TreasurerDashboard() {
   const [approveAmount, setApproveAmount] = useState<string>('');
   const [approveTerm, setApproveTerm] = useState<string>('');
   const [approveNote, setApproveNote] = useState<string>('');
+  // Optional surcharge penalty (e.g. Emergency Loan K150) to issue at disbursement
+  const [approveSurchargePenaltyId, setApproveSurchargePenaltyId] = useState<string>('');
+  const [approvalPenaltyTypes, setApprovalPenaltyTypes] = useState<
+    { id: string; name: string; description: string | null; fee_amount: string }[]
+  >([]);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -607,7 +612,20 @@ export default function TreasurerDashboard() {
       setApproveAmount(String(loan.amount));
       setApproveTerm(loan.term_months || '1');
       setApproveNote('');
+      setApproveSurchargePenaltyId('');
       setShowLoanApprovalModal(true);
+      // Load the current penalty-type catalogue so the dropdown reflects
+      // whatever the group has configured (e.g. "Emergency Loan K150").
+      try {
+        const res = await api.get<{ id: string; name: string; description: string | null; fee_amount: string }[]>(
+          '/api/treasurer/penalty-types'
+        );
+        if (res.data && Array.isArray(res.data)) {
+          setApprovalPenaltyTypes(res.data);
+        }
+      } catch {
+        // Silent — dropdown just stays empty and treasurer can still approve.
+      }
     }
   };
 
@@ -617,7 +635,15 @@ export default function TreasurerDashboard() {
     // Build override body only when the treasurer actually changed something
     // or added a note; otherwise approve with the application's stored values.
     const requestedAmount = parseFloat(approveAmount);
-    const body: { amount?: number; term_months?: string; note?: string } = {};
+    const body: {
+      amount?: number;
+      term_months?: string;
+      note?: string;
+      surcharge_penalty_type_id?: string;
+    } = {};
+    if (approveSurchargePenaltyId) {
+      body.surcharge_penalty_type_id = approveSurchargePenaltyId;
+    }
     if (
       !Number.isNaN(requestedAmount) &&
       Math.abs(requestedAmount - Number(loanToApprove.amount)) > 0.001
@@ -643,9 +669,18 @@ export default function TreasurerDashboard() {
     setMessage(null);
     try {
       const url = `/api/treasurer/loans/${loanToApprove.id}/approve${force ? '?force=true' : ''}`;
-      const response = await api.post(url, Object.keys(body).length ? body : undefined);
+      const response = await api.post<{ surcharge_penalty_name?: string | null }>(
+        url,
+        Object.keys(body).length ? body : undefined,
+      );
       if (!response.error) {
-        setMessage({ type: 'success', text: 'Loan approved, disbursed, and posted to member\'s account successfully!' });
+        const surchargeName = response.data?.surcharge_penalty_name;
+        setMessage({
+          type: 'success',
+          text: surchargeName
+            ? `Loan approved & disbursed. ${surchargeName} penalty also issued — member will see it on their next declaration.`
+            : 'Loan approved, disbursed, and posted to member\'s account successfully!',
+        });
         await loadData();
         setShowLoanApprovalModal(false);
         setLoanToApprove(null);
@@ -1861,9 +1896,10 @@ export default function TreasurerDashboard() {
         </div>
       )}
 
-      {/* Proof of Payment Modal */}
+      {/* Proof of Payment Modal — stacks above Declaration Details (z-50) so
+          it stays on top when opened from inside that modal. */}
       {showProofModal && (
-        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-50" onClick={closeProofModal}>
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-[60]" onClick={closeProofModal}>
           <div className="bg-white rounded-xl shadow-2xl max-w-6xl w-full max-h-[95vh] overflow-hidden flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 bg-blue-600 text-white px-6 py-4 flex justify-between items-center">
               <h2 className="text-xl md:text-2xl font-bold">Proof of Payment</h2>
@@ -2330,7 +2366,10 @@ export default function TreasurerDashboard() {
                             {declarationDetails.deposit_proof.has_file && declarationDetails.deposit_proof.upload_path ? (
                               <button
                                 type="button"
-                                onClick={() => handleViewProof(declarationDetails.deposit_proof!.upload_path!)}
+                                onClick={() => handleViewProof(
+                                  declarationDetails.deposit_proof!.upload_path!,
+                                  { upload_path: declarationDetails.deposit_proof!.upload_path! } as PendingDeposit,
+                                )}
                                 className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
                               >
                                 📎 View Proof of Payment
@@ -2434,6 +2473,34 @@ export default function TreasurerDashboard() {
                       placeholder="e.g. Group only has K7,000 cash on hand; disbursing K7,000 of the K10,000 requested."
                       className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">
+                      Surcharge penalty (optional)
+                    </label>
+                    <select
+                      value={approveSurchargePenaltyId}
+                      onChange={(e) => setApproveSurchargePenaltyId(e.target.value)}
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    >
+                      <option value="">None — standard loan</option>
+                      {approvalPenaltyTypes.map((pt) => (
+                        <option key={pt.id} value={pt.id}>
+                          {pt.name} — K{Number(pt.fee_amount).toLocaleString()}
+                        </option>
+                      ))}
+                    </select>
+                    {approveSurchargePenaltyId && (() => {
+                      const pt = approvalPenaltyTypes.find((p) => p.id === approveSurchargePenaltyId);
+                      if (!pt) return null;
+                      return (
+                        <p className="text-[11px] text-amber-700 mt-0.5">
+                          Member will see a pending K{Number(pt.fee_amount).toLocaleString()}{' '}
+                          <span className="font-semibold">{pt.name}</span> penalty on their next declaration.
+                          {pt.description ? ` (${pt.description})` : ''}
+                        </p>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div className="mt-4 p-3 bg-yellow-50 border-2 border-yellow-300 rounded-xl">
