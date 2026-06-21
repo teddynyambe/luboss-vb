@@ -467,12 +467,12 @@ def create_declaration_endpoint(
             member_id=member_profile.id,
             cycle_id=declaration_data.cycle_id,
             effective_month=declaration_data.effective_month,
-            declared_savings_amount=Decimal(str(declaration_data.declared_savings_amount)) if declaration_data.declared_savings_amount else None,
-            declared_social_fund=Decimal(str(declaration_data.declared_social_fund)) if declaration_data.declared_social_fund else None,
-            declared_admin_fund=Decimal(str(declaration_data.declared_admin_fund)) if declaration_data.declared_admin_fund else None,
-            declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties else None,
-            declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan else None,
-            declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment else None
+            declared_savings_amount=Decimal(str(declaration_data.declared_savings_amount)) if declaration_data.declared_savings_amount is not None else None,
+            declared_social_fund=Decimal(str(declaration_data.declared_social_fund)) if declaration_data.declared_social_fund is not None else None,
+            declared_admin_fund=Decimal(str(declaration_data.declared_admin_fund)) if declaration_data.declared_admin_fund is not None else None,
+            declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties is not None else None,
+            declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan is not None else None,
+            declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment is not None else None
         )
         from app.core.audit import write_audit_log
         write_audit_log(
@@ -1207,18 +1207,22 @@ def update_declaration_endpoint(
         )
 
     try:
+        # Use `is not None` (NOT truthiness) so a legitimate 0 reaches the
+        # service layer. Zeroing out a field is a valid edit — "I declared
+        # K200 interest but actually owe none this month" must land as
+        # Decimal("0"), not None (which the service treats as "skip").
         updated_declaration = update_declaration(
             db=db,
             declaration_id=declaration_uuid,
             member_id=member_profile.id,
             cycle_id=UUID(declaration_data.cycle_id),
             effective_month=declaration_data.effective_month,
-            declared_savings_amount=Decimal(str(declaration_data.declared_savings_amount)) if declaration_data.declared_savings_amount else None,
-            declared_social_fund=Decimal(str(declaration_data.declared_social_fund)) if declaration_data.declared_social_fund else None,
-            declared_admin_fund=Decimal(str(declaration_data.declared_admin_fund)) if declaration_data.declared_admin_fund else None,
-            declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties else None,
-            declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan else None,
-            declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment else None,
+            declared_savings_amount=Decimal(str(declaration_data.declared_savings_amount)) if declaration_data.declared_savings_amount is not None else None,
+            declared_social_fund=Decimal(str(declaration_data.declared_social_fund)) if declaration_data.declared_social_fund is not None else None,
+            declared_admin_fund=Decimal(str(declaration_data.declared_admin_fund)) if declaration_data.declared_admin_fund is not None else None,
+            declared_penalties=Decimal(str(declaration_data.declared_penalties)) if declaration_data.declared_penalties is not None else None,
+            declared_interest_on_loan=Decimal(str(declaration_data.declared_interest_on_loan)) if declaration_data.declared_interest_on_loan is not None else None,
+            declared_loan_repayment=Decimal(str(declaration_data.declared_loan_repayment)) if declaration_data.declared_loan_repayment is not None else None,
             allow_rejected_edit=editable,
         )
         return {"message": "Declaration updated successfully", "declaration_id": str(updated_declaration.id)}

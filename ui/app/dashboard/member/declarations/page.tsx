@@ -824,7 +824,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_savings_amount"
                       step="0.01"
                       min="0"
-                      value={formData.declared_savings_amount || ''}
+                      value={formData.declared_savings_amount ?? ''}
                       onChange={handleChange}
                       className="w-full"
                       placeholder="0.00"
@@ -846,7 +846,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_social_fund"
                       step="0.01"
                       min="0"
-                      value={formData.declared_social_fund || ''}
+                      value={formData.declared_social_fund ?? ''}
                       onChange={handleChange}
                       className="w-full"
                       placeholder="0.00"
@@ -868,7 +868,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_admin_fund"
                       step="0.01"
                       min="0"
-                      value={formData.declared_admin_fund || ''}
+                      value={formData.declared_admin_fund ?? ''}
                       onChange={handleChange}
                       className="w-full"
                       placeholder="0.00"
@@ -887,7 +887,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_penalties"
                       step="0.01"
                       min="0"
-                      value={formData.declared_penalties || ''}
+                      value={formData.declared_penalties ?? ''}
                       onChange={handleChange}
                       readOnly
                       className="w-full bg-gray-100 cursor-not-allowed"
@@ -950,7 +950,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_interest_on_loan"
                       step="0.01"
                       min="0"
-                      value={formData.declared_interest_on_loan || ''}
+                      value={formData.declared_interest_on_loan ?? ''}
                       onChange={handleChange}
                       className="w-full"
                       placeholder="0.00"
@@ -997,7 +997,7 @@ TOTAL DECLARED AMOUNT: K${total.toLocaleString()}`;
                       name="declared_loan_repayment"
                       step="0.01"
                       min="0"
-                      value={formData.declared_loan_repayment || ''}
+                      value={formData.declared_loan_repayment ?? ''}
                       onChange={handleChange}
                       className="w-full"
                       placeholder="0.00"
