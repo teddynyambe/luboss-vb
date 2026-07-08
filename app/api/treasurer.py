@@ -1600,6 +1600,92 @@ def get_suggested_loan_rate(
     }
 
 
+class ReconcileDeclarationRequest(BaseModel):
+    """Body for creating or editing a member's declaration on behalf.
+
+    Handles three cases in one call:
+      * declaration missing  → create + auto-post (posts full JE)
+      * declaration PENDING  → update amounts + auto-post
+      * declaration APPROVED → per-category correcting JE for deltas
+    """
+    member_id: str
+    month: str                           # YYYY-MM-DD (first of the effective month)
+    savings_amount: float = 0.0
+    social_fund: float = 0.0
+    admin_fund: float = 0.0
+    penalties: float = 0.0
+    interest_on_loan: float = 0.0
+    loan_repayment: float = 0.0
+    reason: str
+
+
+@router.post("/declarations/reconcile-post")
+def post_reconcile_declaration(
+    body: ReconcileDeclarationRequest,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Create, edit, or correct a member's monthly declaration in one call.
+
+    Behaviour depends on the declaration's current state (looked up by
+    member × effective month):
+
+    * **No declaration** → creates the Declaration with the supplied amounts,
+      creates a synthetic DepositProof (upload_path="reconciliation"), runs
+      the standard `approve_deposit` service so the JE, per-category
+      accounts, Repayment row, and penalty matches all post as usual.
+    * **PENDING / PROOF** → updates the declared amounts and re-runs
+      `approve_deposit` so the deposit is approved with the corrected
+      figures. If a real DepositProof was uploaded already it's reused.
+    * **APPROVED** → posts a single per-category correcting JE (source_type
+      `"declaration_edit"`) with Dr/Cr Bank Cash ↔ each changed account for
+      the delta amount; updates the Declaration row; syncs the linked
+      Repayment principal/interest if either loan-side amount changed.
+
+    Rejects future months and empty (all-zero) submissions.
+    """
+    from app.services.transaction_repair import reconcile_declaration_and_post
+    from app.core.audit import write_audit_log
+    from decimal import Decimal
+    from datetime import date as _date
+    try:
+        member_uuid = UUID(body.member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id")
+    try:
+        month = _date.fromisoformat(body.month[:10])
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid month (use YYYY-MM-DD)")
+    try:
+        result = reconcile_declaration_and_post(
+            db=db,
+            member_id=member_uuid,
+            month=month,
+            savings=Decimal(str(body.savings_amount)),
+            social_fund=Decimal(str(body.social_fund)),
+            admin_fund=Decimal(str(body.admin_fund)),
+            penalties=Decimal(str(body.penalties)),
+            interest_on_loan=Decimal(str(body.interest_on_loan)),
+            loan_repayment=Decimal(str(body.loan_repayment)),
+            reason=body.reason,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action=f"Declaration reconciled ({result.get('outcome')})",
+        details=(
+            f"member={body.member_id} month={body.month} "
+            f"S={body.savings_amount} SF={body.social_fund} AF={body.admin_fund} "
+            f"P={body.penalties} I={body.interest_on_loan} LR={body.loan_repayment}"
+        ),
+    )
+    return result
+
+
 class PostRepaymentForDeclarationRequest(BaseModel):
     """Post a fresh Repayment against a chosen loan for a declaration that
     has non-zero loan_repayment / interest but no attributed Repayment row.

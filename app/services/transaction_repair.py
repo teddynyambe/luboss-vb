@@ -617,3 +617,377 @@ def move_transaction(
         "cycle_id": str(je.cycle_id) if je.cycle_id else None,
         "reason": desc,
     }
+
+
+# ---------------------------------------------------------------------------
+# Treasurer-side "reconcile & post a declaration on behalf of the member"
+# ---------------------------------------------------------------------------
+
+def _ensure_member_category_account(
+    db: Session, member_id: UUID, category: str
+) -> LedgerAccount:
+    """Look up the member's per-category account, creating it lazily.
+
+    Same shape/logic as `approve_deposit` in transaction.py — kept aligned so
+    on-behalf posting hits the exact same accounts as the normal member flow.
+    """
+    existing = _get_member_category_account(db, member_id, category)
+    if existing:
+        return existing
+    short_id = str(member_id).replace("-", "")[:8]
+    spec = {
+        "savings":     ("MEM_SAV_", "Member Savings",      "Savings account for member "),
+        "social_fund": ("MEM_SOC_", "Social Fund",         "Social fund account for member "),
+        "admin_fund":  ("MEM_ADM_", "Admin Fund",          "Admin fund account for member "),
+        "penalty":     ("PEN_PAY_", "Penalties Payable",   "Penalties payable account for member "),
+    }[category]
+    acct = LedgerAccount(
+        account_code=f"{spec[0]}{short_id}",
+        account_name=f"{spec[1]} - {member_id}",
+        account_type=AccountType.LIABILITY,
+        member_id=member_id,
+        description=f"{spec[2]}{member_id}",
+    )
+    db.add(acct)
+    db.flush()
+    return acct
+
+
+def reconcile_declaration_and_post(
+    db: Session,
+    member_id: UUID,
+    month,                # date — first of the effective month
+    savings: Decimal,
+    social_fund: Decimal,
+    admin_fund: Decimal,
+    penalties: Decimal,
+    interest_on_loan: Decimal,
+    loan_repayment: Decimal,
+    reason: str,
+    user_id: UUID,
+) -> dict:
+    """Create-or-edit a member's monthly declaration on behalf of them, and
+    make the ledger reflect the final amounts.
+
+    Three cases handled in one call:
+
+    1. **No declaration exists.** Create the Declaration, create a synthetic
+       DepositProof (`upload_path="reconciliation"`, status SUBMITTED), and
+       run the full `approve_deposit` flow — the ledger is posted, Repayment
+       row created, penalties matched, all in one commit.
+
+    2. **Declaration is PENDING or PROOF.** Update the declared amounts in
+       place. If a DepositProof already exists (member started uploading),
+       we reuse it; otherwise we synthesise one. Then `approve_deposit`
+       runs the normal path.
+
+    3. **Declaration is APPROVED.** For each category whose amount changed,
+       post a per-category delta line in a single correcting JE — Dr/Cr
+       Bank Cash ↔ the category account. The Declaration row is updated to
+       the new figures. If the loan-repayment or interest deltas would
+       affect the linked Repayment row, its principal/interest/total are
+       updated in place; if no Repayment exists, the caller is responsible
+       for using the "post repayment to loan" flow separately.
+
+    Refuses future months and empty (all-zero) reconciliations.
+    """
+    from datetime import date as _date
+    from app.models.transaction import (
+        Declaration, DeclarationStatus, DepositProof, DepositProofStatus,
+        DepositApproval, Repayment,
+    )
+    from app.models.cycle import Cycle, CycleStatus
+    from app.services.transaction import approve_deposit
+    from app.services.accounting import get_dealing_month_date
+
+    reason = _require_description(reason)
+
+    savings = Decimal(str(savings or 0)).quantize(Decimal("0.01"))
+    social_fund = Decimal(str(social_fund or 0)).quantize(Decimal("0.01"))
+    admin_fund = Decimal(str(admin_fund or 0)).quantize(Decimal("0.01"))
+    penalties = Decimal(str(penalties or 0)).quantize(Decimal("0.01"))
+    interest_on_loan = Decimal(str(interest_on_loan or 0)).quantize(Decimal("0.01"))
+    loan_repayment = Decimal(str(loan_repayment or 0)).quantize(Decimal("0.01"))
+    for v, name in [
+        (savings, "savings"),
+        (social_fund, "social_fund"),
+        (admin_fund, "admin_fund"),
+        (penalties, "penalties"),
+        (interest_on_loan, "interest_on_loan"),
+        (loan_repayment, "loan_repayment"),
+    ]:
+        if v < 0:
+            raise ValueError(f"{name} cannot be negative")
+
+    total = savings + social_fund + admin_fund + penalties + interest_on_loan + loan_repayment
+    if total <= Decimal("0.00"):
+        raise ValueError("Provide at least one non-zero amount")
+
+    if not isinstance(month, _date):
+        try:
+            month = _date.fromisoformat(str(month))
+        except (ValueError, TypeError):
+            raise ValueError("month must be a date or YYYY-MM-DD string")
+    today = _date.today()
+    if (month.year, month.month) > (today.year, today.month):
+        raise ValueError("cannot reconcile a future month")
+    # Normalise to first-of-month.
+    month = _date(month.year, month.month, 1)
+
+    active_cycle = db.query(Cycle).filter(Cycle.status == CycleStatus.ACTIVE).first()
+    if not active_cycle:
+        raise ValueError("no active cycle")
+
+    declaration = db.query(Declaration).filter(
+        Declaration.member_id == member_id,
+        extract("year", Declaration.effective_month) == month.year,
+        extract("month", Declaration.effective_month) == month.month,
+    ).first()
+
+    was_approved = declaration is not None and declaration.status == DeclarationStatus.APPROVED
+    outcome = None  # 'created' | 'updated_pending' | 'edited_approved'
+
+    if was_approved:
+        # Case 3 — per-category correcting JE.
+        old = {
+            "savings":          Decimal(str(declaration.declared_savings_amount or 0)),
+            "social_fund":      Decimal(str(declaration.declared_social_fund or 0)),
+            "admin_fund":       Decimal(str(declaration.declared_admin_fund or 0)),
+            "penalty":          Decimal(str(declaration.declared_penalties or 0)),
+            "interest_on_loan": Decimal(str(declaration.declared_interest_on_loan or 0)),
+            "loan_repayment":   Decimal(str(declaration.declared_loan_repayment or 0)),
+        }
+        new = {
+            "savings":          savings,
+            "social_fund":      social_fund,
+            "admin_fund":       admin_fund,
+            "penalty":          penalties,
+            "interest_on_loan": interest_on_loan,
+            "loan_repayment":   loan_repayment,
+        }
+        deltas = {k: (new[k] - old[k]).quantize(Decimal("0.01")) for k in old}
+        if all(abs(v) < Decimal("0.005") for v in deltas.values()):
+            raise ValueError("no changes to post — amounts match the current declaration")
+
+        bank_cash = db.query(LedgerAccount).filter(LedgerAccount.account_code == "BANK_CASH").first()
+        if not bank_cash:
+            raise ValueError("BANK_CASH account missing")
+
+        lines: list = []
+        # Member-scoped category deltas.
+        for cat in ("savings", "social_fund", "admin_fund", "penalty"):
+            d = deltas[cat]
+            if abs(d) < Decimal("0.005"):
+                continue
+            acct = _ensure_member_category_account(db, member_id, cat)
+            if d > 0:
+                # More was actually received → Dr Bank Cash / Cr Category
+                lines += [
+                    {"account_id": bank_cash.id, "debit_amount": d, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — {CATEGORY_LABEL[cat]} +{d}"},
+                    {"account_id": acct.id, "debit_amount": Decimal("0.00"), "credit_amount": d,
+                     "description": f"Declaration edit — {CATEGORY_LABEL[cat]} +{d}"},
+                ]
+            else:
+                amt = -d
+                lines += [
+                    {"account_id": acct.id, "debit_amount": amt, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — {CATEGORY_LABEL[cat]} -{amt}"},
+                    {"account_id": bank_cash.id, "debit_amount": Decimal("0.00"), "credit_amount": amt,
+                     "description": f"Declaration edit — {CATEGORY_LABEL[cat]} -{amt}"},
+                ]
+
+        # Loan-side deltas hit org-level accounts.
+        if abs(deltas["interest_on_loan"]) >= Decimal("0.005"):
+            d = deltas["interest_on_loan"]
+            int_rec = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code == "INTEREST_RECEIVABLE"
+            ).first()
+            if not int_rec:
+                raise ValueError("INTEREST_RECEIVABLE account missing — cannot correct interest")
+            if d > 0:
+                lines += [
+                    {"account_id": bank_cash.id, "debit_amount": d, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — Interest on loan +{d}"},
+                    {"account_id": int_rec.id, "debit_amount": Decimal("0.00"), "credit_amount": d,
+                     "description": f"Declaration edit — Interest on loan +{d}"},
+                ]
+            else:
+                amt = -d
+                lines += [
+                    {"account_id": int_rec.id, "debit_amount": amt, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — Interest on loan -{amt}"},
+                    {"account_id": bank_cash.id, "debit_amount": Decimal("0.00"), "credit_amount": amt,
+                     "description": f"Declaration edit — Interest on loan -{amt}"},
+                ]
+        if abs(deltas["loan_repayment"]) >= Decimal("0.005"):
+            d = deltas["loan_repayment"]
+            loans_rec = db.query(LedgerAccount).filter(
+                LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+            ).first()
+            if not loans_rec:
+                raise ValueError("LOANS_RECEIVABLE account missing — cannot correct loan repayment")
+            if d > 0:
+                lines += [
+                    {"account_id": bank_cash.id, "debit_amount": d, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — Loan repayment +{d}"},
+                    {"account_id": loans_rec.id, "debit_amount": Decimal("0.00"), "credit_amount": d,
+                     "description": f"Declaration edit — Loan repayment +{d}"},
+                ]
+            else:
+                amt = -d
+                lines += [
+                    {"account_id": loans_rec.id, "debit_amount": amt, "credit_amount": Decimal("0.00"),
+                     "description": f"Declaration edit — Loan repayment -{amt}"},
+                    {"account_id": bank_cash.id, "debit_amount": Decimal("0.00"), "credit_amount": amt,
+                     "description": f"Declaration edit — Loan repayment -{amt}"},
+                ]
+
+        correction_je = create_journal_entry(
+            db=db,
+            description=(
+                f"Declaration edit — {month.strftime('%B %Y')} for member {str(member_id)[:8]} "
+                f"(reason: {reason})"
+            )[:255],
+            lines=lines,
+            dealing_month=get_dealing_month_date(db, declaration.cycle_id or active_cycle.id, month),
+            cycle_id=declaration.cycle_id or active_cycle.id,
+            source_type="declaration_edit",
+            source_ref=str(declaration.id),
+            created_by=user_id,
+        )
+
+        # Sync the linked Repayment row if loan_repayment or interest changed.
+        if (abs(deltas["loan_repayment"]) >= Decimal("0.005")
+                or abs(deltas["interest_on_loan"]) >= Decimal("0.005")):
+            existing_approval = db.query(DepositApproval).join(
+                DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
+            ).filter(DepositProof.declaration_id == declaration.id).first()
+            if existing_approval and existing_approval.journal_entry_id:
+                rep = db.query(Repayment).filter(
+                    Repayment.journal_entry_id == existing_approval.journal_entry_id
+                ).first()
+                if rep:
+                    rep.principal_amount = new["loan_repayment"]
+                    rep.interest_amount = new["interest_on_loan"]
+                    rep.total_amount = new["loan_repayment"] + new["interest_on_loan"]
+
+        # Persist the new declared amounts.
+        declaration.declared_savings_amount = savings
+        declaration.declared_social_fund = social_fund
+        declaration.declared_admin_fund = admin_fund
+        declaration.declared_penalties = penalties
+        declaration.declared_interest_on_loan = interest_on_loan
+        declaration.declared_loan_repayment = loan_repayment
+
+        db.commit()
+        db.refresh(declaration)
+        outcome = "edited_approved"
+        return {
+            "outcome": outcome,
+            "declaration_id": str(declaration.id),
+            "correction_journal_entry_id": str(correction_je.id),
+            "deltas": {k: float(v) for k, v in deltas.items()},
+            "reason": reason,
+        }
+
+    # Cases 1 and 2 — create or update, then post via approve_deposit.
+    if declaration is None:
+        declaration = Declaration(
+            member_id=member_id,
+            cycle_id=active_cycle.id,
+            effective_month=month,
+            declared_savings_amount=savings,
+            declared_social_fund=social_fund,
+            declared_admin_fund=admin_fund,
+            declared_penalties=penalties,
+            declared_interest_on_loan=interest_on_loan,
+            declared_loan_repayment=loan_repayment,
+            status=DeclarationStatus.PROOF,   # will land APPROVED once approve_deposit runs
+        )
+        db.add(declaration)
+        outcome = "created"
+    else:
+        declaration.declared_savings_amount = savings
+        declaration.declared_social_fund = social_fund
+        declaration.declared_admin_fund = admin_fund
+        declaration.declared_penalties = penalties
+        declaration.declared_interest_on_loan = interest_on_loan
+        declaration.declared_loan_repayment = loan_repayment
+        declaration.status = DeclarationStatus.PROOF
+        outcome = "updated_pending"
+    db.flush()
+
+    # Reuse an existing DepositProof for this declaration when present;
+    # otherwise synthesise a reconciliation proof so approve_deposit can run.
+    deposit = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration.id
+    ).order_by(DepositProof.uploaded_at.desc()).first()
+    if deposit is None:
+        deposit = DepositProof(
+            member_id=member_id,
+            declaration_id=declaration.id,
+            cycle_id=active_cycle.id,
+            amount=total,
+            upload_path="reconciliation",
+            status=DepositProofStatus.SUBMITTED.value,
+            uploaded_at=datetime.utcnow(),
+        )
+        db.add(deposit)
+        db.flush()
+    else:
+        # Realign amount + status so approve_deposit's balance check passes.
+        deposit.amount = total
+        if deposit.status not in (
+            DepositProofStatus.SUBMITTED.value,
+            DepositProofStatus.REJECTED.value,
+        ):
+            deposit.status = DepositProofStatus.SUBMITTED.value
+
+    # Resolve ledger accounts, creating per-member category ones lazily so a
+    # brand-new member's first backfilled declaration still posts.
+    bank_cash = db.query(LedgerAccount).filter(LedgerAccount.account_code == "BANK_CASH").first()
+    if not bank_cash:
+        raise ValueError("BANK_CASH account missing")
+    member_savings = _ensure_member_category_account(db, member_id, "savings")
+    member_social = (
+        _ensure_member_category_account(db, member_id, "social_fund")
+        if social_fund > 0 else None
+    )
+    member_admin = (
+        _ensure_member_category_account(db, member_id, "admin_fund")
+        if admin_fund > 0 else None
+    )
+    penalties_payable = (
+        _ensure_member_category_account(db, member_id, "penalty")
+        if penalties > 0 else None
+    )
+    interest_income = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME"
+    ).first()
+    loans_receivable = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+    ).first()
+
+    approval = approve_deposit(
+        db=db,
+        deposit_proof_id=deposit.id,
+        approved_by=user_id,
+        bank_cash_account_id=bank_cash.id,
+        member_savings_account_id=member_savings.id,
+        member_social_fund_account_id=member_social.id if member_social else None,
+        member_admin_fund_account_id=member_admin.id if member_admin else None,
+        penalties_payable_account_id=penalties_payable.id if penalties_payable else None,
+        interest_income_account_id=interest_income.id if interest_income else None,
+        loans_receivable_account_id=loans_receivable.id if loans_receivable else None,
+    )
+
+    return {
+        "outcome": outcome,
+        "declaration_id": str(declaration.id),
+        "deposit_proof_id": str(deposit.id),
+        "deposit_approval_id": str(approval.id),
+        "journal_entry_id": str(approval.journal_entry_id),
+        "total": float(total),
+        "reason": reason,
+    }

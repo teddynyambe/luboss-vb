@@ -201,6 +201,22 @@ export default function TreasurerDashboard() {
   const [moveLoanError, setMoveLoanError] = useState<string | null>(null);
   const [moveLoanErrorField, setMoveLoanErrorField] = useState<'date' | 'reason' | null>(null);
 
+  // Declaration Details modal — inline "reconcile declaration" form. Used
+  // for both the "no declaration exists" case (Oscar Sameta screenshot) and
+  // for editing an existing declaration (pending or approved). Calls a
+  // single treasurer endpoint that picks the right posting path based on
+  // the declaration's current state.
+  const [reconcileFormOpen, setReconcileFormOpen] = useState(false);
+  const [reconcileSavings, setReconcileSavings] = useState('');
+  const [reconcileSocial, setReconcileSocial] = useState('');
+  const [reconcileAdmin, setReconcileAdmin] = useState('');
+  const [reconcilePenalties, setReconcilePenalties] = useState('');
+  const [reconcileInterest, setReconcileInterest] = useState('');
+  const [reconcileRepayment, setReconcileRepayment] = useState('');
+  const [reconcileReason, setReconcileReason] = useState('');
+  const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
+
   // Loan-details modal — inline "Edit loan terms" editor. Amount / term /
   // rate correspond to the same knobs on the Reconciliation Loan State panel;
   // the backend `POST /api/chairman/reconcile/loan/{id}/edit-terms` is what
@@ -747,6 +763,99 @@ export default function TreasurerDashboard() {
     setRepaymentActionInterest('');
     setRepaymentActionReason('');
     setRepaymentActionError(null);
+    // Clear the reconcile form too.
+    setReconcileFormOpen(false);
+    setReconcileSavings('');
+    setReconcileSocial('');
+    setReconcileAdmin('');
+    setReconcilePenalties('');
+    setReconcileInterest('');
+    setReconcileRepayment('');
+    setReconcileReason('');
+    setReconcileError(null);
+  };
+
+  const openReconcileForm = () => {
+    if (!declarationDetails) return;
+    const d = declarationDetails.declaration;
+    setReconcileSavings(d ? String(d.declared_savings_amount ?? '') : '');
+    setReconcileSocial(d ? String(d.declared_social_fund ?? '') : '');
+    setReconcileAdmin(d ? String(d.declared_admin_fund ?? '') : '');
+    setReconcilePenalties(d ? String(d.declared_penalties ?? '') : '');
+    setReconcileInterest(d ? String(d.declared_interest_on_loan ?? '') : '');
+    setReconcileRepayment(d ? String(d.declared_loan_repayment ?? '') : '');
+    setReconcileReason('');
+    setReconcileError(null);
+    setReconcileFormOpen(true);
+  };
+
+  const cancelReconcileForm = () => {
+    setReconcileFormOpen(false);
+    setReconcileError(null);
+  };
+
+  const submitReconcileForm = async () => {
+    if (!declarationDetails) return;
+    const s = parseFloat(reconcileSavings) || 0;
+    const sf = parseFloat(reconcileSocial) || 0;
+    const af = parseFloat(reconcileAdmin) || 0;
+    const p = parseFloat(reconcilePenalties) || 0;
+    const i = parseFloat(reconcileInterest) || 0;
+    const lr = parseFloat(reconcileRepayment) || 0;
+    if (s + sf + af + p + i + lr <= 0) {
+      setReconcileError('Enter at least one non-zero amount.');
+      return;
+    }
+    if (reconcileReason.trim().length < 5) {
+      setReconcileError('Reason (min 5 characters) is required for the audit log.');
+      return;
+    }
+    setReconcileSubmitting(true);
+    setReconcileError(null);
+    try {
+      const res = await api.post<{ outcome: string }>('/api/treasurer/declarations/reconcile-post', {
+        member_id: declarationDetails.member_id,
+        month: declarationDetails.effective_month,
+        savings_amount: s,
+        social_fund: sf,
+        admin_fund: af,
+        penalties: p,
+        interest_on_loan: i,
+        loan_repayment: lr,
+        reason: reconcileReason.trim(),
+      });
+      if (res.error) {
+        setReconcileError(res.error);
+      } else {
+        setReconcileFormOpen(false);
+        setReconcileReason('');
+        // Refresh the modal with the new posted state so the treasurer sees
+        // the updated attribution + amounts inline.
+        try {
+          const fresh = await api.get<DeclarationDetailsReport>(
+            `/api/treasurer/reports/declarations/details?member_id=${declarationDetails.member_id}&month=${selectedReportMonth}`,
+          );
+          if (fresh.data) setDeclarationDetails(fresh.data);
+        } catch {
+          /* ignore refresh failure — the write already succeeded */
+        }
+        await loadReports();
+        setMessage({
+          type: 'success',
+          text:
+            res.data?.outcome === 'created'
+              ? 'Declaration created and posted to the ledger.'
+              : res.data?.outcome === 'edited_approved'
+              ? 'Declaration edited — correcting journal entry posted.'
+              : 'Declaration updated and posted.',
+        });
+        setTimeout(() => setMessage(null), 5000);
+      }
+    } catch (err: any) {
+      setReconcileError(err?.message || 'Failed to reconcile declaration');
+    } finally {
+      setReconcileSubmitting(false);
+    }
   };
 
   const handleApproveDeposit = async (depositId: string) => {
@@ -3059,11 +3168,196 @@ export default function TreasurerDashboard() {
                     </p>
                   </div>
                   {!declarationDetails.has_declaration ? (
-                    <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4">
-                      <p className="text-yellow-800 font-medium">No declaration for this month.</p>
-                    </div>
+                    reconcileFormOpen ? (
+                      <div className="bg-blue-50 border-2 border-blue-300 rounded-xl p-4 space-y-3">
+                        <h3 className="font-bold text-sm text-blue-900">Create declaration on behalf of member</h3>
+                        <p className="text-xs text-blue-700">
+                          Amounts entered here are posted to the ledger immediately — this creates the declaration + a
+                          reconciliation deposit proof + a journal entry, all bucketed under {formatMonth(declarationDetails.effective_month)}.
+                        </p>
+                        {reconcileError && (
+                          <p className="text-xs text-red-800 bg-red-50 border border-red-300 rounded px-3 py-2">
+                            {reconcileError}
+                          </p>
+                        )}
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Savings (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcileSavings}
+                              onChange={(e) => { setReconcileSavings(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Social Fund (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcileSocial}
+                              onChange={(e) => { setReconcileSocial(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Admin Fund (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcileAdmin}
+                              onChange={(e) => { setReconcileAdmin(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Penalties (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcilePenalties}
+                              onChange={(e) => { setReconcilePenalties(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Interest on Loan (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcileInterest}
+                              onChange={(e) => { setReconcileInterest(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Loan Repayment (K)</label>
+                            <input type="number" inputMode="decimal" min="0" step="0.01"
+                              value={reconcileRepayment}
+                              onChange={(e) => { setReconcileRepayment(e.target.value); setReconcileError(null); }}
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                          <textarea rows={2}
+                            value={reconcileReason}
+                            onChange={(e) => { setReconcileReason(e.target.value); setReconcileError(null); }}
+                            placeholder="e.g. Member paid K5,000 for January but declaration was never entered."
+                            className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                        </div>
+                        <div className="flex justify-end gap-2">
+                          <button type="button" onClick={cancelReconcileForm} disabled={reconcileSubmitting}
+                            className="px-3 py-1.5 text-sm font-semibold text-gray-600 hover:text-gray-800">
+                            Cancel
+                          </button>
+                          <button type="button" onClick={submitReconcileForm} disabled={reconcileSubmitting}
+                            className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50">
+                            {reconcileSubmitting ? 'Posting…' : 'Create & post declaration'}
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="bg-yellow-50 border-2 border-yellow-200 rounded-xl p-4 flex justify-between items-start gap-3">
+                        <p className="text-yellow-800 font-medium flex-1">No declaration for this month.</p>
+                        <button
+                          type="button"
+                          onClick={openReconcileForm}
+                          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 whitespace-nowrap"
+                        >
+                          + Create declaration
+                        </button>
+                      </div>
+                    )
                   ) : declarationDetails.declaration ? (
                     <>
+                      {reconcileFormOpen && (
+                        <div className="bg-blue-50 border-2 border-blue-300 rounded-xl p-4 space-y-3">
+                          <h3 className="font-bold text-sm text-blue-900">
+                            Edit declaration
+                            {declarationDetails.declaration.status === 'approved' && (
+                              <span className="ml-2 inline-block px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-100 text-amber-800">
+                                will post a correcting JE
+                              </span>
+                            )}
+                          </h3>
+                          <p className="text-xs text-blue-700">
+                            {declarationDetails.declaration.status === 'approved' ? (
+                              <>Amounts you change here will land on the ledger as a per-category correcting journal entry (deltas only), bucketed under {formatMonth(declarationDetails.effective_month)}.</>
+                            ) : (
+                              <>Editing an unapproved declaration and posting it will run the standard approval flow — the deposit + JE are posted for {formatMonth(declarationDetails.effective_month)} in one step.</>
+                            )}
+                          </p>
+                          {reconcileError && (
+                            <p className="text-xs text-red-800 bg-red-50 border border-red-300 rounded px-3 py-2">
+                              {reconcileError}
+                            </p>
+                          )}
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Savings (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcileSavings}
+                                onChange={(e) => { setReconcileSavings(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Social Fund (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcileSocial}
+                                onChange={(e) => { setReconcileSocial(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Admin Fund (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcileAdmin}
+                                onChange={(e) => { setReconcileAdmin(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Penalties (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcilePenalties}
+                                onChange={(e) => { setReconcilePenalties(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Interest on Loan (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcileInterest}
+                                onChange={(e) => { setReconcileInterest(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Loan Repayment (K)</label>
+                              <input type="number" inputMode="decimal" min="0" step="0.01"
+                                value={reconcileRepayment}
+                                onChange={(e) => { setReconcileRepayment(e.target.value); setReconcileError(null); }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                            <textarea rows={2}
+                              value={reconcileReason}
+                              onChange={(e) => { setReconcileReason(e.target.value); setReconcileError(null); }}
+                              placeholder="e.g. Correcting savings amount from K5,000 to K5,500 — data entry error."
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button type="button" onClick={cancelReconcileForm} disabled={reconcileSubmitting}
+                              className="px-3 py-1.5 text-sm font-semibold text-gray-600 hover:text-gray-800">
+                              Cancel
+                            </button>
+                            <button type="button" onClick={submitReconcileForm} disabled={reconcileSubmitting}
+                              className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50">
+                              {reconcileSubmitting
+                                ? 'Posting…'
+                                : declarationDetails.declaration.status === 'approved'
+                                ? 'Save & post correction'
+                                : 'Save & post declaration'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                      {!reconcileFormOpen && (
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={openReconcileForm}
+                            className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                          >
+                            Edit declaration
+                          </button>
+                        </div>
+                      )}
                       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                         {declarationDetails.declaration.declared_savings_amount != null && (
                           <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">

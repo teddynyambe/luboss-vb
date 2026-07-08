@@ -492,6 +492,10 @@ def get_reconciliation_notes(
         "loan_consolidation": "Loan consolidated",
         "repayment_split_adjustment": "Repayment split adjusted",
         "interest_accrual_retrofit": "Interest accrual retrofit",
+        # Per-category correcting JE posted when a treasurer edits an
+        # already-approved declaration from the Reports → Declaration Details
+        # modal. Shows up under the affected member/month in reconciliation notes.
+        "declaration_edit": "Declaration edited",
     }
 
     member_account_ids = (
