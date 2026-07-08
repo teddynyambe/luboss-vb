@@ -1761,12 +1761,19 @@ def get_loans_report(
     target_year = target_date.year
     target_month = target_date.month
 
-    # Query all loans disbursed in the target month (both normal OPEN and reconciliation DISBURSED).
-    # Skip loans whose disbursement JE has been reversed — those Loan rows
-    # remain in the DB for audit but no longer represent real money.
+    # Query every loan disbursed in the target month, regardless of current
+    # status. "Loans disbursed this month" means the borrowing that actually
+    # happened in that period — a loan that was borrowed AND fully repaid in
+    # the same month is still December-2025 borrowing activity and must show
+    # up in December's report. Excluding CLOSED (or PENDING loans that were
+    # backfilled via reconciliation and immediately paid off) silently hid
+    # historical loans reconciled off-system.
+    #
+    # The `loan_has_live_disbursement` check remains the semantic gate: any
+    # loan whose disbursement JE has been reversed is genuinely no longer a
+    # disbursement and drops out.
     from app.services.loan_repair import loan_has_live_disbursement
     loans = db.query(Loan).filter(
-        Loan.loan_status.in_([LoanStatus.OPEN, LoanStatus.DISBURSED]),
         extract("year", Loan.disbursement_date) == target_year,
         extract("month", Loan.disbursement_date) == target_month,
     ).order_by(Loan.disbursement_date.asc()).all()
