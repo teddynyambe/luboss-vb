@@ -1504,6 +1504,205 @@ def get_suggested_loan_rate(
     }
 
 
+class PostRepaymentForDeclarationRequest(BaseModel):
+    """Post a fresh Repayment against a chosen loan for a declaration that
+    has non-zero loan_repayment / interest but no attributed Repayment row.
+
+    Happens with historical declarations reconciled off-system, or when the
+    active-loan lookup returned nothing at the time of approval and a loan
+    has since been backfilled. Amounts must not exceed what the declaration
+    committed.
+    """
+    loan_id: str
+    principal: float
+    interest: float
+    reason: str
+
+
+@router.post("/declarations/{declaration_id}/post-repayment")
+def post_repayment_for_declaration(
+    declaration_id: str,
+    body: PostRepaymentForDeclarationRequest,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Create a Repayment row against a chosen loan for a declaration whose
+    loan_repayment / interest never attached to a loan at approval time.
+
+    The org-level ledger is already balanced from the deposit approval JE
+    (which credited LOANS_RECEIVABLE / INTEREST_RECEIVABLE at that time).
+    This endpoint only creates a per-loan attribution row — it does NOT
+    move any additional cash. A balanced no-op JE is posted to satisfy the
+    Repayment.journal_entry_id FK and to leave a full audit trail.
+    """
+    from app.models.transaction import Repayment
+    from app.models.ledger import LedgerAccount
+    from app.services.accounting import create_journal_entry, get_dealing_month_date
+    from app.core.audit import write_audit_log
+    from decimal import Decimal
+    import uuid as _uuid
+
+    try:
+        decl_uuid = UUID(declaration_id)
+        loan_uuid = UUID(body.loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid declaration_id or loan_id")
+
+    principal = Decimal(str(body.principal or 0)).quantize(Decimal("0.01"))
+    interest = Decimal(str(body.interest or 0)).quantize(Decimal("0.01"))
+    if principal < 0 or interest < 0:
+        raise HTTPException(status_code=400, detail="Amounts cannot be negative")
+    if principal == 0 and interest == 0:
+        raise HTTPException(status_code=400, detail="Provide a principal or interest amount")
+
+    reason = (body.reason or "").strip()
+    if len(reason) < 5:
+        raise HTTPException(status_code=400, detail="Reason (min 5 chars) required for audit")
+
+    declaration = db.query(Declaration).filter(Declaration.id == decl_uuid).first()
+    if not declaration:
+        raise HTTPException(status_code=404, detail="Declaration not found")
+
+    loan = db.query(Loan).filter(Loan.id == loan_uuid).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.member_id != declaration.member_id:
+        raise HTTPException(status_code=400, detail="Loan belongs to a different member")
+
+    # Guard: amounts must not exceed what the declaration committed. Prevents
+    # accidentally over-posting more than the member paid.
+    declared_repay = Decimal(str(declaration.declared_loan_repayment or 0))
+    declared_interest = Decimal(str(declaration.declared_interest_on_loan or 0))
+    if principal > declared_repay + Decimal("0.01"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Principal (K{principal}) exceeds declared loan repayment (K{declared_repay})",
+        )
+    if interest > declared_interest + Decimal("0.01"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Interest (K{interest}) exceeds declared interest (K{declared_interest})",
+        )
+
+    # Sum of any existing live Repayment attributions on this declaration.
+    # The new attribution must not push totals over what was declared.
+    from app.models.ledger import JournalEntry as _JE
+    deposit_proof = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration.id
+    ).order_by(DepositProof.uploaded_at.desc()).first()
+    approval_je_id = None
+    if deposit_proof:
+        approval = db.query(DepositApproval).filter(
+            DepositApproval.deposit_proof_id == deposit_proof.id
+        ).first()
+        if approval and approval.journal_entry_id:
+            approval_je_id = approval.journal_entry_id
+    already_p = Decimal("0.00")
+    already_i = Decimal("0.00")
+    if approval_je_id:
+        existing_reps = db.query(Repayment).filter(
+            Repayment.journal_entry_id == approval_je_id
+        ).all()
+        for r in existing_reps:
+            je = db.query(_JE).filter(_JE.id == r.journal_entry_id).first()
+            if je and je.reversed_by is None and je.reversed_at is None:
+                already_p += Decimal(str(r.principal_amount or 0))
+                already_i += Decimal(str(r.interest_amount or 0))
+    # Also count carve-out reps that reference this declaration (edge case,
+    # ignored — carve-outs are per-loan reallocations, not new attributions).
+
+    if already_p + principal > declared_repay + Decimal("0.01"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Adding K{principal} principal would exceed declared repayment (already attributed K{already_p} of K{declared_repay})",
+        )
+    if already_i + interest > declared_interest + Decimal("0.01"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Adding K{interest} interest would exceed declared interest (already attributed K{already_i} of K{declared_interest})",
+        )
+
+    # Balanced no-op JE that documents the attribution. Same pattern as the
+    # move-repayment carve-out: self-cancelling Dr/Cr on each account so
+    # org-level ledger totals don't move (they already posted at approval).
+    loans_rec = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+    ).first()
+    int_inc = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "INTEREST_INCOME"
+    ).first()
+    if principal > 0 and not loans_rec:
+        raise HTTPException(status_code=500, detail="LOANS_RECEIVABLE account missing")
+    if interest > 0 and not int_inc:
+        raise HTTPException(status_code=500, detail="INTEREST_INCOME account missing")
+
+    lines: list = []
+    if principal > 0:
+        lines += [
+            {"account_id": loans_rec.id, "debit_amount": principal,
+             "credit_amount": Decimal("0.00"),
+             "description": f"Attribute repayment principal to loan {str(loan.id)[:8]}"},
+            {"account_id": loans_rec.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": principal,
+             "description": f"Attribute from declaration {str(declaration.id)[:8]}"},
+        ]
+    if interest > 0:
+        lines += [
+            {"account_id": int_inc.id, "debit_amount": interest,
+             "credit_amount": Decimal("0.00"),
+             "description": f"Attribute repayment interest to loan {str(loan.id)[:8]}"},
+            {"account_id": int_inc.id, "debit_amount": Decimal("0.00"),
+             "credit_amount": interest,
+             "description": f"Attribute from declaration {str(declaration.id)[:8]}"},
+        ]
+
+    new_rep_id = _uuid.uuid4()
+    attach_je = create_journal_entry(
+        db=db,
+        description=(
+            f"Repayment attribution — decl {str(declaration.id)[:8]} → loan {str(loan.id)[:8]} "
+            f"(P={principal} I={interest}). Reason: {reason}"
+        )[:255],
+        lines=lines,
+        dealing_month=get_dealing_month_date(db, loan.cycle_id, declaration.effective_month),
+        cycle_id=loan.cycle_id,
+        source_type="repayment_attribution",
+        source_ref=str(new_rep_id),
+        created_by=current_user.id,
+    )
+
+    new_rep = Repayment(
+        id=new_rep_id,
+        loan_id=loan.id,
+        repayment_date=declaration.effective_month,
+        principal_amount=principal,
+        interest_amount=interest,
+        total_amount=principal + interest,
+        journal_entry_id=attach_je.id,
+    )
+    db.add(new_rep)
+    db.commit()
+    db.refresh(new_rep)
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Repayment posted from declaration",
+        details=(
+            f"declaration={declaration_id} loan={body.loan_id} "
+            f"P={principal} I={interest}"
+        ),
+    )
+    return {
+        "repayment_id": str(new_rep.id),
+        "loan_id": str(loan.id),
+        "principal": float(principal),
+        "interest": float(interest),
+        "total": float(principal + interest),
+        "reason": reason,
+    }
+
+
 @router.get("/reports/declarations")
 def get_declarations_report(
     month: Optional[str] = None,  # Format: YYYY-MM-DD (first day of month)
@@ -1708,6 +1907,82 @@ def get_declaration_details_report(
         DepositProof.declaration_id == declaration.id
     ).order_by(DepositProof.uploaded_at.desc()).first()
 
+    # Resolve which loan(s) this declaration's loan_repayment + interest was
+    # attributed to — the Repayment rows share the deposit-approval JE via
+    # `Repayment.journal_entry_id`. Also fetch the member's full loan list
+    # so the treasurer can reassign to a different loan when the auto-attach
+    # picked wrong.
+    from app.models.transaction import Repayment
+    from app.models.ledger import JournalEntry
+    from app.services.loan_repair import loan_has_live_disbursement
+
+    repayments_attributed: list[dict] = []
+    approval_je_ids: list = []
+    if deposit_proof:
+        approval = db.query(DepositApproval).filter(
+            DepositApproval.deposit_proof_id == deposit_proof.id
+        ).first()
+        if approval and approval.journal_entry_id:
+            approval_je_ids.append(approval.journal_entry_id)
+
+    def _loan_label(loan) -> str:
+        short = str(loan.id)[:8]
+        if loan.disbursement_date:
+            return f"{loan.disbursement_date.strftime('%B %Y')} ({short})"
+        return f"Undisbursed ({short})"
+
+    if approval_je_ids:
+        reps = db.query(Repayment).filter(
+            Repayment.journal_entry_id.in_(approval_je_ids)
+        ).all()
+        for rep in reps:
+            rep_je = db.query(JournalEntry).filter(JournalEntry.id == rep.journal_entry_id).first()
+            is_live = bool(rep_je and rep_je.reversed_by is None and rep_je.reversed_at is None)
+            rep_loan = db.query(Loan).filter(Loan.id == rep.loan_id).first()
+            repayments_attributed.append({
+                "id": str(rep.id),
+                "loan_id": str(rep.loan_id),
+                "loan_label": _loan_label(rep_loan) if rep_loan else str(rep.loan_id)[:8],
+                "principal": float(rep.principal_amount or 0),
+                "interest": float(rep.interest_amount or 0),
+                "total": float(rep.total_amount or 0),
+                "repayment_date": rep.repayment_date.isoformat() if rep.repayment_date else None,
+                "is_live": is_live,
+            })
+
+    # All of the member's loans (for the "Change loan" / "Post repayment"
+    # pickers). Ordered by disbursement date ascending so the picker reads
+    # chronologically. `is_live_disbursement` = has an un-reversed
+    # disbursement JE — reversed ones are shown but disabled in the UI.
+    member_loans_list: list[dict] = []
+    all_loans = (
+        db.query(Loan)
+        .filter(Loan.member_id == member_uuid)
+        .order_by(Loan.disbursement_date.asc())
+        .all()
+    )
+    # Push undisbursed loans (disbursement_date IS NULL) to the end of the
+    # list — MySQL sorts NULL first in ASC, but for the picker chronological
+    # reading with unknowns at the bottom is more useful.
+    all_loans = sorted(all_loans, key=lambda L: (L.disbursement_date is None, L.disbursement_date or 0))
+    for L in all_loans:
+        member_loans_list.append({
+            "id": str(L.id),
+            "label": _loan_label(L),
+            "disbursement_date": L.disbursement_date.isoformat() if L.disbursement_date else None,
+            "loan_amount": float(L.loan_amount or 0),
+            "percentage_interest": float(L.percentage_interest or 0),
+            "loan_status": L.loan_status.value if L.loan_status else None,
+            "is_live_disbursement": loan_has_live_disbursement(db, L.id),
+        })
+
+    declared_repay = float(declaration.declared_loan_repayment or 0)
+    declared_interest = float(declaration.declared_interest_on_loan or 0)
+    has_orphan_repayment = (
+        (declared_repay > 0 or declared_interest > 0)
+        and len([r for r in repayments_attributed if r["is_live"]]) == 0
+    )
+
     return {
         "member_id": str(member.id),
         "member_name": member_name,
@@ -1737,6 +2012,9 @@ def get_declaration_details_report(
                 and deposit_proof.upload_path != "reconciliation"
             ),
         } if deposit_proof else None,
+        "repayments_attributed": repayments_attributed,
+        "member_loans": member_loans_list,
+        "has_orphan_repayment": has_orphan_repayment,
     }
 
 

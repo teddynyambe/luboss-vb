@@ -176,6 +176,21 @@ export default function TreasurerDashboard() {
   const [moveLoanSubmitting, setMoveLoanSubmitting] = useState(false);
   const [moveLoanError, setMoveLoanError] = useState<string | null>(null);
   const [moveLoanErrorField, setMoveLoanErrorField] = useState<'date' | 'reason' | null>(null);
+
+  // Declaration-details modal — per-attribution inline pickers
+  // repaymentAction state: `{ mode: 'change', repaymentId }` shows the loan-picker for an existing attribution;
+  //                        `{ mode: 'post' }` shows the loan-picker + amounts for the orphan case.
+  const [repaymentAction, setRepaymentAction] = useState<
+    | { mode: 'change'; repaymentId: string }
+    | { mode: 'post' }
+    | null
+  >(null);
+  const [repaymentActionLoanId, setRepaymentActionLoanId] = useState('');
+  const [repaymentActionPrincipal, setRepaymentActionPrincipal] = useState('');
+  const [repaymentActionInterest, setRepaymentActionInterest] = useState('');
+  const [repaymentActionReason, setRepaymentActionReason] = useState('');
+  const [repaymentActionSubmitting, setRepaymentActionSubmitting] = useState(false);
+  const [repaymentActionError, setRepaymentActionError] = useState<string | null>(null);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -320,6 +335,26 @@ export default function TreasurerDashboard() {
       upload_path?: string | null;
       has_file?: boolean;
     } | null;
+    repayments_attributed?: {
+      id: string;
+      loan_id: string;
+      loan_label: string;
+      principal: number;
+      interest: number;
+      total: number;
+      repayment_date: string | null;
+      is_live: boolean;
+    }[];
+    member_loans?: {
+      id: string;
+      label: string;
+      disbursement_date: string | null;
+      loan_amount: number;
+      percentage_interest: number;
+      loan_status: string | null;
+      is_live_disbursement: boolean;
+    }[];
+    has_orphan_repayment?: boolean;
   }
   
   const [selectedReportMonth, setSelectedReportMonth] = useState<string>(() => {
@@ -576,6 +611,13 @@ export default function TreasurerDashboard() {
   const closeDeclarationDetailsModal = () => {
     setShowDeclarationDetailsModal(false);
     setDeclarationDetails(null);
+    // Clear any in-flight attribution picker so it doesn't reopen next time.
+    setRepaymentAction(null);
+    setRepaymentActionLoanId('');
+    setRepaymentActionPrincipal('');
+    setRepaymentActionInterest('');
+    setRepaymentActionReason('');
+    setRepaymentActionError(null);
   };
 
   const handleApproveDeposit = async (depositId: string) => {
@@ -996,6 +1038,101 @@ export default function TreasurerDashboard() {
       setMoveLoanError(err?.message || 'Failed to move loan');
     } finally {
       setMoveLoanSubmitting(false);
+    }
+  };
+
+  // Declaration-details attribution helpers
+  const openChangeAttribution = (repaymentId: string, currentLoanId: string) => {
+    setRepaymentAction({ mode: 'change', repaymentId });
+    setRepaymentActionLoanId(currentLoanId);
+    setRepaymentActionReason('');
+    setRepaymentActionError(null);
+  };
+
+  const openPostOrphanAttribution = () => {
+    if (!declarationDetails?.declaration) return;
+    setRepaymentAction({ mode: 'post' });
+    setRepaymentActionLoanId('');
+    setRepaymentActionPrincipal(String(declarationDetails.declaration.declared_loan_repayment || ''));
+    setRepaymentActionInterest(String(declarationDetails.declaration.declared_interest_on_loan || ''));
+    setRepaymentActionReason('');
+    setRepaymentActionError(null);
+  };
+
+  const cancelRepaymentAction = () => {
+    setRepaymentAction(null);
+    setRepaymentActionLoanId('');
+    setRepaymentActionPrincipal('');
+    setRepaymentActionInterest('');
+    setRepaymentActionReason('');
+    setRepaymentActionError(null);
+  };
+
+  const reloadDeclarationDetails = async () => {
+    if (!declarationDetails) return;
+    try {
+      const res = await api.get<DeclarationDetailsReport>(
+        `/api/treasurer/reports/declarations/details?member_id=${declarationDetails.member_id}&month=${selectedReportMonth}`,
+      );
+      if (res.data) setDeclarationDetails(res.data);
+    } catch {
+      /* silent — modal keeps last-known state */
+    }
+  };
+
+  const submitRepaymentAction = async () => {
+    if (!repaymentAction || !declarationDetails?.declaration) return;
+    if (!repaymentActionLoanId) {
+      setRepaymentActionError('Pick a target loan.');
+      return;
+    }
+    setRepaymentActionSubmitting(true);
+    setRepaymentActionError(null);
+    try {
+      let res;
+      if (repaymentAction.mode === 'change') {
+        // Reuse the existing chairman/reconcile move endpoint (whole-row
+        // re-point). It admits Treasurer via require_any_role.
+        res = await api.post(
+          `/api/chairman/reconcile/repayment/${repaymentAction.repaymentId}/move`,
+          {
+            new_loan_id: repaymentActionLoanId,
+            // Whole-row move — omit partial amounts.
+          },
+        );
+      } else {
+        if (repaymentActionReason.trim().length < 5) {
+          setRepaymentActionError('Reason (min 5 characters) is required for the audit log.');
+          setRepaymentActionSubmitting(false);
+          return;
+        }
+        const p = parseFloat(repaymentActionPrincipal) || 0;
+        const i = parseFloat(repaymentActionInterest) || 0;
+        if (p <= 0 && i <= 0) {
+          setRepaymentActionError('Provide a principal or interest amount.');
+          setRepaymentActionSubmitting(false);
+          return;
+        }
+        res = await api.post(
+          `/api/treasurer/declarations/${declarationDetails.declaration.id}/post-repayment`,
+          {
+            loan_id: repaymentActionLoanId,
+            principal: p,
+            interest: i,
+            reason: repaymentActionReason.trim(),
+          },
+        );
+      }
+      if (res?.error) {
+        setRepaymentActionError(res.error);
+      } else {
+        cancelRepaymentAction();
+        await reloadDeclarationDetails();
+      }
+    } catch (err: any) {
+      setRepaymentActionError(err?.message || 'Failed to update attribution');
+    } finally {
+      setRepaymentActionSubmitting(false);
     }
   };
 
@@ -2637,6 +2774,180 @@ export default function TreasurerDashboard() {
                           </div>
                         )}
                       </div>
+
+                      {/* Loan attributions — which loan(s) this declaration's
+                          loan_repayment + interest reduced. Shows one row per
+                          Repayment tied to the deposit's JE; if none exist
+                          but the declaration committed a repayment, offers a
+                          "Post repayment to loan…" affordance. */}
+                      {((declarationDetails.declaration.declared_loan_repayment ?? 0) > 0
+                        || (declarationDetails.declaration.declared_interest_on_loan ?? 0) > 0) && (
+                        <div className="bg-blue-50/50 border-2 border-blue-200 rounded-xl p-4 space-y-2">
+                          <h3 className="font-bold text-sm text-blue-900">Loan attribution</h3>
+                          {(declarationDetails.repayments_attributed ?? []).filter((r) => r.is_live).length === 0 ? (
+                            <div className="flex flex-col gap-2">
+                              <p className="text-sm text-amber-800 bg-amber-50 border border-amber-300 rounded px-3 py-2">
+                                ⚠ This declaration&apos;s loan repayment / interest is <strong>not applied to any loan</strong>. The org-level credit posted at approval, but no per-loan Repayment row was created.
+                              </p>
+                              {repaymentAction?.mode !== 'post' && (
+                                <button
+                                  type="button"
+                                  onClick={openPostOrphanAttribution}
+                                  className="self-start px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700"
+                                >
+                                  Post repayment to loan…
+                                </button>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {(declarationDetails.repayments_attributed ?? [])
+                                .filter((r) => r.is_live)
+                                .map((r) => (
+                                  <div key={r.id} className="bg-white border border-blue-200 rounded-lg px-3 py-2 text-sm">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <div className="text-blue-900">
+                                        Applied to loan borrowed{' '}
+                                        <span className="font-semibold">{r.loan_label}</span>:
+                                        {r.principal > 0 && <span> Principal <strong>K{r.principal.toLocaleString()}</strong></span>}
+                                        {r.principal > 0 && r.interest > 0 && <span> · </span>}
+                                        {r.interest > 0 && <span>Interest <strong>K{r.interest.toLocaleString()}</strong></span>}
+                                      </div>
+                                      {repaymentAction?.mode !== 'change' || repaymentAction.repaymentId !== r.id ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => openChangeAttribution(r.id, r.loan_id)}
+                                          className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                                        >
+                                          Change loan
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                ))}
+                            </div>
+                          )}
+
+                          {/* Inline picker — shown when the treasurer clicked
+                              "Change loan" or "Post repayment to loan…". */}
+                          {repaymentAction && (
+                            <div className="mt-2 p-3 bg-white border-2 border-blue-300 rounded-lg space-y-2">
+                              <div className="flex items-baseline justify-between">
+                                <h4 className="font-semibold text-sm text-blue-900">
+                                  {repaymentAction.mode === 'change' ? 'Move repayment to which loan?' : 'Post repayment to which loan?'}
+                                </h4>
+                                <button
+                                  type="button"
+                                  onClick={cancelRepaymentAction}
+                                  disabled={repaymentActionSubmitting}
+                                  className="text-xs text-gray-500 hover:text-gray-700"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                              {repaymentActionError && (
+                                <p className="text-xs text-red-800 bg-red-50 border border-red-300 rounded px-2 py-1.5">
+                                  {repaymentActionError}
+                                </p>
+                              )}
+                              <div className="flex flex-col gap-1">
+                                <label className="text-xs font-semibold text-blue-900">Target loan</label>
+                                <select
+                                  value={repaymentActionLoanId}
+                                  onChange={(e) => {
+                                    setRepaymentActionLoanId(e.target.value);
+                                    setRepaymentActionError(null);
+                                  }}
+                                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm bg-white"
+                                >
+                                  <option value="">Pick a loan…</option>
+                                  {(declarationDetails.member_loans ?? []).map((L) => (
+                                    <option
+                                      key={L.id}
+                                      value={L.id}
+                                      disabled={!L.is_live_disbursement}
+                                    >
+                                      {L.label} · K{L.loan_amount.toLocaleString()} @ {L.percentage_interest}%
+                                      {!L.is_live_disbursement ? ' (reversed)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+                                {(declarationDetails.member_loans ?? []).length === 0 && (
+                                  <p className="text-[11px] text-amber-700">
+                                    This member has no loans on record. Backfill one from Reports → Loans → + Backfill Loan first.
+                                  </p>
+                                )}
+                              </div>
+                              {repaymentAction.mode === 'post' && (
+                                <>
+                                  <div className="grid grid-cols-2 gap-3">
+                                    <div className="flex flex-col gap-1">
+                                      <label className="text-xs font-semibold text-blue-900">Principal (K)</label>
+                                      <input
+                                        type="number" inputMode="decimal"
+                                        min="0"
+                                        step="0.01"
+                                        value={repaymentActionPrincipal}
+                                        onChange={(e) => {
+                                          setRepaymentActionPrincipal(e.target.value);
+                                          setRepaymentActionError(null);
+                                        }}
+                                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                                      />
+                                      <p className="text-[11px] text-gray-500">
+                                        Declared: K{(declarationDetails.declaration.declared_loan_repayment ?? 0).toLocaleString()}
+                                      </p>
+                                    </div>
+                                    <div className="flex flex-col gap-1">
+                                      <label className="text-xs font-semibold text-blue-900">Interest (K)</label>
+                                      <input
+                                        type="number" inputMode="decimal"
+                                        min="0"
+                                        step="0.01"
+                                        value={repaymentActionInterest}
+                                        onChange={(e) => {
+                                          setRepaymentActionInterest(e.target.value);
+                                          setRepaymentActionError(null);
+                                        }}
+                                        className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                                      />
+                                      <p className="text-[11px] text-gray-500">
+                                        Declared: K{(declarationDetails.declaration.declared_interest_on_loan ?? 0).toLocaleString()}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                                    <textarea
+                                      rows={2}
+                                      value={repaymentActionReason}
+                                      onChange={(e) => {
+                                        setRepaymentActionReason(e.target.value);
+                                        setRepaymentActionError(null);
+                                      }}
+                                      placeholder="e.g. Payment was for December 2025 backfilled loan; no active loan existed at approval time."
+                                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                                    />
+                                  </div>
+                                </>
+                              )}
+                              <div className="flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={submitRepaymentAction}
+                                  disabled={repaymentActionSubmitting || !repaymentActionLoanId}
+                                  className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                                >
+                                  {repaymentActionSubmitting
+                                    ? (repaymentAction.mode === 'change' ? 'Moving…' : 'Posting…')
+                                    : (repaymentAction.mode === 'change' ? 'Move Repayment' : 'Post Repayment')}
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       <div className="bg-blue-50 border-2 border-blue-200 rounded-xl p-4 flex justify-between items-center">
                         <span className="font-bold text-blue-900">Total</span>
                         <span className="text-xl font-bold text-blue-900">K{declarationDetails.declaration.total.toLocaleString()}</span>
