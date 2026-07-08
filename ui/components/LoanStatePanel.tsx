@@ -105,6 +105,19 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
   const [repairNewAmount, setRepairNewAmount] = useState('');
   const [submittingRepair, setSubmittingRepair] = useState(false);
 
+  // Per-loan expand/collapse for the "dead noise" rows (disbursement reversed
+  // AND no application) — collapsed by default so the treasurer sees a clean
+  // chronological history, expandable inline when they need to inspect.
+  const [expandedDeadLoans, setExpandedDeadLoans] = useState<Set<string>>(new Set());
+  const toggleExpandedDeadLoan = (loanId: string) => {
+    setExpandedDeadLoans((prev) => {
+      const next = new Set(prev);
+      if (next.has(loanId)) next.delete(loanId);
+      else next.add(loanId);
+      return next;
+    });
+  };
+
   const load = useCallback(() => {
     if (!memberId) {
       setState(null);
@@ -490,9 +503,98 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
         </div>
       </div>
 
-      {/* Loan rows */}
+      {/* Borrowing history */}
+      <div className="pt-2 pb-1 flex items-baseline justify-between">
+        <h3 className="text-base font-bold text-blue-900">Borrowing History</h3>
+        {(() => {
+          const deadCount = state.loans.filter(
+            (l) => !l.has_live_disbursement_je && !l.application_id,
+          ).length;
+          if (deadCount === 0) return null;
+          const anyExpanded = state.loans.some(
+            (l) => !l.has_live_disbursement_je && !l.application_id && expandedDeadLoans.has(l.id),
+          );
+          return (
+            <button
+              type="button"
+              onClick={() => {
+                if (anyExpanded) {
+                  setExpandedDeadLoans(new Set());
+                } else {
+                  setExpandedDeadLoans(
+                    new Set(
+                      state.loans
+                        .filter((l) => !l.has_live_disbursement_je && !l.application_id)
+                        .map((l) => l.id),
+                    ),
+                  );
+                }
+              }}
+              className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold"
+              title={`${deadCount} reversed / no-application loan${deadCount === 1 ? '' : 's'} — collapsed by default`}
+            >
+              {anyExpanded ? 'Collapse all reversed' : `Expand all reversed (${deadCount})`}
+            </button>
+          );
+        })()}
+      </div>
+
+      {/* Loan rows — sorted oldest-first by disbursement date so the
+          treasurer reads borrowing history chronologically. Loans with a
+          reversed disbursement AND no application are "dead noise" —
+          collapsed to a one-liner by default, expandable inline. */}
       <div className="space-y-3">
-        {state.loans.map((loan) => (
+        {[...state.loans]
+          .sort((a, b) => {
+            // Nulls (undisbursed) sink to the bottom so live entries lead.
+            const ad = a.disbursement_date || '9999-12-31';
+            const bd = b.disbursement_date || '9999-12-31';
+            if (ad !== bd) return ad.localeCompare(bd);
+            // Deterministic tie-breaker on created_at, then id.
+            const ac = a.created_at || '';
+            const bc = b.created_at || '';
+            if (ac !== bc) return ac.localeCompare(bc);
+            return a.id.localeCompare(b.id);
+          })
+          .map((loan) => {
+          const isDeadNoise = !loan.has_live_disbursement_je && !loan.application_id;
+          const isCollapsed = isDeadNoise && !expandedDeadLoans.has(loan.id);
+          if (isCollapsed) {
+            return (
+              <div
+                key={loan.id}
+                className="border border-red-200 bg-red-50/30 rounded-lg px-3 py-2 flex flex-wrap items-center gap-2 text-xs"
+              >
+                <span className="text-gray-500 line-through font-semibold">
+                  {loan.disbursement_date
+                    ? new Date(loan.disbursement_date + 'T00:00:00').toLocaleDateString('en-US', {
+                        month: 'long',
+                        year: 'numeric',
+                      })
+                    : 'Undisbursed'}
+                </span>
+                <span className="font-mono text-gray-400">({loan.id.slice(0, 8)})</span>
+                <span className="text-gray-500">
+                  {fmt(loan.loan_amount)} @ {loan.percentage_interest}%
+                </span>
+                <span className="inline-block px-1.5 py-0.5 rounded bg-red-100 text-red-800 font-semibold">
+                  disbursement reversed
+                </span>
+                <span className="inline-block px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">
+                  no application
+                </span>
+                <button
+                  type="button"
+                  onClick={() => toggleExpandedDeadLoan(loan.id)}
+                  className="ml-auto text-blue-600 hover:text-blue-800 hover:underline font-semibold"
+                  aria-expanded={false}
+                >
+                  Expand ▾
+                </button>
+              </div>
+            );
+          }
+          return (
           <div
             key={loan.id}
             className={`border rounded-lg p-3 ${
@@ -705,8 +807,21 @@ export default function LoanStatePanel({ memberId }: { memberId: string }) {
                 </table>
               </div>
             )}
+            {isDeadNoise && (
+              <div className="mt-2 pt-2 border-t border-red-200 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => toggleExpandedDeadLoan(loan.id)}
+                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline font-semibold"
+                  aria-expanded={true}
+                >
+                  Collapse ▴
+                </button>
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {/* Consolidate modal */}
