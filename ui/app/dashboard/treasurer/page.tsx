@@ -161,12 +161,21 @@ export default function TreasurerDashboard() {
   const [backfillMembers, setBackfillMembers] = useState<{ id: string; user: { first_name: string; last_name: string } }[]>([]);
   const [backfillCycles, setBackfillCycles] = useState<{ id: string; year: number; cycle_number: number }[]>([]);
   const [backfillSubmitting, setBackfillSubmitting] = useState(false);
+  // Inline modal-level error + which field to highlight red. Keeps the
+  // feedback next to what the treasurer is looking at instead of the
+  // page-level toast that they can't see behind the modal.
+  const [backfillError, setBackfillError] = useState<string | null>(null);
+  const [backfillErrorField, setBackfillErrorField] = useState<
+    'member' | 'cycle' | 'amount' | 'term' | 'rate' | 'date' | 'reason' | null
+  >(null);
 
   // Move-disbursement-month modal (per-loan action in Reports → Loans)
   const [moveLoan, setMoveLoan] = useState<LoanReportItem | null>(null);
   const [moveLoanNewDate, setMoveLoanNewDate] = useState('');
   const [moveLoanReason, setMoveLoanReason] = useState('');
   const [moveLoanSubmitting, setMoveLoanSubmitting] = useState(false);
+  const [moveLoanError, setMoveLoanError] = useState<string | null>(null);
+  const [moveLoanErrorField, setMoveLoanErrorField] = useState<'date' | 'reason' | null>(null);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -750,6 +759,8 @@ export default function TreasurerDashboard() {
     setBackfillDate(selectedReportMonth);
     setBackfillReason('');
     setBackfillForce(false);
+    setBackfillError(null);
+    setBackfillErrorField(null);
     setShowBackfillModal(true);
     try {
       const [membersRes, cyclesRes] = await Promise.all([
@@ -785,7 +796,14 @@ export default function TreasurerDashboard() {
       const res = await api.get<{ rate: number | null }>(
         `/api/treasurer/members/${memberId}/suggested-loan-rate?term_months=${encodeURIComponent(term)}`,
       );
-      setBackfillSuggestedRate(res.data?.rate ?? null);
+      const rate = res.data?.rate ?? null;
+      setBackfillSuggestedRate(rate);
+      // Prefill the rate field with the ACTUAL value (not just a placeholder)
+      // so an unedited submit sends the right number. Only overwrite when the
+      // field is empty — never clobber a rate the treasurer typed already.
+      if (rate != null && backfillRate === '') {
+        setBackfillRate(String(rate));
+      }
     } catch {
       setBackfillSuggestedRate(null);
     }
@@ -793,37 +811,67 @@ export default function TreasurerDashboard() {
 
   const cancelBackfill = () => {
     setShowBackfillModal(false);
+    setBackfillError(null);
+    setBackfillErrorField(null);
+  };
+
+  const clearBackfillError = () => {
+    if (backfillError || backfillErrorField) {
+      setBackfillError(null);
+      setBackfillErrorField(null);
+    }
   };
 
   const submitBackfill = async () => {
-    if (!backfillMemberId || !backfillCycleId) {
-      setMessage({ type: 'error', text: 'Pick a member and cycle before backfilling.' });
+    const raiseFieldError = (
+      field: 'member' | 'cycle' | 'amount' | 'term' | 'rate' | 'date' | 'reason',
+      msg: string,
+    ) => {
+      setBackfillError(msg);
+      setBackfillErrorField(field);
+    };
+    if (!backfillMemberId) {
+      raiseFieldError('member', 'Pick a member before backfilling.');
+      return;
+    }
+    if (!backfillCycleId) {
+      raiseFieldError('cycle', 'Pick a cycle before backfilling.');
       return;
     }
     const amt = parseFloat(backfillAmount);
-    const rate = parseFloat(backfillRate);
     if (!amt || amt <= 0) {
-      setMessage({ type: 'error', text: 'Loan amount must be greater than zero.' });
+      raiseFieldError('amount', 'Loan amount must be greater than zero.');
       return;
     }
+    if (!backfillTerm || !backfillTerm.trim()) {
+      raiseFieldError('term', 'Term (months) is required.');
+      return;
+    }
+    const rate = parseFloat(backfillRate);
     if (Number.isNaN(rate) || rate < 0) {
-      setMessage({ type: 'error', text: 'Interest rate must be zero or greater.' });
+      raiseFieldError(
+        'rate',
+        backfillRate.trim() === ''
+          ? 'Interest rate is required — use the current-rate shortcut or type one.'
+          : 'Interest rate must be zero or greater.',
+      );
       return;
     }
     if (!backfillDate) {
-      setMessage({ type: 'error', text: 'Pick a disbursement date.' });
+      raiseFieldError('date', 'Pick a disbursement date.');
       return;
     }
     if (backfillDate > new Date().toISOString().slice(0, 10)) {
-      setMessage({ type: 'error', text: 'Disbursement date cannot be in the future.' });
+      raiseFieldError('date', 'Disbursement date cannot be in the future.');
       return;
     }
     if (backfillReason.trim().length < 5) {
-      setMessage({ type: 'error', text: 'Reason (min 5 characters) is required for the audit log.' });
+      raiseFieldError('reason', 'Reason (min 5 characters) is required for the audit log.');
       return;
     }
     setBackfillSubmitting(true);
-    setMessage(null);
+    setBackfillError(null);
+    setBackfillErrorField(null);
     try {
       const res = await api.post<{ loan_id: string }>('/api/treasurer/loans/backfill', {
         member_id: backfillMemberId,
@@ -836,14 +884,29 @@ export default function TreasurerDashboard() {
         force: backfillForce,
       });
       if (res.error) {
-        // If the backend refused for an active-loan conflict, arm the override flag.
-        if (!backfillForce && /already has an active loan/i.test(res.error)) {
-          setMessage({
-            type: 'error',
-            text: res.error + ' Tick "override active-loan check" and try again if this is a genuine historical loan.',
-          });
+        // Backend refused. Mirror any obvious field mapping.
+        const err = res.error;
+        if (!backfillForce && /already has an active loan/i.test(err)) {
+          setBackfillError(
+            err + ' Tick "override active-loan check" below and try again if this is a genuine historical loan.',
+          );
+        } else if (/loan_amount/i.test(err)) {
+          setBackfillErrorField('amount');
+          setBackfillError(err);
+        } else if (/percentage_interest|interest rate/i.test(err)) {
+          setBackfillErrorField('rate');
+          setBackfillError(err);
+        } else if (/disbursement date/i.test(err)) {
+          setBackfillErrorField('date');
+          setBackfillError(err);
+        } else if (/term_months/i.test(err)) {
+          setBackfillErrorField('term');
+          setBackfillError(err);
+        } else if (/reason/i.test(err)) {
+          setBackfillErrorField('reason');
+          setBackfillError(err);
         } else {
-          setMessage({ type: 'error', text: res.error });
+          setBackfillError(err);
         }
       } else {
         setMessage({
@@ -851,14 +914,16 @@ export default function TreasurerDashboard() {
           text: `Historical loan recorded (${res.data?.loan_id?.slice(0, 8)}). It will appear in the Loans report for the selected month.`,
         });
         setShowBackfillModal(false);
+        setBackfillError(null);
+        setBackfillErrorField(null);
         await loadReports();
         await loadData();
+        setTimeout(() => setMessage(null), 6000);
       }
     } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || 'Failed to record loan' });
+      setBackfillError(err?.message || 'Failed to record loan');
     } finally {
       setBackfillSubmitting(false);
-      setTimeout(() => setMessage(null), 6000);
     }
   };
 
@@ -870,30 +935,45 @@ export default function TreasurerDashboard() {
     // is looking at.
     setMoveLoanNewDate(selectedReportMonth);
     setMoveLoanReason('');
+    setMoveLoanError(null);
+    setMoveLoanErrorField(null);
   };
 
   const cancelMoveLoan = () => {
     setMoveLoan(null);
     setMoveLoanNewDate('');
     setMoveLoanReason('');
+    setMoveLoanError(null);
+    setMoveLoanErrorField(null);
+  };
+
+  const clearMoveLoanError = () => {
+    if (moveLoanError || moveLoanErrorField) {
+      setMoveLoanError(null);
+      setMoveLoanErrorField(null);
+    }
   };
 
   const submitMoveLoan = async () => {
     if (!moveLoan) return;
     if (!moveLoanNewDate) {
-      setMessage({ type: 'error', text: 'Pick a new disbursement date.' });
+      setMoveLoanError('Pick a new disbursement date.');
+      setMoveLoanErrorField('date');
       return;
     }
     if (moveLoanNewDate > new Date().toISOString().slice(0, 10)) {
-      setMessage({ type: 'error', text: 'Disbursement date cannot be in the future.' });
+      setMoveLoanError('Disbursement date cannot be in the future.');
+      setMoveLoanErrorField('date');
       return;
     }
     if (moveLoanReason.trim().length < 5) {
-      setMessage({ type: 'error', text: 'Reason (min 5 characters) is required for the audit log.' });
+      setMoveLoanError('Reason (min 5 characters) is required for the audit log.');
+      setMoveLoanErrorField('reason');
       return;
     }
     setMoveLoanSubmitting(true);
-    setMessage(null);
+    setMoveLoanError(null);
+    setMoveLoanErrorField(null);
     try {
       const res = await api.post(
         `/api/treasurer/loans/${moveLoan.loan_id}/move-disbursement-date`,
@@ -903,17 +983,19 @@ export default function TreasurerDashboard() {
         },
       );
       if (res.error) {
-        setMessage({ type: 'error', text: res.error });
+        setMoveLoanError(res.error);
+        if (/disbursement date/i.test(res.error)) setMoveLoanErrorField('date');
+        else if (/reason/i.test(res.error)) setMoveLoanErrorField('reason');
       } else {
         setMessage({ type: 'success', text: 'Loan disbursement date moved.' });
         setMoveLoan(null);
         await loadReports();
+        setTimeout(() => setMessage(null), 5000);
       }
     } catch (err: any) {
-      setMessage({ type: 'error', text: err?.message || 'Failed to move loan' });
+      setMoveLoanError(err?.message || 'Failed to move loan');
     } finally {
       setMoveLoanSubmitting(false);
-      setTimeout(() => setMessage(null), 5000);
     }
   };
 
@@ -2775,16 +2857,36 @@ export default function TreasurerDashboard() {
               </p>
             </div>
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {backfillError && (
+                <div
+                  role="alert"
+                  className="p-3 bg-red-50 border-2 border-red-400 rounded-xl flex items-start gap-2"
+                >
+                  <span className="text-red-600 text-lg leading-none">⚠</span>
+                  <p className="text-sm text-red-800 font-medium flex-1">{backfillError}</p>
+                  <button
+                    type="button"
+                    onClick={clearBackfillError}
+                    className="text-red-500 hover:text-red-700 text-xl leading-none"
+                    aria-label="Dismiss error"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="grid grid-cols-1 gap-3">
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-blue-900">Member</label>
                   <select
                     value={backfillMemberId}
                     onChange={(e) => {
+                      clearBackfillError();
                       setBackfillMemberId(e.target.value);
                       fetchSuggestedRate(e.target.value, backfillTerm);
                     }}
-                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm bg-white"
+                    className={`px-3 py-2 border-2 rounded text-sm bg-white ${
+                      backfillErrorField === 'member' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                    }`}
                   >
                     <option value="">Pick a member…</option>
                     {backfillMembers.map((m) => (
@@ -2798,8 +2900,13 @@ export default function TreasurerDashboard() {
                   <label className="text-xs font-semibold text-blue-900">Cycle</label>
                   <select
                     value={backfillCycleId}
-                    onChange={(e) => setBackfillCycleId(e.target.value)}
-                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm bg-white"
+                    onChange={(e) => {
+                      clearBackfillError();
+                      setBackfillCycleId(e.target.value);
+                    }}
+                    className={`px-3 py-2 border-2 rounded text-sm bg-white ${
+                      backfillErrorField === 'cycle' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                    }`}
                   >
                     {backfillCycles.map((c) => (
                       <option key={c.id} value={c.id}>
@@ -2816,8 +2923,13 @@ export default function TreasurerDashboard() {
                       min="0"
                       step="0.01"
                       value={backfillAmount}
-                      onChange={(e) => setBackfillAmount(e.target.value)}
-                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      onChange={(e) => {
+                        clearBackfillError();
+                        setBackfillAmount(e.target.value);
+                      }}
+                      className={`px-3 py-2 border-2 rounded text-sm ${
+                        backfillErrorField === 'amount' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                      }`}
                     />
                   </div>
                   <div className="flex flex-col gap-1">
@@ -2827,10 +2939,13 @@ export default function TreasurerDashboard() {
                       inputMode="numeric"
                       value={backfillTerm}
                       onChange={(e) => {
+                        clearBackfillError();
                         setBackfillTerm(e.target.value);
                         fetchSuggestedRate(backfillMemberId, e.target.value);
                       }}
-                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      className={`px-3 py-2 border-2 rounded text-sm ${
+                        backfillErrorField === 'term' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                      }`}
                     />
                   </div>
                 </div>
@@ -2842,27 +2957,22 @@ export default function TreasurerDashboard() {
                       min="0"
                       step="0.01"
                       value={backfillRate}
-                      onChange={(e) => setBackfillRate(e.target.value)}
-                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
-                      placeholder={
-                        backfillSuggestedRate != null ? String(backfillSuggestedRate) : 'e.g. 6'
-                      }
+                      onChange={(e) => {
+                        clearBackfillError();
+                        setBackfillRate(e.target.value);
+                      }}
+                      className={`px-3 py-2 border-2 rounded text-sm ${
+                        backfillErrorField === 'rate' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                      }`}
+                      placeholder="e.g. 6"
                     />
                     {backfillSuggestedRate != null ? (
                       <p className="text-[11px] text-blue-700">
-                        Current rate for this member × term:{' '}
-                        <button
-                          type="button"
-                          onClick={() => setBackfillRate(String(backfillSuggestedRate))}
-                          className="font-semibold text-blue-800 underline hover:text-blue-900"
-                        >
-                          {backfillSuggestedRate}%
-                        </button>{' '}
-                        (tap to use, or type any rate).
+                        Prefilled from current rate ({backfillSuggestedRate}%). Edit if the historical rate was different.
                       </p>
                     ) : backfillMemberId ? (
                       <p className="text-[11px] text-amber-700">
-                        No current rate configured — type the historical rate.
+                        No current rate configured for this member × term — type the historical rate.
                       </p>
                     ) : null}
                   </div>
@@ -2872,8 +2982,13 @@ export default function TreasurerDashboard() {
                       type="date"
                       max={new Date().toISOString().slice(0, 10)}
                       value={backfillDate}
-                      onChange={(e) => setBackfillDate(e.target.value)}
-                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      onChange={(e) => {
+                        clearBackfillError();
+                        setBackfillDate(e.target.value);
+                      }}
+                      className={`px-3 py-2 border-2 rounded text-sm ${
+                        backfillErrorField === 'date' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                      }`}
                     />
                     <p className="text-[11px] text-gray-500">Sets both the loan date and the ledger dealing month.</p>
                   </div>
@@ -2883,9 +2998,14 @@ export default function TreasurerDashboard() {
                   <textarea
                     rows={2}
                     value={backfillReason}
-                    onChange={(e) => setBackfillReason(e.target.value)}
+                    onChange={(e) => {
+                      clearBackfillError();
+                      setBackfillReason(e.target.value);
+                    }}
                     placeholder="e.g. Loan issued to member in April 2026 outside the system; repayments already declared."
-                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                    className={`px-3 py-2 border-2 rounded text-sm ${
+                      backfillErrorField === 'reason' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                    }`}
                   />
                 </div>
                 <label className="flex items-start gap-2 text-xs text-blue-900">
@@ -2934,14 +3054,36 @@ export default function TreasurerDashboard() {
               </p>
             </div>
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {moveLoanError && (
+                <div
+                  role="alert"
+                  className="p-3 bg-red-50 border-2 border-red-400 rounded-xl flex items-start gap-2"
+                >
+                  <span className="text-red-600 text-lg leading-none">⚠</span>
+                  <p className="text-sm text-red-800 font-medium flex-1">{moveLoanError}</p>
+                  <button
+                    type="button"
+                    onClick={clearMoveLoanError}
+                    className="text-red-500 hover:text-red-700 text-xl leading-none"
+                    aria-label="Dismiss error"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
               <div className="flex flex-col gap-1">
                 <label className="text-xs font-semibold text-blue-900">New disbursement date</label>
                 <input
                   type="date"
                   max={new Date().toISOString().slice(0, 10)}
                   value={moveLoanNewDate}
-                  onChange={(e) => setMoveLoanNewDate(e.target.value)}
-                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                  onChange={(e) => {
+                    clearMoveLoanError();
+                    setMoveLoanNewDate(e.target.value);
+                  }}
+                  className={`px-3 py-2 border-2 rounded text-sm ${
+                    moveLoanErrorField === 'date' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                  }`}
                 />
                 <p className="text-[11px] text-gray-500">
                   Both the loan date and the ledger dealing month update. Repayment dates on this loan aren&apos;t touched.
@@ -2952,9 +3094,14 @@ export default function TreasurerDashboard() {
                 <textarea
                   rows={2}
                   value={moveLoanReason}
-                  onChange={(e) => setMoveLoanReason(e.target.value)}
+                  onChange={(e) => {
+                    clearMoveLoanError();
+                    setMoveLoanReason(e.target.value);
+                  }}
                   placeholder="e.g. Disbursed in April but posted to May by mistake."
-                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                  className={`px-3 py-2 border-2 rounded text-sm ${
+                    moveLoanErrorField === 'reason' ? 'border-red-500 focus:border-red-500 focus:ring-red-400' : 'border-blue-300'
+                  }`}
                 />
               </div>
             </div>
