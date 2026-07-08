@@ -177,6 +177,18 @@ export default function TreasurerDashboard() {
   const [moveLoanError, setMoveLoanError] = useState<string | null>(null);
   const [moveLoanErrorField, setMoveLoanErrorField] = useState<'date' | 'reason' | null>(null);
 
+  // Loan-details modal — inline "Edit loan terms" editor. Amount / term /
+  // rate correspond to the same knobs on the Reconciliation Loan State panel;
+  // the backend `POST /api/chairman/reconcile/loan/{id}/edit-terms` is what
+  // both surfaces call, so the corrective JE + audit trail are identical.
+  const [editLoanTermsOpen, setEditLoanTermsOpen] = useState(false);
+  const [editLoanNewAmount, setEditLoanNewAmount] = useState('');
+  const [editLoanNewTerm, setEditLoanNewTerm] = useState('');
+  const [editLoanNewRate, setEditLoanNewRate] = useState('');
+  const [editLoanReason, setEditLoanReason] = useState('');
+  const [editLoanSubmitting, setEditLoanSubmitting] = useState(false);
+  const [editLoanError, setEditLoanError] = useState<string | null>(null);
+
   // Declaration-details modal — per-attribution inline pickers
   // repaymentAction state: `{ mode: 'change', repaymentId }` shows the loan-picker for an existing attribution;
   //                        `{ mode: 'post' }` shows the loan-picker + amounts for the orphan case.
@@ -555,6 +567,99 @@ export default function TreasurerDashboard() {
   const closeLoanModal = () => {
     setShowLoanModal(false);
     setSelectedLoan(null);
+    // Reset the inline edit-terms editor so next opening starts fresh.
+    setEditLoanTermsOpen(false);
+    setEditLoanNewAmount('');
+    setEditLoanNewTerm('');
+    setEditLoanNewRate('');
+    setEditLoanReason('');
+    setEditLoanError(null);
+  };
+
+  const openEditLoanTerms = () => {
+    if (!selectedLoan) return;
+    setEditLoanNewAmount(String(selectedLoan.loan_amount ?? ''));
+    setEditLoanNewTerm(selectedLoan.term_months && selectedLoan.term_months !== 'N/A' ? selectedLoan.term_months : '');
+    setEditLoanNewRate(String(selectedLoan.interest_rate ?? ''));
+    setEditLoanReason('');
+    setEditLoanError(null);
+    setEditLoanTermsOpen(true);
+  };
+
+  const cancelEditLoanTerms = () => {
+    setEditLoanTermsOpen(false);
+    setEditLoanNewAmount('');
+    setEditLoanNewTerm('');
+    setEditLoanNewRate('');
+    setEditLoanReason('');
+    setEditLoanError(null);
+  };
+
+  const submitEditLoanTerms = async () => {
+    if (!selectedLoan) return;
+    const currentAmount = Number(selectedLoan.loan_amount ?? NaN);
+    const currentTerm =
+      selectedLoan.term_months && selectedLoan.term_months !== 'N/A' ? selectedLoan.term_months : '';
+    const currentRate = Number(selectedLoan.interest_rate ?? NaN);
+
+    const newAmount = parseFloat(editLoanNewAmount);
+    const newTerm = editLoanNewTerm.trim();
+    const newRate = parseFloat(editLoanNewRate);
+
+    const amountChanged =
+      editLoanNewAmount !== '' &&
+      !Number.isNaN(newAmount) &&
+      (Number.isNaN(currentAmount) || Math.abs(newAmount - currentAmount) > 0.005);
+    const termChanged = newTerm !== '' && newTerm !== currentTerm;
+    const rateChanged =
+      editLoanNewRate !== '' &&
+      !Number.isNaN(newRate) &&
+      (Number.isNaN(currentRate) || Math.abs(newRate - currentRate) > 0.005);
+
+    if (!amountChanged && !termChanged && !rateChanged) {
+      setEditLoanError('Change the loan amount, tenure, or interest rate before saving.');
+      return;
+    }
+    if (!Number.isNaN(newAmount) && newAmount < 0) {
+      setEditLoanError('Loan amount cannot be negative.');
+      return;
+    }
+    if (!Number.isNaN(newRate) && newRate < 0) {
+      setEditLoanError('Interest rate cannot be negative.');
+      return;
+    }
+    if (editLoanReason.trim().length < 5) {
+      setEditLoanError('Reason (min 5 characters) is required for the audit log.');
+      return;
+    }
+    setEditLoanSubmitting(true);
+    setEditLoanError(null);
+    try {
+      const res = await api.post(`/api/chairman/reconcile/loan/${selectedLoan.id}/edit-terms`, {
+        new_loan_amount: amountChanged ? newAmount : null,
+        new_term_months: termChanged ? newTerm : null,
+        new_percentage_interest: rateChanged ? newRate : null,
+        reason: editLoanReason.trim(),
+      });
+      if (res.error) {
+        setEditLoanError(res.error);
+      } else {
+        setEditLoanTermsOpen(false);
+        setEditLoanNewAmount('');
+        setEditLoanNewTerm('');
+        setEditLoanNewRate('');
+        setEditLoanReason('');
+        // Refresh the modal with the updated figures. Also refresh the
+        // Reports list so the Loans → K amount column reflects the new
+        // principal once the corrective JE lands.
+        await handleViewLoanDetails(selectedLoan.id);
+        await loadReports();
+      }
+    } catch (err: any) {
+      setEditLoanError(err?.message || 'Failed to update loan terms');
+    } finally {
+      setEditLoanSubmitting(false);
+    }
   };
 
   const handleViewDeclarationDetails = async (memberId: string) => {
@@ -2560,6 +2665,173 @@ export default function TreasurerDashboard() {
                       <p className="text-sm font-semibold text-red-700">Outstanding</p>
                       <p className="text-lg font-bold text-red-900">K{selectedLoan.outstanding_balance.toLocaleString()}</p>
                     </div>
+                  </div>
+
+                  {/* Edit loan terms — for cases where the treasurer approved
+                      the applied amount but the actual disbursed amount / term
+                      / rate needs to be corrected retrospectively. Calls the
+                      same edit-terms service the Reconciliation Loan State
+                      panel uses; posts a balanced corrective JE for the
+                      principal and interest deltas so the ledger stays in
+                      sync. */}
+                  <div className="bg-white border-2 border-blue-200 rounded-xl p-4">
+                    <div className="flex justify-between items-center">
+                      <div>
+                        <h3 className="font-bold text-base text-blue-900">Loan terms</h3>
+                        <p className="text-xs text-gray-600 mt-0.5">
+                          Amount, tenure, and interest rate. Editing posts a corrective JE bucketed under the loan&apos;s disbursement month.
+                        </p>
+                      </div>
+                      {!editLoanTermsOpen && (
+                        <button
+                          type="button"
+                          onClick={openEditLoanTerms}
+                          className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700"
+                        >
+                          Edit loan terms…
+                        </button>
+                      )}
+                    </div>
+                    {editLoanTermsOpen && (() => {
+                      const currentAmount = Number(selectedLoan.loan_amount ?? 0);
+                      const currentTerm =
+                        selectedLoan.term_months && selectedLoan.term_months !== 'N/A' ? selectedLoan.term_months : '';
+                      const currentRate = Number(selectedLoan.interest_rate ?? 0);
+                      const newAmountN = parseFloat(editLoanNewAmount);
+                      const newRateN = parseFloat(editLoanNewRate);
+                      const usingNewAmount = editLoanNewAmount !== '' && !Number.isNaN(newAmountN);
+                      const usingNewRate = editLoanNewRate !== '' && !Number.isNaN(newRateN);
+                      const oldExpectedInterest = currentAmount * currentRate / 100;
+                      const newExpectedInterest =
+                        (usingNewAmount ? newAmountN : currentAmount) *
+                        (usingNewRate ? newRateN : currentRate) / 100;
+                      const principalDelta = usingNewAmount ? newAmountN - currentAmount : 0;
+                      const interestDelta = newExpectedInterest - oldExpectedInterest;
+                      return (
+                        <div className="mt-3 space-y-3">
+                          {editLoanError && (
+                            <p className="text-xs text-red-800 bg-red-50 border border-red-300 rounded px-3 py-2">
+                              {editLoanError}
+                            </p>
+                          )}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Loan amount (K)</label>
+                              <input
+                                type="number" inputMode="decimal"
+                                min="0"
+                                step="0.01"
+                                value={editLoanNewAmount}
+                                onChange={(e) => {
+                                  setEditLoanNewAmount(e.target.value);
+                                  setEditLoanError(null);
+                                }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                              />
+                              <p className="text-[11px] text-gray-500">
+                                Current: <span className="font-mono">K{currentAmount.toLocaleString()}</span>
+                              </p>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Tenure (months)</label>
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={editLoanNewTerm}
+                                onChange={(e) => {
+                                  setEditLoanNewTerm(e.target.value);
+                                  setEditLoanError(null);
+                                }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                              />
+                              <p className="text-[11px] text-gray-500">
+                                Current: <span className="font-mono">{currentTerm || '—'}</span>
+                              </p>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                              <label className="text-xs font-semibold text-blue-900">Interest rate (%)</label>
+                              <input
+                                type="number" inputMode="decimal"
+                                min="0"
+                                step="0.01"
+                                value={editLoanNewRate}
+                                onChange={(e) => {
+                                  setEditLoanNewRate(e.target.value);
+                                  setEditLoanError(null);
+                                }}
+                                className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                              />
+                              <p className="text-[11px] text-gray-500">
+                                Current: <span className="font-mono">{currentRate}%</span>
+                              </p>
+                            </div>
+                          </div>
+                          <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
+                            <div className="flex justify-between">
+                              <span className="text-blue-700">New loan amount → ledger</span>
+                              <span className="font-semibold text-blue-900">
+                                K{(usingNewAmount ? newAmountN : currentAmount).toLocaleString()}
+                              </span>
+                            </div>
+                            <div className={`flex justify-between ${Math.abs(principalDelta) < 0.005 ? 'text-blue-700' : principalDelta > 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                              <span>Principal delta (corrective JE)</span>
+                              <span className="font-bold">
+                                {principalDelta >= 0 ? '+' : ''}K{principalDelta.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-blue-700">Old expected interest</span>
+                              <span className="font-semibold text-blue-900">
+                                K{oldExpectedInterest.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="text-blue-700">New expected interest</span>
+                              <span className="font-semibold text-blue-900">
+                                K{newExpectedInterest.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className={`flex justify-between pt-1 mt-1 border-t border-blue-200 ${Math.abs(interestDelta) < 0.005 ? 'text-blue-700' : interestDelta > 0 ? 'text-emerald-700' : 'text-amber-700'}`}>
+                              <span>Interest accrual delta</span>
+                              <span className="font-bold">
+                                {interestDelta >= 0 ? '+' : ''}K{interestDelta.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                            <textarea
+                              rows={2}
+                              value={editLoanReason}
+                              onChange={(e) => {
+                                setEditLoanReason(e.target.value);
+                                setEditLoanError(null);
+                              }}
+                              placeholder="e.g. Applied for K350,000 but only K180,000 was actually disbursed; correcting to actual."
+                              className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                            />
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={cancelEditLoanTerms}
+                              disabled={editLoanSubmitting}
+                              className="px-3 py-1.5 text-sm font-semibold text-gray-600 hover:text-gray-800"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={submitEditLoanTerms}
+                              disabled={editLoanSubmitting}
+                              className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              {editLoanSubmitting ? 'Saving…' : 'Save loan terms'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Payment Performance */}
