@@ -1327,6 +1327,183 @@ def disburse_loan_endpoint(
     return {"message": "Loan disbursed successfully and is now active", "loan_id": str(loan.id)}
 
 
+class BackfillLoanRequest(BaseModel):
+    """Body for recording a historical (off-system) loan.
+
+    Used by the treasurer on the Reports → Loans view to onboard loans that
+    were disbursed to members outside the app, so their existing repayment
+    declarations can be reconciled against a real Loan row.
+    """
+    member_id: str
+    cycle_id: str
+    loan_amount: float
+    term_months: str
+    percentage_interest: float
+    disbursement_date: str            # YYYY-MM-DD, must not be in the future
+    reason: str                       # audit trail — required
+    force: Optional[bool] = False     # bypass one-active-loan rule for genuine multi-loan history
+
+
+@router.post("/loans/backfill")
+def post_backfill_loan(
+    body: BackfillLoanRequest,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Record a historical loan (application + immediate disbursement in one call).
+
+    The loan lands with status OPEN, dated on the supplied disbursement_date,
+    with the treasurer's free-form interest rate. This lets the Reconciliation
+    panel then reallocate existing repayment declarations against the new
+    Loan row.
+    """
+    from app.services.loan_repair import create_backfill_loan
+    from app.core.audit import write_audit_log
+    from decimal import Decimal
+    try:
+        member_uuid = UUID(body.member_id)
+        cycle_uuid = UUID(body.cycle_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id or cycle_id")
+
+    try:
+        result = create_backfill_loan(
+            db=db,
+            member_id=member_uuid,
+            cycle_id=cycle_uuid,
+            loan_amount=Decimal(str(body.loan_amount)),
+            term_months=body.term_months,
+            percentage_interest=Decimal(str(body.percentage_interest)),
+            disbursement_date=body.disbursement_date,
+            reason=body.reason,
+            user_id=current_user.id,
+            force=bool(body.force),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Loan backfilled (historical)",
+        details=(
+            f"member={body.member_id} amount=K{body.loan_amount} "
+            f"rate={body.percentage_interest}% term={body.term_months}mo "
+            f"disbursed={body.disbursement_date}"
+        ),
+    )
+    return result
+
+
+class MoveLoanDisbursementRequest(BaseModel):
+    """Body for moving a loan's disbursement date to a different month.
+
+    Used when a loan was posted against the wrong month; also re-buckets the
+    disbursement JE's dealing_month so the Loan/Revenue report groups the
+    loan under the correct period.
+    """
+    new_disbursement_date: str        # YYYY-MM-DD, must not be in the future
+    reason: str
+
+
+@router.post("/loans/{loan_id}/move-disbursement-date")
+def post_move_loan_disbursement_date(
+    loan_id: str,
+    body: MoveLoanDisbursementRequest,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Move a loan's disbursement date (and dealing month) to the correct
+    period. Rejects future dates. Repayment dates on the loan are NOT
+    touched — those reflect when payments actually landed."""
+    from app.services.loan_repair import edit_loan_disbursement_date
+    from app.core.audit import write_audit_log
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan ID")
+
+    try:
+        result = edit_loan_disbursement_date(
+            db=db,
+            loan_id=loan_uuid,
+            new_disbursement_date=body.new_disbursement_date,
+            reason=body.reason,
+            user_id=current_user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Loan disbursement date moved",
+        details=(
+            f"loan={loan_id} old={result.get('old_disbursement_date')} "
+            f"new={result.get('new_disbursement_date')}"
+        ),
+    )
+    return result
+
+
+@router.get("/members/{member_id}/suggested-loan-rate")
+def get_suggested_loan_rate(
+    member_id: str,
+    cycle_id: Optional[str] = None,
+    term_months: Optional[str] = None,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Return the credit-rating-driven interest rate the system WOULD apply
+    to this member for the given term, purely as a hint for the backfill
+    modal. Never enforced — treasurer can still type any rate."""
+    from app.models.policy import MemberCreditRating, CreditRatingInterestRange
+    from app.models.cycle import Cycle
+    try:
+        member_uuid = UUID(member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member ID")
+
+    cycle_uuid = None
+    if cycle_id:
+        try:
+            cycle_uuid = UUID(cycle_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="Invalid cycle ID")
+    else:
+        active = db.query(Cycle).filter(Cycle.status == "active").first()
+        if active:
+            cycle_uuid = active.id
+
+    if not cycle_uuid:
+        return {"rate": None, "reason": "no active cycle"}
+
+    rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_uuid,
+        MemberCreditRating.cycle_id == cycle_uuid,
+    ).first()
+    if not rating:
+        return {"rate": None, "reason": "no credit rating for this member in this cycle"}
+
+    q = db.query(CreditRatingInterestRange).filter(
+        CreditRatingInterestRange.tier_id == rating.tier_id,
+        CreditRatingInterestRange.cycle_id == cycle_uuid,
+    )
+    if term_months:
+        rng = q.filter(
+            (CreditRatingInterestRange.term_months == term_months)
+            | (CreditRatingInterestRange.term_months.is_(None))
+        ).first()
+    else:
+        rng = q.first()
+    if not rng:
+        return {"rate": None, "reason": "no interest range configured for this term/tier"}
+    return {
+        "rate": float(rng.effective_rate_percent),
+        "reason": "from credit rating × term",
+    }
+
+
 @router.get("/reports/declarations")
 def get_declarations_report(
     month: Optional[str] = None,  # Format: YYYY-MM-DD (first day of month)

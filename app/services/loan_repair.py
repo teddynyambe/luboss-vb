@@ -1217,3 +1217,143 @@ def edit_loan_disbursement_date(
         "disbursement_journal_entry_id": str(disb_je.id) if disb_je else None,
         "reason": reason,
     }
+
+
+def create_backfill_loan(
+    db: Session,
+    member_id: UUID,
+    cycle_id: UUID,
+    loan_amount: Decimal,
+    term_months: str,
+    percentage_interest: Decimal,
+    disbursement_date,  # date
+    reason: str,
+    user_id: UUID,
+    force: bool = False,
+) -> dict:
+    """Record a historical loan the group actually disbursed off-system,
+    so its repayments can be reconciled against a real Loan row.
+
+    Creates, in one commit:
+      * a backdated LoanApplication (application_date = disbursement_date,
+        status APPROVED, reviewed by the acting user)
+      * a Loan row (status OPEN, loan_amount, percentage_interest, term)
+      * the full disbursement JE via `disburse_loan` — Dr LOANS_RECEIVABLE
+        + Dr INTEREST_RECEIVABLE / Cr BANK_CASH + Cr INTEREST_INCOME —
+        bucketed under the disbursement month.
+
+    The interest rate is taken verbatim from `percentage_interest` (the
+    treasurer's free-form override) because historical loans predate the
+    current credit-rating table; forcing a lookup would fail for loans
+    from a previous cycle.
+
+    Guards:
+      * disbursement_date must not be in the future
+      * loan_amount must be positive
+      * percentage_interest must be non-negative
+      * member must exist
+      * cycle must exist
+      * unless `force` is True, refuses if the member already has an
+        active loan — same one-active-loan rule as the live approval path
+    """
+    from datetime import date as _date, datetime as _datetime
+    from app.models.transaction import LoanApplication, LoanApplicationStatus
+    from app.models.member import MemberProfile
+    from app.models.cycle import Cycle
+    from app.services.transaction import disburse_loan
+
+    reason = _require_description(reason)
+
+    loan_amount = Decimal(str(loan_amount))
+    percentage_interest = Decimal(str(percentage_interest))
+    if loan_amount <= 0:
+        raise ValueError("loan_amount must be positive")
+    if percentage_interest < 0:
+        raise ValueError("percentage_interest cannot be negative")
+    term_months = (term_months or "").strip()
+    if not term_months:
+        raise ValueError("term_months is required")
+
+    if isinstance(disbursement_date, str):
+        disbursement_date = _date.fromisoformat(disbursement_date)
+    if not isinstance(disbursement_date, _date):
+        raise ValueError("disbursement_date must be a date or YYYY-MM-DD string")
+    if disbursement_date > _date.today():
+        raise ValueError("disbursement date cannot be in the future")
+
+    member = db.query(MemberProfile).filter(MemberProfile.id == member_id).first()
+    if not member:
+        raise ValueError("member not found")
+    cycle = db.query(Cycle).filter(Cycle.id == cycle_id).first()
+    if not cycle:
+        raise ValueError("cycle not found")
+
+    existing_active = db.query(Loan).filter(
+        Loan.member_id == member_id,
+        Loan.loan_status.in_([LoanStatus.APPROVED, LoanStatus.OPEN, LoanStatus.DISBURSED]),
+    ).first()
+    if existing_active and not force:
+        raise ValueError(
+            f"Member already has an active loan (status={existing_active.loan_status.value}, "
+            f"amount=K{existing_active.loan_amount}). Close or consolidate it first, "
+            "or resubmit with force=true if this backfill is genuinely a separate historical loan."
+        )
+
+    application = LoanApplication(
+        member_id=member_id,
+        cycle_id=cycle_id,
+        amount=loan_amount,
+        term_months=term_months,
+        notes=f"[Backfill @ {_date.today().isoformat()}]: {reason}",
+        status=LoanApplicationStatus.APPROVED,
+        application_date=_datetime.combine(disbursement_date, _datetime.min.time()),
+        reviewed_by=user_id,
+        reviewed_at=_datetime.utcnow(),
+    )
+    db.add(application)
+    db.flush()
+
+    loan = Loan(
+        application_id=application.id,
+        member_id=member_id,
+        cycle_id=cycle_id,
+        loan_amount=loan_amount,
+        percentage_interest=percentage_interest,
+        number_of_instalments=term_months,
+        loan_status=LoanStatus.APPROVED,
+    )
+    db.add(loan)
+    db.flush()
+
+    bank_cash = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code == "BANK_CASH"
+    ).first()
+    loans_receivable = db.query(LedgerAccount).filter(
+        LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+    ).first()
+    if not bank_cash or not loans_receivable:
+        raise ValueError(
+            "BANK_CASH or LOANS_RECEIVABLE ledger account missing — "
+            "run scripts/setup_ledger_accounts.py"
+        )
+
+    loan = disburse_loan(
+        db=db,
+        loan_id=loan.id,
+        disbursed_by=user_id,
+        bank_cash_account_id=bank_cash.id,
+        loans_receivable_account_id=loans_receivable.id,
+        disbursement_date_override=disbursement_date,
+    )
+
+    return {
+        "loan_id": str(loan.id),
+        "application_id": str(application.id),
+        "member_id": str(member_id),
+        "loan_amount": float(loan_amount),
+        "percentage_interest": float(percentage_interest),
+        "term_months": term_months,
+        "disbursement_date": disbursement_date.isoformat(),
+        "loan_status": loan.loan_status.value,
+        "reason": reason,
+    }

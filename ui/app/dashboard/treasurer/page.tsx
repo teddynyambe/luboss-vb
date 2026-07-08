@@ -146,6 +146,27 @@ export default function TreasurerDashboard() {
   const [approvalPenaltyTypes, setApprovalPenaltyTypes] = useState<
     { id: string; name: string; description: string | null; fee_amount: string }[]
   >([]);
+
+  // Backfill-loan modal (Reports → Loans section)
+  const [showBackfillModal, setShowBackfillModal] = useState(false);
+  const [backfillMemberId, setBackfillMemberId] = useState('');
+  const [backfillAmount, setBackfillAmount] = useState('');
+  const [backfillTerm, setBackfillTerm] = useState('1');
+  const [backfillRate, setBackfillRate] = useState('');
+  const [backfillSuggestedRate, setBackfillSuggestedRate] = useState<number | null>(null);
+  const [backfillDate, setBackfillDate] = useState(''); // YYYY-MM-DD
+  const [backfillReason, setBackfillReason] = useState('');
+  const [backfillForce, setBackfillForce] = useState(false);
+  const [backfillCycleId, setBackfillCycleId] = useState('');
+  const [backfillMembers, setBackfillMembers] = useState<{ id: string; user: { first_name: string; last_name: string } }[]>([]);
+  const [backfillCycles, setBackfillCycles] = useState<{ id: string; year: number; cycle_number: number }[]>([]);
+  const [backfillSubmitting, setBackfillSubmitting] = useState(false);
+
+  // Move-disbursement-month modal (per-loan action in Reports → Loans)
+  const [moveLoan, setMoveLoan] = useState<LoanReportItem | null>(null);
+  const [moveLoanNewDate, setMoveLoanNewDate] = useState('');
+  const [moveLoanReason, setMoveLoanReason] = useState('');
+  const [moveLoanSubmitting, setMoveLoanSubmitting] = useState(false);
   const [rejectComment, setRejectComment] = useState('');
   const [proofBlobUrl, setProofBlobUrl] = useState<string | null>(null);
   const [proofLoading, setProofLoading] = useState(false);
@@ -715,6 +736,185 @@ export default function TreasurerDashboard() {
   const cancelApproveLoan = () => {
     setShowLoanApprovalModal(false);
     setLoanToApprove(null);
+  };
+
+  // Backfill-loan modal helpers
+  const openBackfillModal = async () => {
+    // Pre-load member list + active cycles the first time
+    setBackfillMemberId('');
+    setBackfillAmount('');
+    setBackfillTerm('1');
+    setBackfillRate('');
+    setBackfillSuggestedRate(null);
+    // Default disbursement date to the 1st of the currently-selected Reports month.
+    setBackfillDate(selectedReportMonth);
+    setBackfillReason('');
+    setBackfillForce(false);
+    setShowBackfillModal(true);
+    try {
+      const [membersRes, cyclesRes] = await Promise.all([
+        api.get<{ id: string; user: { first_name: string; last_name: string } }[]>(
+          '/api/chairman/members?status=active',
+        ),
+        api.get<{ id: string; year: number; cycle_number: number }[]>('/api/member/cycles'),
+      ]);
+      if (membersRes.data && Array.isArray(membersRes.data)) {
+        setBackfillMembers(
+          [...membersRes.data].sort((a, b) => {
+            const an = `${a.user?.first_name || ''} ${a.user?.last_name || ''}`.trim();
+            const bn = `${b.user?.first_name || ''} ${b.user?.last_name || ''}`.trim();
+            return an.localeCompare(bn);
+          }),
+        );
+      }
+      if (cyclesRes.data && Array.isArray(cyclesRes.data) && cyclesRes.data.length > 0) {
+        setBackfillCycles(cyclesRes.data);
+        setBackfillCycleId(cyclesRes.data[0].id);
+      }
+    } catch {
+      /* silent — the modal still renders with empty dropdowns */
+    }
+  };
+
+  const fetchSuggestedRate = async (memberId: string, term: string) => {
+    if (!memberId || !term) {
+      setBackfillSuggestedRate(null);
+      return;
+    }
+    try {
+      const res = await api.get<{ rate: number | null }>(
+        `/api/treasurer/members/${memberId}/suggested-loan-rate?term_months=${encodeURIComponent(term)}`,
+      );
+      setBackfillSuggestedRate(res.data?.rate ?? null);
+    } catch {
+      setBackfillSuggestedRate(null);
+    }
+  };
+
+  const cancelBackfill = () => {
+    setShowBackfillModal(false);
+  };
+
+  const submitBackfill = async () => {
+    if (!backfillMemberId || !backfillCycleId) {
+      setMessage({ type: 'error', text: 'Pick a member and cycle before backfilling.' });
+      return;
+    }
+    const amt = parseFloat(backfillAmount);
+    const rate = parseFloat(backfillRate);
+    if (!amt || amt <= 0) {
+      setMessage({ type: 'error', text: 'Loan amount must be greater than zero.' });
+      return;
+    }
+    if (Number.isNaN(rate) || rate < 0) {
+      setMessage({ type: 'error', text: 'Interest rate must be zero or greater.' });
+      return;
+    }
+    if (!backfillDate) {
+      setMessage({ type: 'error', text: 'Pick a disbursement date.' });
+      return;
+    }
+    if (backfillDate > new Date().toISOString().slice(0, 10)) {
+      setMessage({ type: 'error', text: 'Disbursement date cannot be in the future.' });
+      return;
+    }
+    if (backfillReason.trim().length < 5) {
+      setMessage({ type: 'error', text: 'Reason (min 5 characters) is required for the audit log.' });
+      return;
+    }
+    setBackfillSubmitting(true);
+    setMessage(null);
+    try {
+      const res = await api.post<{ loan_id: string }>('/api/treasurer/loans/backfill', {
+        member_id: backfillMemberId,
+        cycle_id: backfillCycleId,
+        loan_amount: amt,
+        term_months: backfillTerm,
+        percentage_interest: rate,
+        disbursement_date: backfillDate,
+        reason: backfillReason.trim(),
+        force: backfillForce,
+      });
+      if (res.error) {
+        // If the backend refused for an active-loan conflict, arm the override flag.
+        if (!backfillForce && /already has an active loan/i.test(res.error)) {
+          setMessage({
+            type: 'error',
+            text: res.error + ' Tick "override active-loan check" and try again if this is a genuine historical loan.',
+          });
+        } else {
+          setMessage({ type: 'error', text: res.error });
+        }
+      } else {
+        setMessage({
+          type: 'success',
+          text: `Historical loan recorded (${res.data?.loan_id?.slice(0, 8)}). It will appear in the Loans report for the selected month.`,
+        });
+        setShowBackfillModal(false);
+        await loadReports();
+        await loadData();
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Failed to record loan' });
+    } finally {
+      setBackfillSubmitting(false);
+      setTimeout(() => setMessage(null), 6000);
+    }
+  };
+
+  // Move-disbursement-month modal helpers
+  const openMoveLoan = (loan: LoanReportItem) => {
+    setMoveLoan(loan);
+    // Default to the first of the currently-viewed report month so a click on
+    // a loan in the "wrong month" pre-fills to the "right month" the treasurer
+    // is looking at.
+    setMoveLoanNewDate(selectedReportMonth);
+    setMoveLoanReason('');
+  };
+
+  const cancelMoveLoan = () => {
+    setMoveLoan(null);
+    setMoveLoanNewDate('');
+    setMoveLoanReason('');
+  };
+
+  const submitMoveLoan = async () => {
+    if (!moveLoan) return;
+    if (!moveLoanNewDate) {
+      setMessage({ type: 'error', text: 'Pick a new disbursement date.' });
+      return;
+    }
+    if (moveLoanNewDate > new Date().toISOString().slice(0, 10)) {
+      setMessage({ type: 'error', text: 'Disbursement date cannot be in the future.' });
+      return;
+    }
+    if (moveLoanReason.trim().length < 5) {
+      setMessage({ type: 'error', text: 'Reason (min 5 characters) is required for the audit log.' });
+      return;
+    }
+    setMoveLoanSubmitting(true);
+    setMessage(null);
+    try {
+      const res = await api.post(
+        `/api/treasurer/loans/${moveLoan.loan_id}/move-disbursement-date`,
+        {
+          new_disbursement_date: moveLoanNewDate,
+          reason: moveLoanReason.trim(),
+        },
+      );
+      if (res.error) {
+        setMessage({ type: 'error', text: res.error });
+      } else {
+        setMessage({ type: 'success', text: 'Loan disbursement date moved.' });
+        setMoveLoan(null);
+        await loadReports();
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err?.message || 'Failed to move loan' });
+    } finally {
+      setMoveLoanSubmitting(false);
+      setTimeout(() => setMessage(null), 5000);
+    }
   };
 
   const openRejectModal = (deposit: PendingDeposit) => {
@@ -1416,12 +1616,21 @@ export default function TreasurerDashboard() {
                     <div className="bg-white border-2 border-green-200 rounded-lg p-4">
                       <div className="flex justify-between items-center mb-3">
                         <h3 className="text-base font-bold text-green-900">Loans</h3>
-                        <button
-                          onClick={copyLoansReport}
-                          className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 transition-colors"
-                        >
-                          Copy
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={openBackfillModal}
+                            title="Record a historical loan disbursed off-system"
+                            className="px-2 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 transition-colors"
+                          >
+                            + Backfill Loan
+                          </button>
+                          <button
+                            onClick={copyLoansReport}
+                            className="px-2 py-1 bg-green-600 text-white rounded text-xs font-semibold hover:bg-green-700 transition-colors"
+                          >
+                            Copy
+                          </button>
+                        </div>
                       </div>
                       <div className="flex gap-4 mb-3 text-xs">
                         <div className="flex-1 bg-green-50 rounded-lg px-3 py-2">
@@ -1461,6 +1670,16 @@ export default function TreasurerDashboard() {
                                   <span className="inline-flex items-center justify-center w-5 h-5 bg-green-500 rounded text-white text-xs font-bold">✓</span>
                                 )}
                               </span>
+                              {loan.is_approved && (
+                                <button
+                                  type="button"
+                                  onClick={() => openMoveLoan(loan)}
+                                  title="Move this loan's disbursement month (also re-buckets the ledger entry)"
+                                  className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline font-sans font-semibold"
+                                >
+                                  Move month
+                                </button>
+                              )}
                             </div>
                           ))
                         )}
@@ -2536,6 +2755,220 @@ export default function TreasurerDashboard() {
                   : loanApprovalForce
                     ? 'Confirm Override & Disburse'
                     : 'Approve & Disburse Loan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Backfill Loan Modal — record a historical loan disbursed off-system */}
+      {showBackfillModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={cancelBackfill}>
+          <div
+            className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-blue-600 text-white px-6 py-4 rounded-t-xl shrink-0">
+              <h2 className="text-xl md:text-2xl font-bold">Backfill Historical Loan</h2>
+              <p className="text-xs text-blue-100 mt-1">
+                Record a loan the group disbursed off-system so its repayments can be reconciled.
+              </p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div className="grid grid-cols-1 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-blue-900">Member</label>
+                  <select
+                    value={backfillMemberId}
+                    onChange={(e) => {
+                      setBackfillMemberId(e.target.value);
+                      fetchSuggestedRate(e.target.value, backfillTerm);
+                    }}
+                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm bg-white"
+                  >
+                    <option value="">Pick a member…</option>
+                    {backfillMembers.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {`${m.user?.first_name || ''} ${m.user?.last_name || ''}`.trim() || m.id.slice(0, 8)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-blue-900">Cycle</label>
+                  <select
+                    value={backfillCycleId}
+                    onChange={(e) => setBackfillCycleId(e.target.value)}
+                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm bg-white"
+                  >
+                    {backfillCycles.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.year} — Cycle {c.cycle_number}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">Loan amount (K)</label>
+                    <input
+                      type="number" inputMode="decimal"
+                      min="0"
+                      step="0.01"
+                      value={backfillAmount}
+                      onChange={(e) => setBackfillAmount(e.target.value)}
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">Term (months)</label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={backfillTerm}
+                      onChange={(e) => {
+                        setBackfillTerm(e.target.value);
+                        fetchSuggestedRate(backfillMemberId, e.target.value);
+                      }}
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">Interest rate (%)</label>
+                    <input
+                      type="number" inputMode="decimal"
+                      min="0"
+                      step="0.01"
+                      value={backfillRate}
+                      onChange={(e) => setBackfillRate(e.target.value)}
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                      placeholder={
+                        backfillSuggestedRate != null ? String(backfillSuggestedRate) : 'e.g. 6'
+                      }
+                    />
+                    {backfillSuggestedRate != null ? (
+                      <p className="text-[11px] text-blue-700">
+                        Current rate for this member × term:{' '}
+                        <button
+                          type="button"
+                          onClick={() => setBackfillRate(String(backfillSuggestedRate))}
+                          className="font-semibold text-blue-800 underline hover:text-blue-900"
+                        >
+                          {backfillSuggestedRate}%
+                        </button>{' '}
+                        (tap to use, or type any rate).
+                      </p>
+                    ) : backfillMemberId ? (
+                      <p className="text-[11px] text-amber-700">
+                        No current rate configured — type the historical rate.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-semibold text-blue-900">Disbursement date</label>
+                    <input
+                      type="date"
+                      max={new Date().toISOString().slice(0, 10)}
+                      value={backfillDate}
+                      onChange={(e) => setBackfillDate(e.target.value)}
+                      className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                    />
+                    <p className="text-[11px] text-gray-500">Sets both the loan date and the ledger dealing month.</p>
+                  </div>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                  <textarea
+                    rows={2}
+                    value={backfillReason}
+                    onChange={(e) => setBackfillReason(e.target.value)}
+                    placeholder="e.g. Loan issued to member in April 2026 outside the system; repayments already declared."
+                    className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                  />
+                </div>
+                <label className="flex items-start gap-2 text-xs text-blue-900">
+                  <input
+                    type="checkbox"
+                    checked={backfillForce}
+                    onChange={(e) => setBackfillForce(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    Override active-loan check (only tick when the member has a separate current loan that isn&apos;t this historical one).
+                  </span>
+                </label>
+              </div>
+              <div className="p-3 bg-yellow-50 border-2 border-yellow-300 rounded-xl">
+                <p className="text-xs text-yellow-800 font-medium">
+                  ⚠️ This posts the disbursement JE to the ledger under the chosen date&apos;s dealing month. Interest is recognised at origination. Reconciliation will then let you allocate existing repayments against this loan.
+                </p>
+              </div>
+            </div>
+            <div className="shrink-0 flex flex-col sm:flex-row justify-end gap-3 p-4 md:p-6 border-t-2 border-gray-200 bg-white">
+              <button type="button" onClick={cancelBackfill} disabled={backfillSubmitting} className="btn-secondary disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitBackfill}
+                disabled={backfillSubmitting}
+                className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 border-2 border-blue-700 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold hover:bg-blue-700"
+              >
+                {backfillSubmitting ? 'Recording…' : 'Record & Disburse Loan'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Move-loan-month modal — retiming a loan onto the correct month */}
+      {moveLoan && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={cancelMoveLoan}>
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full max-h-[90vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-blue-600 text-white px-6 py-4 rounded-t-xl shrink-0">
+              <h2 className="text-xl md:text-2xl font-bold">Move Loan to Different Month</h2>
+              <p className="text-xs text-blue-100 mt-1">
+                {moveLoan.member_name} · K{moveLoan.loan_amount.toLocaleString()} (loan {moveLoan.loan_id.slice(0, 8)})
+              </p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">New disbursement date</label>
+                <input
+                  type="date"
+                  max={new Date().toISOString().slice(0, 10)}
+                  value={moveLoanNewDate}
+                  onChange={(e) => setMoveLoanNewDate(e.target.value)}
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                />
+                <p className="text-[11px] text-gray-500">
+                  Both the loan date and the ledger dealing month update. Repayment dates on this loan aren&apos;t touched.
+                </p>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-xs font-semibold text-blue-900">Reason (required, audit logged)</label>
+                <textarea
+                  rows={2}
+                  value={moveLoanReason}
+                  onChange={(e) => setMoveLoanReason(e.target.value)}
+                  placeholder="e.g. Disbursed in April but posted to May by mistake."
+                  className="px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                />
+              </div>
+            </div>
+            <div className="shrink-0 flex flex-col sm:flex-row justify-end gap-3 p-4 md:p-6 border-t-2 border-gray-200 bg-white">
+              <button type="button" onClick={cancelMoveLoan} disabled={moveLoanSubmitting} className="btn-secondary disabled:opacity-50">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitMoveLoan}
+                disabled={moveLoanSubmitting}
+                className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 border-2 border-blue-700 text-white rounded-xl disabled:opacity-50 disabled:cursor-not-allowed text-sm md:text-base font-semibold hover:bg-blue-700"
+              >
+                {moveLoanSubmitting ? 'Moving…' : 'Move Loan'}
               </button>
             </div>
           </div>
