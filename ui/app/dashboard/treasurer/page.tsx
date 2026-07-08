@@ -50,6 +50,29 @@ interface PendingLoanApplication {
   application_date: string;
   cycle_id: string;
   notes?: string;
+  // Populated when the member still has an active loan but a PENDING/PROOF
+  // declaration commits to a full payoff. Treasurer should wait for the
+  // payoff deposit to land before disbursing this new application.
+  pending_payoff?: {
+    loan_id: string;
+    loan_short_id: string;
+    loan_month_label: string;
+    loan_amount: number;
+    outstanding_principal: number;
+    outstanding_interest: number;
+    outstanding_total: number;
+    declared_payoff: number;
+  } | null;
+}
+
+interface CreditRatingContext {
+  tier_id: string;
+  tier_name: string | null;
+  tier_order: number | null;
+  tier_description: string | null;
+  multiplier: number | null;
+  max_amount: number | null;
+  assigned_at: string | null;
 }
 
 interface ActiveLoan {
@@ -154,6 +177,7 @@ export default function TreasurerDashboard() {
   const [backfillTerm, setBackfillTerm] = useState('1');
   const [backfillRate, setBackfillRate] = useState('');
   const [backfillSuggestedRate, setBackfillSuggestedRate] = useState<number | null>(null);
+  const [backfillCreditRating, setBackfillCreditRating] = useState<CreditRatingContext | null>(null);
   const [backfillDate, setBackfillDate] = useState(''); // YYYY-MM-DD
   const [backfillReason, setBackfillReason] = useState('');
   const [backfillForce, setBackfillForce] = useState(false);
@@ -902,6 +926,7 @@ export default function TreasurerDashboard() {
     setBackfillTerm('1');
     setBackfillRate('');
     setBackfillSuggestedRate(null);
+    setBackfillCreditRating(null);
     // Default disbursement date to the 1st of the currently-selected Reports month.
     setBackfillDate(selectedReportMonth);
     setBackfillReason('');
@@ -935,16 +960,25 @@ export default function TreasurerDashboard() {
   };
 
   const fetchSuggestedRate = async (memberId: string, term: string) => {
-    if (!memberId || !term) {
+    if (!memberId) {
       setBackfillSuggestedRate(null);
+      setBackfillCreditRating(null);
       return;
     }
+    // Term is optional for the credit-rating context — if we don't have one
+    // yet we still want to show the tier / multiplier / max amount.
     try {
-      const res = await api.get<{ rate: number | null }>(
-        `/api/treasurer/members/${memberId}/suggested-loan-rate?term_months=${encodeURIComponent(term)}`,
-      );
+      const url = term
+        ? `/api/treasurer/members/${memberId}/suggested-loan-rate?term_months=${encodeURIComponent(term)}`
+        : `/api/treasurer/members/${memberId}/suggested-loan-rate`;
+      const res = await api.get<{
+        rate: number | null;
+        reason: string | null;
+        credit_rating: CreditRatingContext | null;
+      }>(url);
       const rate = res.data?.rate ?? null;
       setBackfillSuggestedRate(rate);
+      setBackfillCreditRating(res.data?.credit_rating ?? null);
       // Prefill the rate field with the ACTUAL value (not just a placeholder)
       // so an unedited submit sends the right number. Only overwrite when the
       // field is empty — never clobber a rate the treasurer typed already.
@@ -953,6 +987,7 @@ export default function TreasurerDashboard() {
       }
     } catch {
       setBackfillSuggestedRate(null);
+      setBackfillCreditRating(null);
     }
   };
 
@@ -1549,7 +1584,11 @@ export default function TreasurerDashboard() {
                   {(showAllPendingLoans ? pendingLoans : pendingLoans.slice(0, 3)).map((loan) => (
                     <div
                       key={loan.id}
-                      className="p-3 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg hover:shadow-md transition-shadow"
+                      className={`p-3 border-2 rounded-lg hover:shadow-md transition-shadow ${
+                        loan.pending_payoff
+                          ? 'bg-gradient-to-r from-amber-50 to-amber-100 border-amber-300'
+                          : 'bg-gradient-to-r from-blue-50 to-blue-100 border-blue-300'
+                      }`}
                     >
                       <div className="flex justify-between items-start gap-2">
                         <div className="flex-1 min-w-0">
@@ -1559,6 +1598,23 @@ export default function TreasurerDashboard() {
                           <p className="text-xs text-blue-700">
                             K{loan.amount.toLocaleString()} • {loan.term_months} {loan.term_months === '1' ? 'Month' : 'Months'}
                           </p>
+                          {loan.pending_payoff && (
+                            <div
+                              className="mt-1.5 inline-flex flex-wrap items-center gap-1 text-[10px] font-semibold bg-amber-200 text-amber-900 rounded px-1.5 py-0.5"
+                              title={
+                                `Member has an active loan borrowed ${loan.pending_payoff.loan_month_label} `
+                                + `(${loan.pending_payoff.loan_short_id}) with K${loan.pending_payoff.outstanding_total.toLocaleString()} outstanding. `
+                                + `They have declared K${loan.pending_payoff.declared_payoff.toLocaleString()} in pending payoff. `
+                                + `Wait for the payoff deposit to be approved before disbursing this new loan.`
+                              }
+                            >
+                              <span>⚠ Pending payoff</span>
+                              <span className="font-normal">
+                                — Loan {loan.pending_payoff.loan_month_label} K
+                                {loan.pending_payoff.outstanding_total.toLocaleString()}
+                              </span>
+                            </div>
+                          )}
                         </div>
                         <button
                           onClick={() => handleApproveLoan(loan.id)}
@@ -3322,6 +3378,29 @@ export default function TreasurerDashboard() {
                       {loanToApprove.term_months} {loanToApprove.term_months === '1' ? 'Month' : 'Months'}
                     </span>
                   </div>
+                  {loanToApprove.pending_payoff && (
+                    <div className="p-3 bg-amber-50 border-2 border-amber-300 rounded-lg">
+                      <p className="text-xs font-bold text-amber-900 mb-1">
+                        ⚠ Pending payoff — the member still owes on an active loan
+                      </p>
+                      <ul className="text-[11px] text-amber-800 space-y-0.5">
+                        <li>
+                          Active loan: <span className="font-semibold">{loanToApprove.pending_payoff.loan_month_label}</span>
+                          {' '}(K{loanToApprove.pending_payoff.loan_amount.toLocaleString()})
+                        </li>
+                        <li>
+                          Outstanding: <span className="font-semibold">K{loanToApprove.pending_payoff.outstanding_total.toLocaleString()}</span>
+                          {' '}(P K{loanToApprove.pending_payoff.outstanding_principal.toLocaleString()} + I K{loanToApprove.pending_payoff.outstanding_interest.toLocaleString()})
+                        </li>
+                        <li>
+                          Declared payoff: <span className="font-semibold">K{loanToApprove.pending_payoff.declared_payoff.toLocaleString()}</span>
+                        </li>
+                      </ul>
+                      <p className="text-[11px] text-amber-900 mt-1 italic">
+                        Approve + disburse only after the payoff deposit is approved on the current loan.
+                      </p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-3">
                     <div className="flex flex-col gap-1">
                       <label className="text-xs font-semibold text-blue-900">
@@ -3479,6 +3558,45 @@ export default function TreasurerDashboard() {
                     ))}
                   </select>
                 </div>
+                {/* Credit rating context — shown once a member is picked so the
+                    treasurer can sanity-check the historical loan amount against
+                    what the current rating would have permitted. Purely
+                    informational; the backfill amount isn't clamped. */}
+                {backfillMemberId && backfillCreditRating && (
+                  <div className="p-3 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <div>
+                        <p className="text-[11px] font-semibold text-indigo-700 uppercase tracking-wide">Credit rating</p>
+                        <p className="text-sm font-bold text-indigo-900">
+                          {backfillCreditRating.tier_name || 'Unrated'}
+                          {backfillCreditRating.tier_order != null && (
+                            <span className="ml-1 text-xs font-normal text-indigo-700">(tier {backfillCreditRating.tier_order})</span>
+                          )}
+                        </p>
+                        {backfillCreditRating.tier_description && (
+                          <p className="text-[11px] text-indigo-700 mt-0.5">{backfillCreditRating.tier_description}</p>
+                        )}
+                      </div>
+                      <div className="text-right text-[11px] text-indigo-800 space-y-0.5">
+                        {backfillCreditRating.multiplier != null && (
+                          <div>
+                            Multiplier: <span className="font-mono font-semibold">×{backfillCreditRating.multiplier}</span>
+                          </div>
+                        )}
+                        {backfillCreditRating.max_amount != null && (
+                          <div>
+                            Cap: <span className="font-mono font-semibold">K{backfillCreditRating.max_amount.toLocaleString()}</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {backfillMemberId && !backfillCreditRating && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    ⚠ No credit rating assigned for this member in the selected cycle. Assign one from Chairman → Credit Rating for the interest-rate hint to appear.
+                  </p>
+                )}
                 <div className="flex flex-col gap-1">
                   <label className="text-xs font-semibold text-blue-900">Cycle</label>
                   <select

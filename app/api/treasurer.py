@@ -671,18 +671,79 @@ def get_pending_loan_applications(
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db)
 ):
-    """Get list of pending loan applications awaiting approval."""
+    """Get list of pending loan applications awaiting approval.
+
+    Each application is annotated with a `pending_payoff` object when the
+    member has an outstanding active loan AND a PENDING/PROOF declaration
+    that commits to covering the payoff. Treasurers should approve+disburse
+    only after the payoff deposit is approved so they don't stack loans.
+    """
+    from decimal import Decimal as _D
     applications = db.query(LoanApplication).filter(
         LoanApplication.status == LoanApplicationStatus.PENDING
     ).order_by(LoanApplication.application_date.desc()).all()
-    
+
     result = []
     for app in applications:
         member = db.query(MemberProfile).filter(MemberProfile.id == app.member_id).first()
         user = None
         if member:
             user = db.query(UserModel).filter(UserModel.id == member.user_id).first()
-        
+
+        # Detect the "pending payoff" case: member has an active loan with
+        # outstanding balance and has already declared enough to pay it off.
+        pending_payoff = None
+        active_loan = db.query(Loan).filter(
+            Loan.member_id == app.member_id,
+            Loan.loan_status.in_([LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN]),
+        ).order_by(Loan.disbursement_date.asc()).first()
+        if active_loan:
+            total_p_repaid = sum(
+                _D(str(rep.principal_amount or 0)) for rep in active_loan.repayments
+            )
+            total_i_repaid = sum(
+                _D(str(rep.interest_amount or 0)) for rep in active_loan.repayments
+            )
+            outstanding_p = _D(str(active_loan.loan_amount or 0)) - total_p_repaid
+            expected_interest = (
+                _D(str(active_loan.loan_amount or 0))
+                * _D(str(active_loan.percentage_interest or 0))
+                / _D("100")
+            )
+            outstanding_i = expected_interest - total_i_repaid
+            total_outstanding = (
+                max(_D("0.00"), outstanding_p) + max(_D("0.00"), outstanding_i)
+            )
+            if total_outstanding > _D("0.01"):
+                # Sum the member's pending / proof declarations' committed
+                # loan repayment + interest.
+                from app.models.transaction import DeclarationStatus as _DS
+                declared_payoff = _D("0.00")
+                pending_decls = db.query(Declaration).filter(
+                    Declaration.member_id == app.member_id,
+                    Declaration.status.in_([_DS.PENDING, _DS.PROOF]),
+                ).all()
+                for d in pending_decls:
+                    declared_payoff += _D(str(d.declared_loan_repayment or 0))
+                    declared_payoff += _D(str(d.declared_interest_on_loan or 0))
+
+                if declared_payoff + _D("0.01") >= total_outstanding:
+                    loan_label = (
+                        active_loan.disbursement_date.strftime("%B %Y")
+                        if active_loan.disbursement_date
+                        else "undisbursed"
+                    )
+                    pending_payoff = {
+                        "loan_id": str(active_loan.id),
+                        "loan_short_id": str(active_loan.id)[:8],
+                        "loan_month_label": loan_label,
+                        "loan_amount": float(active_loan.loan_amount or 0),
+                        "outstanding_principal": float(max(_D("0.00"), outstanding_p)),
+                        "outstanding_interest": float(max(_D("0.00"), outstanding_i)),
+                        "outstanding_total": float(total_outstanding),
+                        "declared_payoff": float(declared_payoff),
+                    }
+
         result.append({
             "id": str(app.id),
             "member_id": str(app.member_id),
@@ -692,9 +753,10 @@ def get_pending_loan_applications(
             "term_months": app.term_months,
             "notes": app.notes,
             "application_date": app.application_date.isoformat() if app.application_date else None,
-            "cycle_id": str(app.cycle_id)
+            "cycle_id": str(app.cycle_id),
+            "pending_payoff": pending_payoff,
         })
-    
+
     return result
 
 
@@ -1455,9 +1517,15 @@ def get_suggested_loan_rate(
     db: Session = Depends(get_db),
 ):
     """Return the credit-rating-driven interest rate the system WOULD apply
-    to this member for the given term, purely as a hint for the backfill
-    modal. Never enforced — treasurer can still type any rate."""
-    from app.models.policy import MemberCreditRating, CreditRatingInterestRange
+    to this member for the given term, plus the member's credit rating
+    context (tier name, borrowing multiplier, max amount). Purely
+    informational — treasurer can still type any rate on the backfill
+    modal; nothing here is enforced.
+    """
+    from app.models.policy import (
+        MemberCreditRating, CreditRatingInterestRange,
+        CreditRatingTier, BorrowingLimitPolicy,
+    )
     from app.models.cycle import Cycle
     try:
         member_uuid = UUID(member_id)
@@ -1475,15 +1543,38 @@ def get_suggested_loan_rate(
         if active:
             cycle_uuid = active.id
 
+    empty = {
+        "rate": None,
+        "reason": None,
+        "credit_rating": None,
+    }
     if not cycle_uuid:
-        return {"rate": None, "reason": "no active cycle"}
+        return {**empty, "reason": "no active cycle"}
 
     rating = db.query(MemberCreditRating).filter(
         MemberCreditRating.member_id == member_uuid,
         MemberCreditRating.cycle_id == cycle_uuid,
     ).first()
     if not rating:
-        return {"rate": None, "reason": "no credit rating for this member in this cycle"}
+        return {**empty, "reason": "no credit rating for this member in this cycle"}
+
+    # Enrich with tier metadata + latest borrowing limit for the tier.
+    tier = db.query(CreditRatingTier).filter(CreditRatingTier.id == rating.tier_id).first()
+    limit = (
+        db.query(BorrowingLimitPolicy)
+        .filter(BorrowingLimitPolicy.tier_id == rating.tier_id)
+        .order_by(BorrowingLimitPolicy.effective_from.desc())
+        .first()
+    )
+    credit_rating = {
+        "tier_id": str(rating.tier_id),
+        "tier_name": tier.tier_name if tier else None,
+        "tier_order": tier.tier_order if tier else None,
+        "tier_description": tier.description if tier else None,
+        "multiplier": float(limit.multiplier) if limit and limit.multiplier is not None else None,
+        "max_amount": float(limit.max_amount) if limit and limit.max_amount is not None else None,
+        "assigned_at": rating.assigned_at.isoformat() if getattr(rating, "assigned_at", None) else None,
+    }
 
     q = db.query(CreditRatingInterestRange).filter(
         CreditRatingInterestRange.tier_id == rating.tier_id,
@@ -1497,10 +1588,15 @@ def get_suggested_loan_rate(
     else:
         rng = q.first()
     if not rng:
-        return {"rate": None, "reason": "no interest range configured for this term/tier"}
+        return {
+            "rate": None,
+            "reason": "no interest range configured for this term/tier",
+            "credit_rating": credit_rating,
+        }
     return {
         "rate": float(rng.effective_rate_percent),
         "reason": "from credit rating × term",
+        "credit_rating": credit_rating,
     }
 
 

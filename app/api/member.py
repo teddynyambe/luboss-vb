@@ -1384,26 +1384,69 @@ def apply_for_loan(
             detail="You have a pending loan application. Please wait for it to be processed or withdraw it before applying for a new loan."
         )
     
-    # Check for active loans that haven't been fully paid
+    # Check for active loans that haven't been fully paid.
+    # If the member still owes on an active loan we normally refuse, but
+    # allow the flexibility: if the member has already SUBMITTED a
+    # declaration (PENDING or PROOF status) whose declared_loan_repayment
+    # + declared_interest_on_loan covers the full outstanding balance, the
+    # payoff is committed and we let the new application through. The
+    # treasurer will still see a "pending payoff" badge on the application
+    # so they only disburse the new loan after the payoff deposit lands.
+    from app.models.transaction import DeclarationStatus as _DeclStatus
     active_loans = db.query(Loan).filter(
         Loan.member_id == member_profile.id,
         Loan.loan_status.in_([LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN])
     ).all()
-    
-    if active_loans:
-        # Check if any active loan has outstanding balance
-        for loan in active_loans:
-            # Calculate total repaid
-            total_repaid = sum(
-                (repayment.principal_amount + repayment.interest_amount) 
-                for repayment in loan.repayments
-            )
-            outstanding = loan.loan_amount - total_repaid
-            if outstanding > Decimal("0.01"):  # Allow small rounding differences
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"You have an active loan with outstanding balance of K{outstanding:,.2f}. Please pay it off before applying for a new loan."
+
+    total_outstanding = Decimal("0.00")
+    for loan in active_loans:
+        total_p_repaid = sum(
+            Decimal(str(rep.principal_amount or 0)) for rep in loan.repayments
+        )
+        total_i_repaid = sum(
+            Decimal(str(rep.interest_amount or 0)) for rep in loan.repayments
+        )
+        outstanding_p = Decimal(str(loan.loan_amount or 0)) - total_p_repaid
+        expected_interest = (
+            Decimal(str(loan.loan_amount or 0))
+            * Decimal(str(loan.percentage_interest or 0))
+            / Decimal("100")
+        )
+        outstanding_i = expected_interest - total_i_repaid
+        # A loan is "fully paid" when both principal AND interest are settled.
+        # We only count it as outstanding when either side has more than
+        # rounding-noise left.
+        if outstanding_p > Decimal("0.01"):
+            total_outstanding += outstanding_p
+        if outstanding_i > Decimal("0.01"):
+            total_outstanding += outstanding_i
+
+    if total_outstanding > Decimal("0.01"):
+        # Sum every pending / proof declaration's committed payoff. Approved
+        # declarations aren't included — once approved, their repayment is
+        # already posted and reflected in outstanding.
+        pending_payoff = Decimal("0.00")
+        pending_decls = db.query(Declaration).filter(
+            Declaration.member_id == member_profile.id,
+            Declaration.status.in_([_DeclStatus.PENDING, _DeclStatus.PROOF]),
+        ).all()
+        for d in pending_decls:
+            pending_payoff += Decimal(str(d.declared_loan_repayment or 0))
+            pending_payoff += Decimal(str(d.declared_interest_on_loan or 0))
+
+        if pending_payoff + Decimal("0.01") < total_outstanding:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"You have an active loan with outstanding balance of K{total_outstanding:,.2f}. "
+                    f"You have declared K{pending_payoff:,.2f} in pending declarations towards "
+                    "payoff — submit a declaration covering the full outstanding balance before "
+                    "applying for a new loan, or wait for the current loan to close."
                 )
+            )
+        # else: falls through — the pending declaration covers payoff and the
+        # application is allowed. The treasurer will see the pending-payoff
+        # badge on the application card.
     
     try:
         cycle_uuid = UUID(loan_data.cycle_id)
