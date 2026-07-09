@@ -97,6 +97,8 @@ interface ActiveLoan {
 
 interface LoanDetail {
   id: string;
+  member_id?: string;
+  cycle_id?: string;
   member_name: string;
   member_email?: string;
   loan_amount: number;
@@ -229,6 +231,13 @@ export default function TreasurerDashboard() {
   // both surfaces call, so the corrective JE + audit trail are identical.
   const [editLoanTermsOpen, setEditLoanTermsOpen] = useState(false);
   const [editLoanNewAmount, setEditLoanNewAmount] = useState('');
+  // Credit-rating documentation shown in the Loan Performance Details
+  // modal so the treasurer can eyeball rates when correcting a loan's
+  // terms. Same shape as the Backfill Loan modal's card.
+  const [loanCreditRating, setLoanCreditRating] = useState<CreditRatingContext | null>(null);
+  const [loanRateSchedule, setLoanRateSchedule] = useState<
+    { term_months: string | null; effective_rate_percent: number }[]
+  >([]);
   const [editLoanNewTerm, setEditLoanNewTerm] = useState('');
   const [editLoanNewRate, setEditLoanNewRate] = useState('');
   const [editLoanReason, setEditLoanReason] = useState('');
@@ -594,10 +603,39 @@ export default function TreasurerDashboard() {
   const handleViewLoanDetails = async (loanId: string) => {
     setLoadingLoanDetails(true);
     setShowLoanModal(true);
+    // Clear any stale schedule from a previously-viewed loan.
+    setLoanCreditRating(null);
+    setLoanRateSchedule([]);
     try {
       const response = await api.get<LoanDetail>(`/api/treasurer/loans/${loanId}/details`);
       if (response.data) {
         setSelectedLoan(response.data);
+        // Fetch the credit-rating documentation for the loan's member so
+        // the "Edit loan terms" section can show the full term → rate
+        // schedule inline. Cycle isn't passed — the endpoint defaults to
+        // the active cycle, which is what a treasurer correcting a live
+        // loan would see anyway. Term is passed so the "suggested rate"
+        // matches the loan's actual tenure.
+        if (response.data.member_id) {
+          try {
+            const term = response.data.term_months && response.data.term_months !== 'N/A'
+              ? response.data.term_months
+              : '';
+            const url = term
+              ? `/api/treasurer/members/${response.data.member_id}/suggested-loan-rate?term_months=${encodeURIComponent(term)}`
+              : `/api/treasurer/members/${response.data.member_id}/suggested-loan-rate`;
+            const rateRes = await api.get<{
+              rate: number | null;
+              reason: string | null;
+              credit_rating: CreditRatingContext | null;
+              rate_schedule?: { term_months: string | null; effective_rate_percent: number }[];
+            }>(url);
+            setLoanCreditRating(rateRes.data?.credit_rating ?? null);
+            setLoanRateSchedule(rateRes.data?.rate_schedule ?? []);
+          } catch {
+            /* silent — the editor still works without the reference card */
+          }
+        }
       } else {
         setMessage({ type: 'error', text: response.error || 'Failed to load loan details' });
         setShowLoanModal(false);
@@ -620,6 +658,10 @@ export default function TreasurerDashboard() {
     setEditLoanNewRate('');
     setEditLoanReason('');
     setEditLoanError(null);
+    // Clear the credit-rating documentation so the next-opened loan
+    // doesn't briefly show a stale schedule while the new fetch runs.
+    setLoanCreditRating(null);
+    setLoanRateSchedule([]);
   };
 
   const openEditLoanTerms = () => {
@@ -2942,6 +2984,47 @@ export default function TreasurerDashboard() {
                               </p>
                             </div>
                           </div>
+                          {/* Credit rating documentation — mirrors the block on the
+                              Backfill Historical Loan modal so the treasurer can
+                              sanity-check the loan's rate against the tier's
+                              current schedule at a glance. Purely reference. */}
+                          {loanRateSchedule.length > 0 && (
+                            <div className="p-3 bg-indigo-50 border-2 border-indigo-200 rounded-lg">
+                              <div className="flex items-baseline justify-between gap-2 mb-1">
+                                <p className="text-[11px] font-semibold text-indigo-800 uppercase tracking-wide">
+                                  Credit rating rate schedule
+                                  {loanCreditRating?.tier_name && (
+                                    <span className="ml-1 font-normal text-indigo-700 normal-case">
+                                      — {loanCreditRating.tier_name}
+                                    </span>
+                                  )}
+                                </p>
+                                {loanCreditRating && (loanCreditRating.multiplier != null || loanCreditRating.max_amount != null) && (
+                                  <span className="text-[11px] text-indigo-700">
+                                    {loanCreditRating.multiplier != null && <>×{loanCreditRating.multiplier}</>}
+                                    {loanCreditRating.multiplier != null && loanCreditRating.max_amount != null && ' · '}
+                                    {loanCreditRating.max_amount != null && <>Cap K{loanCreditRating.max_amount.toLocaleString()}</>}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-3 gap-x-3 gap-y-0.5 text-[11px] text-indigo-900">
+                                {loanRateSchedule.map((r, idx) => (
+                                  <div key={`${r.term_months ?? 'any'}-${idx}`} className="flex justify-between">
+                                    <span>{r.term_months ? `${r.term_months} mo` : 'Any term'}</span>
+                                    <span className="font-mono font-semibold">{r.effective_rate_percent}%</span>
+                                  </div>
+                                ))}
+                              </div>
+                              <p className="text-[10px] text-indigo-700 mt-1 italic">
+                                Reference only — the input above accepts any historical rate.
+                              </p>
+                            </div>
+                          )}
+                          {selectedLoan.member_id && loanRateSchedule.length === 0 && !loanCreditRating && (
+                            <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                              ⚠ No credit rating on record for this member in the active cycle — no schedule to display.
+                            </p>
+                          )}
                           <div className="px-3 py-2 bg-blue-50 border border-blue-200 rounded text-xs space-y-0.5">
                             <div className="flex justify-between">
                               <span className="text-blue-700">New loan amount → ledger</span>
