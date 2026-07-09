@@ -178,6 +178,12 @@ export default function TreasurerDashboard() {
   const [backfillRate, setBackfillRate] = useState('');
   const [backfillSuggestedRate, setBackfillSuggestedRate] = useState<number | null>(null);
   const [backfillCreditRating, setBackfillCreditRating] = useState<CreditRatingContext | null>(null);
+  // Full term → rate schedule for the picked member's tier × selected cycle.
+  // Purely documentation — shown below the interest rate field so the
+  // treasurer can eyeball whether a historical rate is plausible.
+  const [backfillRateSchedule, setBackfillRateSchedule] = useState<
+    { term_months: string | null; effective_rate_percent: number }[]
+  >([]);
   const [backfillDate, setBackfillDate] = useState(''); // YYYY-MM-DD
   const [backfillReason, setBackfillReason] = useState('');
   const [backfillForce, setBackfillForce] = useState(false);
@@ -1036,6 +1042,7 @@ export default function TreasurerDashboard() {
     setBackfillRate('');
     setBackfillSuggestedRate(null);
     setBackfillCreditRating(null);
+    setBackfillRateSchedule([]);
     // Default disbursement date to the 1st of the currently-selected Reports month.
     setBackfillDate(selectedReportMonth);
     setBackfillReason('');
@@ -1072,6 +1079,7 @@ export default function TreasurerDashboard() {
     if (!memberId) {
       setBackfillSuggestedRate(null);
       setBackfillCreditRating(null);
+      setBackfillRateSchedule([]);
       return;
     }
     // Term is optional for the credit-rating context — if we don't have one
@@ -1084,10 +1092,12 @@ export default function TreasurerDashboard() {
         rate: number | null;
         reason: string | null;
         credit_rating: CreditRatingContext | null;
+        rate_schedule?: { term_months: string | null; effective_rate_percent: number }[];
       }>(url);
       const rate = res.data?.rate ?? null;
       setBackfillSuggestedRate(rate);
       setBackfillCreditRating(res.data?.credit_rating ?? null);
+      setBackfillRateSchedule(res.data?.rate_schedule ?? []);
       // Prefill the rate field with the ACTUAL value (not just a placeholder)
       // so an unedited submit sends the right number. Only overwrite when the
       // field is empty — never clobber a rate the treasurer typed already.
@@ -1097,6 +1107,7 @@ export default function TreasurerDashboard() {
     } catch {
       setBackfillSuggestedRate(null);
       setBackfillCreditRating(null);
+      setBackfillRateSchedule([]);
     }
   };
 
@@ -3970,6 +3981,34 @@ export default function TreasurerDashboard() {
                         No current rate configured for this member × term — type the historical rate.
                       </p>
                     ) : null}
+                    {/* Full rate schedule for this member's tier × cycle — pure
+                        documentation so the treasurer can eyeball whether a
+                        historical rate is plausible without leaving the modal. */}
+                    {backfillMemberId && backfillRateSchedule.length > 0 && (
+                      <div className="mt-1 p-2 bg-indigo-50 border border-indigo-200 rounded">
+                        <p className="text-[10px] font-semibold text-indigo-800 uppercase tracking-wide mb-1">
+                          Current rate schedule
+                          {backfillCreditRating?.tier_name && (
+                            <span className="ml-1 font-normal text-indigo-700 normal-case">
+                              — {backfillCreditRating.tier_name}
+                            </span>
+                          )}
+                        </p>
+                        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-indigo-900">
+                          {backfillRateSchedule.map((r, idx) => (
+                            <div key={`${r.term_months ?? 'any'}-${idx}`} className="flex justify-between">
+                              <span>
+                                {r.term_months ? `${r.term_months} mo` : 'Any term'}
+                              </span>
+                              <span className="font-mono font-semibold">{r.effective_rate_percent}%</span>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-indigo-700 mt-1 italic">
+                          Reference only — the input above accepts any historical rate.
+                        </p>
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-col gap-1">
                     <label className="text-xs font-semibold text-blue-900">Disbursement date</label>

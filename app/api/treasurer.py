@@ -1580,6 +1580,27 @@ def get_suggested_loan_rate(
         CreditRatingInterestRange.tier_id == rating.tier_id,
         CreditRatingInterestRange.cycle_id == cycle_uuid,
     )
+    # Full rate schedule for the tier × cycle — the treasurer sees every
+    # term → rate mapping as reference documentation, so historical loans
+    # can be sanity-checked against the current schedule at a glance.
+    all_ranges = q.order_by(CreditRatingInterestRange.term_months.asc()).all()
+    # Ordering by string term_months is imperfect ("10" < "2" lexically);
+    # re-sort numerically in Python so 1, 2, 3, 10 read naturally. Falls
+    # back to the raw string for anything non-numeric (e.g. NULL / "any").
+    def _term_key(rng_row):
+        try:
+            return (0, int((rng_row.term_months or "").strip()))
+        except (ValueError, AttributeError):
+            return (1, rng_row.term_months or "")
+    all_ranges = sorted(all_ranges, key=_term_key)
+    rate_schedule = [
+        {
+            "term_months": r.term_months,   # str or None
+            "effective_rate_percent": float(r.effective_rate_percent),
+        }
+        for r in all_ranges
+    ]
+
     if term_months:
         rng = q.filter(
             (CreditRatingInterestRange.term_months == term_months)
@@ -1592,11 +1613,13 @@ def get_suggested_loan_rate(
             "rate": None,
             "reason": "no interest range configured for this term/tier",
             "credit_rating": credit_rating,
+            "rate_schedule": rate_schedule,
         }
     return {
         "rate": float(rng.effective_rate_percent),
         "reason": "from credit rating × term",
         "credit_rating": credit_rating,
+        "rate_schedule": rate_schedule,
     }
 
 
