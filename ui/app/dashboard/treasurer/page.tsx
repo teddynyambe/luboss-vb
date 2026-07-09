@@ -1137,15 +1137,23 @@ export default function TreasurerDashboard() {
         rate_schedule?: { term_months: string | null; effective_rate_percent: number }[];
       }>(url);
       const rate = res.data?.rate ?? null;
+      // Auto-sync the interest-rate input with the suggested rate on
+      // (member, term) changes — unless the treasurer has typed a custom
+      // rate. "Custom" = the current value differs from the previous
+      // suggestion. Handles all three cases cleanly:
+      //   * empty field → fill with the new rate
+      //   * still matches the previous auto-fill → follow the new term
+      //   * treasurer typed a different value → leave it alone
+      const prevSuggested = backfillSuggestedRate;
+      const looksAutoFilled =
+        backfillRate === ''
+        || (prevSuggested != null && parseFloat(backfillRate) === prevSuggested);
+      if (rate != null && looksAutoFilled) {
+        setBackfillRate(String(rate));
+      }
       setBackfillSuggestedRate(rate);
       setBackfillCreditRating(res.data?.credit_rating ?? null);
       setBackfillRateSchedule(res.data?.rate_schedule ?? []);
-      // Prefill the rate field with the ACTUAL value (not just a placeholder)
-      // so an unedited submit sends the right number. Only overwrite when the
-      // field is empty — never clobber a rate the treasurer typed already.
-      if (rate != null && backfillRate === '') {
-        setBackfillRate(String(rate));
-      }
     } catch {
       setBackfillSuggestedRate(null);
       setBackfillCreditRating(null);
