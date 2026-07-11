@@ -895,6 +895,8 @@ export default function TreasurerDashboard() {
               ? 'Declaration created and posted to the ledger.'
               : res.data?.outcome === 'edited_approved'
               ? 'Declaration edited — correcting journal entry posted.'
+              : res.data?.outcome === 'repayment_resynced'
+              ? 'Declaration amounts already matched — the linked loan repayment was re-synced.'
               : 'Declaration updated and posted.',
         });
         setTimeout(() => setMessage(null), 5000);

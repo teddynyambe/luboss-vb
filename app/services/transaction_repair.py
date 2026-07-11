@@ -766,8 +766,34 @@ def reconcile_declaration_and_post(
             "loan_repayment":   loan_repayment,
         }
         deltas = {k: (new[k] - old[k]).quantize(Decimal("0.01")) for k in old}
-        if all(abs(v) < Decimal("0.005") for v in deltas.values()):
-            raise ValueError("no changes to post — amounts match the current declaration")
+        all_deltas_zero = all(abs(v) < Decimal("0.005") for v in deltas.values())
+
+        # Detect a stale Repayment row whose principal/interest doesn't match
+        # the (already-correct) declared amounts. This happens when an earlier
+        # edit's Repayment sync missed the row (e.g. because a superseded
+        # deposit-approval JE was still on it). Even when the deltas are all
+        # zero, we let the operation through so the Repayment gets healed.
+        repayment_needs_sync = False
+        stale_deposit_proof = db.query(DepositProof).filter(
+            DepositProof.declaration_id == declaration.id
+        ).order_by(DepositProof.uploaded_at.desc()).first()
+        if stale_deposit_proof:
+            _stale_jes = db.query(JournalEntry).filter(
+                JournalEntry.source_type == "deposit_approval",
+                JournalEntry.source_ref == str(stale_deposit_proof.id),
+            ).all()
+            _stale_je_ids = [je.id for je in _stale_jes]
+            if _stale_je_ids:
+                for _rep in db.query(Repayment).filter(
+                    Repayment.journal_entry_id.in_(_stale_je_ids)
+                ).all():
+                    if (abs(Decimal(str(_rep.principal_amount or 0)) - loan_repayment) >= Decimal("0.01")
+                            or abs(Decimal(str(_rep.interest_amount or 0)) - interest_on_loan) >= Decimal("0.01")):
+                        repayment_needs_sync = True
+                        break
+
+        if all_deltas_zero and not repayment_needs_sync:
+            raise ValueError("no changes to post — amounts match the current declaration and repayment")
 
         bank_cash = db.query(LedgerAccount).filter(LedgerAccount.account_code == "BANK_CASH").first()
         if not bank_cash:
@@ -843,31 +869,54 @@ def reconcile_declaration_and_post(
                      "description": f"Declaration edit — Loan repayment -{amt}"},
                 ]
 
-        correction_je = create_journal_entry(
-            db=db,
-            description=(
-                f"Declaration edit — {month.strftime('%B %Y')} for member {str(member_id)[:8]} "
-                f"(reason: {reason})"
-            )[:255],
-            lines=lines,
-            dealing_month=get_dealing_month_date(db, declaration.cycle_id or active_cycle.id, month),
-            cycle_id=declaration.cycle_id or active_cycle.id,
-            source_type="declaration_edit",
-            source_ref=str(declaration.id),
-            created_by=user_id,
-        )
+        # Only post a correcting JE when we actually have delta lines. The
+        # heal-only path (all deltas zero but Repayment out of sync) produces
+        # no JE, just a Repayment sync + audit log line via the outcome.
+        correction_je = None
+        if lines:
+            correction_je = create_journal_entry(
+                db=db,
+                description=(
+                    f"Declaration edit — {month.strftime('%B %Y')} for member {str(member_id)[:8]} "
+                    f"(reason: {reason})"
+                )[:255],
+                lines=lines,
+                dealing_month=get_dealing_month_date(db, declaration.cycle_id or active_cycle.id, month),
+                cycle_id=declaration.cycle_id or active_cycle.id,
+                source_type="declaration_edit",
+                source_ref=str(declaration.id),
+                created_by=user_id,
+            )
 
-        # Sync the linked Repayment row if loan_repayment or interest changed.
+        # Sync every Repayment row tied to this declaration when the loan
+        # side changed.
+        #
+        # Robustness note: we don't rely on `DepositApproval.journal_entry_id`
+        # alone. If a prior `approve_deposit` re-run auto-reversed a stale JE
+        # and pointed the approval at a new one, the Repayment row still
+        # references the OLD (reversed) JE and the single-JE lookup misses
+        # it. Instead we gather every JE (live OR reversed) with
+        # `source_type="deposit_approval"` and `source_ref=str(deposit_proof.id)`
+        # and update all Repayments referencing any of them. There's at most
+        # one live row in practice, but if multiple exist (edge case) they
+        # all need the new figures so the Loan State panel stays consistent.
         if (abs(deltas["loan_repayment"]) >= Decimal("0.005")
                 or abs(deltas["interest_on_loan"]) >= Decimal("0.005")):
-            existing_approval = db.query(DepositApproval).join(
-                DepositProof, DepositApproval.deposit_proof_id == DepositProof.id
-            ).filter(DepositProof.declaration_id == declaration.id).first()
-            if existing_approval and existing_approval.journal_entry_id:
-                rep = db.query(Repayment).filter(
-                    Repayment.journal_entry_id == existing_approval.journal_entry_id
-                ).first()
-                if rep:
+            deposit_proof_row = db.query(DepositProof).filter(
+                DepositProof.declaration_id == declaration.id
+            ).order_by(DepositProof.uploaded_at.desc()).first()
+            if deposit_proof_row:
+                approval_jes = db.query(JournalEntry).filter(
+                    JournalEntry.source_type == "deposit_approval",
+                    JournalEntry.source_ref == str(deposit_proof_row.id),
+                ).all()
+                approval_je_ids = [je.id for je in approval_jes]
+                reps_to_sync = []
+                if approval_je_ids:
+                    reps_to_sync = db.query(Repayment).filter(
+                        Repayment.journal_entry_id.in_(approval_je_ids)
+                    ).all()
+                for rep in reps_to_sync:
                     rep.principal_amount = new["loan_repayment"]
                     rep.interest_amount = new["interest_on_loan"]
                     rep.total_amount = new["loan_repayment"] + new["interest_on_loan"]
@@ -882,11 +931,11 @@ def reconcile_declaration_and_post(
 
         db.commit()
         db.refresh(declaration)
-        outcome = "edited_approved"
+        outcome = "edited_approved" if lines else "repayment_resynced"
         return {
             "outcome": outcome,
             "declaration_id": str(declaration.id),
-            "correction_journal_entry_id": str(correction_je.id),
+            "correction_journal_entry_id": str(correction_je.id) if correction_je else None,
             "deltas": {k: float(v) for k, v in deltas.items()},
             "reason": reason,
         }
