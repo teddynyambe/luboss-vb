@@ -2867,6 +2867,125 @@ def respond_to_deposit_proof_comment(
     }
 
 
+@router.put("/deposits/{deposit_id}/attach-file")
+def attach_deposit_proof_file(
+    deposit_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Attach or replace the physical proof file on an existing DepositProof.
+
+    Purpose: cover the case where the treasurer reconciled a member's
+    declaration (declaration + deposit go straight to APPROVED with
+    `upload_path = 'reconciliation'`, no file). The member later has the
+    paper trail and wants to attach it — **without** requiring the
+    treasurer to re-approve the deposit.
+
+    This endpoint:
+      * Overwrites `deposit.upload_path` with the newly-saved file path.
+      * Does NOT change `deposit.status` — the deposit stays approved (or
+        whatever it currently is).
+      * Does NOT touch the linked Declaration's status.
+      * Does NOT touch the ledger.
+      * Cleans up the old physical file when present (the "reconciliation"
+        sentinel is treated as no-file). Best-effort — if unlink fails the
+        DB path still gets replaced.
+
+    Refused when:
+      * The deposit belongs to someone else.
+      * The deposit is REJECTED — that flow has its own resubmit path
+        (`PUT /deposits/{id}/resubmit`) which changes status and needs
+        treasurer re-approval.
+    """
+    import os
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+    if member_profile.status != MemberStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Member account is not active")
+
+    try:
+        deposit_uuid = UUID(deposit_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid deposit_id")
+
+    deposit = db.query(DepositProof).filter(DepositProof.id == deposit_uuid).first()
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Deposit proof not found")
+    if deposit.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="You can only attach files to your own deposit proofs")
+
+    if deposit.status == DepositProofStatus.REJECTED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This deposit was rejected — use the Resubmit action instead so the "
+                "treasurer can review your revised proof."
+            ),
+        )
+
+    # Validate file type (same allowlist as the primary upload endpoint).
+    allowed_extensions = {".pdf", ".jpg", ".jpeg", ".png", ".gif"}
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {', '.join(sorted(allowed_extensions))}",
+        )
+
+    # Save the new file — same naming pattern as `POST /deposits/upload`
+    # so the treasurer's existing file-serving endpoint works unchanged.
+    DEPOSIT_PROOFS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_filename = (
+        "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+        if file.filename else "proof"
+    )
+    declaration_stub = str(deposit.declaration_id or deposit.id)
+    file_path = DEPOSIT_PROOFS_DIR / f"deposit_{declaration_stub}_{timestamp}_{safe_filename}"
+    try:
+        content = file.file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Best-effort cleanup of the previous physical file. "reconciliation" is
+    # a sentinel, not a filename, so we skip unlinking in that case.
+    was_reconciliation = deposit.upload_path == "reconciliation"
+    old_path = deposit.upload_path
+    if old_path and old_path != "reconciliation":
+        try:
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+        except OSError:
+            pass
+
+    deposit.upload_path = str(file_path)
+    db.commit()
+    db.refresh(deposit)
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Deposit proof file attached" if was_reconciliation else "Deposit proof file replaced",
+        details=(
+            f"deposit={deposit_id} status={deposit.status} "
+            f"new_file={file_path.name if hasattr(file_path, 'name') else file_path}"
+        ),
+    )
+    return {
+        "message": (
+            "Proof file attached." if was_reconciliation else "Proof file replaced."
+        ),
+        "deposit_id": str(deposit.id),
+        "upload_path": deposit.upload_path,
+        "status": deposit.status,
+    }
+
+
 @router.put("/deposits/{deposit_id}/resubmit")
 def resubmit_deposit_proof(
     deposit_id: str,

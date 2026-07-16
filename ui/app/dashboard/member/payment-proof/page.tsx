@@ -40,6 +40,14 @@ export default function PaymentProofPage() {
   const [proofError, setProofError] = useState<string | null>(null);
   const [expandedDeposits, setExpandedDeposits] = useState<Set<string>>(new Set());
   
+  // Attach-file state — for adding/replacing the physical file on an
+  // existing DepositProof (e.g. one created by treasurer reconciliation
+  // with no attachment). This doesn't change status or need re-approval.
+  const [attachingDeposit, setAttachingDeposit] = useState<DepositProof | null>(null);
+  const [attachFile, setAttachFile] = useState<File | null>(null);
+  const [attachLoading, setAttachLoading] = useState(false);
+  const [attachError, setAttachError] = useState('');
+
   // Resubmit state
   const [resubmittingDeposit, setResubmittingDeposit] = useState<DepositProof | null>(null);
   const [resubmitFile, setResubmitFile] = useState<File | null>(null);
@@ -449,6 +457,49 @@ export default function PaymentProofPage() {
     }
   };
 
+  const openAttachForm = (deposit: DepositProof) => {
+    setAttachingDeposit(deposit);
+    setAttachFile(null);
+    setAttachError('');
+  };
+
+  const cancelAttach = () => {
+    setAttachingDeposit(null);
+    setAttachFile(null);
+    setAttachError('');
+  };
+
+  const submitAttachFile = async () => {
+    if (!attachingDeposit || !attachFile) {
+      setAttachError('Pick a file to attach.');
+      return;
+    }
+    setAttachLoading(true);
+    setAttachError('');
+    try {
+      const form = new FormData();
+      form.append('file', attachFile);
+      // Use raw fetch — api.put doesn't accept multipart bodies out of the box.
+      const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+      const res = await fetch(`/api/member/deposits/${attachingDeposit.id}/attach-file`, {
+        method: 'PUT',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: form,
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        setAttachError((errBody as any)?.detail || `Failed (${res.status})`);
+        return;
+      }
+      cancelAttach();
+      await loadDeposits();
+    } catch (err: any) {
+      setAttachError(err?.message || 'Failed to attach file');
+    } finally {
+      setAttachLoading(false);
+    }
+  };
+
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'submitted':
@@ -820,6 +871,32 @@ export default function PaymentProofPage() {
                           >
                             View Proof
                           </button>
+                          {/* Attach / Replace is available on any proof that
+                              isn't currently REJECTED — REJECTED goes through
+                              the treasurer-facing Resubmit flow (below).
+                              Reconciliation entries and APPROVED-with-file
+                              cases both benefit: the member can attach a
+                              missing paper trail or replace a wrong upload
+                              without needing treasurer re-approval. */}
+                          {deposit.status !== 'rejected' && (
+                            <button
+                              onClick={() => openAttachForm(deposit)}
+                              title={
+                                !deposit.upload_path || deposit.upload_path === 'reconciliation'
+                                  ? 'Attach a proof of payment file to this entry'
+                                  : 'Replace the attached proof of payment file'
+                              }
+                              className={`px-3 py-1 rounded-lg text-sm font-medium ${
+                                !deposit.upload_path || deposit.upload_path === 'reconciliation'
+                                  ? 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                                  : 'bg-amber-100 text-amber-800 hover:bg-amber-200'
+                              }`}
+                            >
+                              {!deposit.upload_path || deposit.upload_path === 'reconciliation'
+                                ? 'Attach proof'
+                                : 'Replace'}
+                            </button>
+                          )}
                           <button
                             onClick={() => toggleExpand(deposit.id)}
                             className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
@@ -828,6 +905,60 @@ export default function PaymentProofPage() {
                           </button>
                         </div>
                       </div>
+
+                      {/* Inline attach/replace form — opens under the card
+                          header for the deposit whose button was clicked. */}
+                      {attachingDeposit?.id === deposit.id && (
+                        <div className="mt-4 p-4 bg-emerald-50 border-2 border-emerald-200 rounded-xl">
+                          <div className="flex justify-between items-baseline mb-2">
+                            <h4 className="font-semibold text-emerald-900 text-sm">
+                              {!deposit.upload_path || deposit.upload_path === 'reconciliation'
+                                ? 'Attach proof of payment file'
+                                : 'Replace attached proof of payment file'}
+                            </h4>
+                            <button
+                              type="button"
+                              onClick={cancelAttach}
+                              disabled={attachLoading}
+                              className="text-xs text-emerald-700 hover:text-emerald-900"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                          <p className="text-xs text-emerald-800 mb-3">
+                            The deposit stays as it is — the treasurer does <strong>not</strong> need to re-approve.
+                            Accepted: PDF, JPG, PNG, GIF.
+                          </p>
+                          {attachError && (
+                            <p className="text-xs text-red-800 bg-red-50 border border-red-300 rounded px-3 py-2 mb-2">
+                              {attachError}
+                            </p>
+                          )}
+                          <input
+                            type="file"
+                            accept=".pdf,.jpg,.jpeg,.png,.gif"
+                            onChange={(e) => {
+                              setAttachFile(e.target.files?.[0] ?? null);
+                              setAttachError('');
+                            }}
+                            className="block w-full text-sm text-emerald-900 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-emerald-200 file:text-emerald-900 hover:file:bg-emerald-300"
+                          />
+                          <div className="flex justify-end mt-3">
+                            <button
+                              type="button"
+                              onClick={submitAttachFile}
+                              disabled={attachLoading || !attachFile}
+                              className="px-4 py-1.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                            >
+                              {attachLoading
+                                ? 'Uploading…'
+                                : !deposit.upload_path || deposit.upload_path === 'reconciliation'
+                                ? 'Attach'
+                                : 'Replace'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       {expandedDeposits.has(deposit.id) && (
                         <div className="mt-4 pt-4 border-t-2 border-blue-200">
