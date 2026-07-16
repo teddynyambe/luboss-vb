@@ -169,7 +169,7 @@ def get_member_todos(
             "kind": "submit_pop_current_month",
             "priority": 3,
             "title": f"Submit Proof of Payment for {current_month_label}",
-            "description": "Your declaration is recorded — upload your bank/M-pesa proof of payment to complete it.",
+            "description": "Your declaration is recorded — upload your proof of payment to complete it.",
             "link": f"/dashboard/member/payment-proof?declaration={current_month_decl.id}",
             "declaration_id": str(current_month_decl.id),
             "effective_month": current_month_decl.effective_month.isoformat(),
