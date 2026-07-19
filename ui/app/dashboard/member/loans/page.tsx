@@ -58,6 +58,38 @@ export default function LoanApplicationPage() {
   const [currentLoan, setCurrentLoan] = useState<any>(null);
   const [loadingCurrentLoan, setLoadingCurrentLoan] = useState(false);
   const [withdrawing, setWithdrawing] = useState<string | null>(null);
+
+  // Reterm flow state (Pay Loan Early / Extend Loan) — shared modal, two
+  // entry points on the card. Direction picks which backend endpoint to
+  // call and how to phrase the modal.
+  type RetermDirection = 'shorten' | 'extend';
+  const [retermModalOpen, setRetermModalOpen] = useState(false);
+  const [retermDirection, setRetermDirection] = useState<RetermDirection>('shorten');
+  const [retermLoading, setRetermLoading] = useState(false);
+  const [retermSubmitting, setRetermSubmitting] = useState(false);
+  const [retermError, setRetermError] = useState<string | null>(null);
+  const [retermData, setRetermData] = useState<{
+    loan: {
+      id: string;
+      amount: number;
+      current_term_months: string | null;
+      current_rate: number;
+      current_expected_interest: number;
+      interest_already_paid: number;
+      interest_outstanding: number;
+      disbursement_date: string | null;
+    };
+    elapsed_months: number;
+    eligible: boolean;
+    reason_if_ineligible: string | null;
+    options: {
+      new_term_months: string;
+      new_percentage_interest: number;
+      new_expected_interest: number;
+      interest_delta: number;
+    }[];
+  } | null>(null);
+  const [selectedRetermTerm, setSelectedRetermTerm] = useState<string>('');
   const [showFormModal, setShowFormModal] = useState(false);
   const [lastSuccessType, setLastSuccessType] = useState<'create' | 'update' | null>(null);
 
@@ -139,6 +171,67 @@ export default function LoanApplicationPage() {
       setError(err.message || 'Failed to withdraw loan application');
     } finally {
       setWithdrawing(null);
+    }
+  };
+
+  const openRetermModal = async (direction: RetermDirection) => {
+    if (!currentLoan?.id) return;
+    setRetermDirection(direction);
+    setRetermModalOpen(true);
+    setRetermLoading(true);
+    setRetermError(null);
+    setRetermData(null);
+    setSelectedRetermTerm('');
+    const path = direction === 'shorten'
+      ? `/api/member/loans/${currentLoan.id}/early-payoff-options`
+      : `/api/member/loans/${currentLoan.id}/extend-options`;
+    try {
+      const res = await api.get<typeof retermData>(path);
+      if (res.data) {
+        setRetermData(res.data);
+        // Auto-select the first option so single-choice cases just need
+        // a confirm click.
+        if (res.data.options.length > 0) {
+          setSelectedRetermTerm(res.data.options[0].new_term_months);
+        }
+      } else {
+        setRetermError(res.error || 'Failed to load options.');
+      }
+    } catch (err: any) {
+      setRetermError(err?.message || 'Failed to load options.');
+    } finally {
+      setRetermLoading(false);
+    }
+  };
+
+  const closeRetermModal = () => {
+    setRetermModalOpen(false);
+    setRetermData(null);
+    setSelectedRetermTerm('');
+    setRetermError(null);
+  };
+
+  const confirmReterm = async () => {
+    if (!currentLoan?.id || !selectedRetermTerm) return;
+    setRetermSubmitting(true);
+    setRetermError(null);
+    const path = retermDirection === 'shorten'
+      ? `/api/member/loans/${currentLoan.id}/pay-early`
+      : `/api/member/loans/${currentLoan.id}/extend`;
+    try {
+      const res = await api.post(path, { new_term_months: selectedRetermTerm });
+      if (res.error) {
+        setRetermError(res.error);
+      } else {
+        closeRetermModal();
+        // Refresh the active-loan card so the new term + interest are
+        // visible immediately without a page reload.
+        await loadCurrentLoan();
+      }
+    } catch (err: any) {
+      setRetermError(err?.message || 'Failed to update loan.');
+    } finally {
+      setRetermSubmitting(false);
     }
   };
 
@@ -415,7 +508,31 @@ export default function LoanApplicationPage() {
                     </div>
                   )}
                 </div>
-                
+
+                {/* Pay Loan Early (shorten) and Extend Loan (lengthen)
+                    — both call the same shared modal in different modes.
+                    Rates for every candidate come from the member's
+                    credit-rating schedule; the schedule's monotonic
+                    ordering (longer term = higher rate) means shortening
+                    typically credits interest back and extending adds
+                    interest, but the UI shows the exact delta either way. */}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => openRetermModal('extend')}
+                    className="px-4 py-2 bg-amber-500 text-white rounded-lg text-sm font-semibold hover:bg-amber-600"
+                  >
+                    Extend Loan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openRetermModal('shorten')}
+                    className="px-4 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700"
+                  >
+                    Pay Loan Early
+                  </button>
+                </div>
+
                 {currentLoan.repayments && currentLoan.repayments.length > 0 && (() => {
                   let runningBal: number = currentLoan.loan_amount ?? 0;
                   const rows = [...currentLoan.repayments].map((r: any) => {
@@ -830,6 +947,195 @@ export default function LoanApplicationPage() {
           </div>
         </div>
       )}
+
+      {/* Reterm modal — shared between Pay Loan Early (shorten) and
+          Extend Loan (lengthen). Colouring, copy, and endpoint pick
+          switch on retermDirection. Rate for every candidate comes from
+          the credit-rating × term schedule; nothing is typed by hand. */}
+      {retermModalOpen && (() => {
+        const isShorten = retermDirection === 'shorten';
+        const headerBg = isShorten ? 'bg-emerald-600' : 'bg-amber-500';
+        const headerText = isShorten ? 'text-emerald-100' : 'text-amber-50';
+        const panelBg = isShorten ? 'bg-emerald-50' : 'bg-amber-50';
+        const panelBorder = isShorten ? 'border-emerald-200' : 'border-amber-200';
+        const labelText = isShorten ? 'text-emerald-700' : 'text-amber-800';
+        const valText = isShorten ? 'text-emerald-900' : 'text-amber-900';
+        const selectBorder = isShorten ? 'border-emerald-300' : 'border-amber-300';
+        const primaryBtn = isShorten
+          ? 'bg-emerald-600 hover:bg-emerald-700'
+          : 'bg-amber-500 hover:bg-amber-600';
+        const title = isShorten ? 'Pay Loan Early' : 'Extend Loan';
+        const subtitle = isShorten
+          ? 'Shorten your loan and adjust the interest based on your credit rating.'
+          : 'Lengthen your loan and adjust the interest based on your credit rating.';
+        return (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+          onClick={closeRetermModal}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={`${headerBg} text-white px-6 py-4 shrink-0`}>
+              <h2 className="text-xl md:text-2xl font-bold">{title}</h2>
+              <p className={`text-xs ${headerText} mt-1`}>{subtitle}</p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {retermLoading && (
+                <div className="text-center py-8">
+                  <div className={`animate-spin rounded-full h-10 w-10 border-4 ${isShorten ? 'border-emerald-200 border-t-emerald-600' : 'border-amber-200 border-t-amber-500'} mx-auto`}></div>
+                  <p className={`mt-3 text-sm ${isShorten ? 'text-emerald-700' : 'text-amber-800'}`}>Loading options…</p>
+                </div>
+              )}
+              {!retermLoading && retermError && (
+                <div className="p-3 bg-red-50 border-2 border-red-300 rounded-lg text-sm text-red-800">
+                  {retermError}
+                </div>
+              )}
+              {!retermLoading && retermData && (
+                <>
+                  <div className={`p-3 ${panelBg} border-2 ${panelBorder} rounded-lg text-xs space-y-0.5`}>
+                    <div className="flex justify-between">
+                      <span className={labelText}>Loan amount</span>
+                      <span className={`font-semibold ${valText}`}>
+                        K{retermData.loan.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className={labelText}>Current term × rate</span>
+                      <span className={`font-semibold ${valText}`}>
+                        {retermData.loan.current_term_months || '—'} mo @ {retermData.loan.current_rate}%
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className={labelText}>Current expected interest</span>
+                      <span className={`font-semibold ${valText}`}>
+                        K{retermData.loan.current_expected_interest.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className={labelText}>Interest already paid</span>
+                      <span className={`font-semibold ${valText}`}>
+                        K{retermData.loan.interest_already_paid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className={labelText}>Months elapsed since disbursement</span>
+                      <span className={`font-semibold ${valText}`}>
+                        {retermData.elapsed_months}
+                      </span>
+                    </div>
+                  </div>
+
+                  {!retermData.eligible && (
+                    <div className="p-3 bg-amber-50 border-2 border-amber-300 rounded-lg text-sm text-amber-900">
+                      {retermData.reason_if_ineligible || 'No options available.'}
+                    </div>
+                  )}
+
+                  {retermData.eligible && retermData.options.length > 0 && (
+                    <>
+                      <div className="flex flex-col gap-1">
+                        <label className={`text-xs font-semibold ${valText}`}>
+                          New term (pick one)
+                        </label>
+                        <select
+                          value={selectedRetermTerm}
+                          onChange={(e) => setSelectedRetermTerm(e.target.value)}
+                          className={`px-3 py-2 border-2 ${selectBorder} rounded text-sm bg-white`}
+                        >
+                          {retermData.options.map((opt) => (
+                            <option key={opt.new_term_months} value={opt.new_term_months}>
+                              {opt.new_term_months} month{opt.new_term_months === '1' ? '' : 's'}
+                              {' — '}
+                              rate {opt.new_percentage_interest}% · interest K
+                              {opt.new_expected_interest.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {' '}
+                              ({opt.interest_delta >= 0 ? '+' : ''}
+                              K{opt.interest_delta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                            </option>
+                          ))}
+                        </select>
+                        <p className={`text-[11px] mt-1 ${labelText}`}>
+                          Rates are locked to your credit rating for each term. Nothing is typed by hand.
+                        </p>
+                      </div>
+
+                      {(() => {
+                        const opt = retermData.options.find((o) => o.new_term_months === selectedRetermTerm);
+                        if (!opt) return null;
+                        const delta = opt.interest_delta;
+                        const previewBg = delta > 0 ? 'bg-amber-50 border-amber-200' :
+                          delta < 0 ? 'bg-emerald-50 border-emerald-200' :
+                          'bg-blue-50 border-blue-200';
+                        const deltaText = delta > 0 ? 'text-amber-800' : delta < 0 ? 'text-emerald-800' : 'text-blue-800';
+                        return (
+                          <div className={`p-3 border-2 rounded-lg text-xs space-y-0.5 ${previewBg}`}>
+                            <div className="flex justify-between">
+                              <span className="font-semibold">New expected interest</span>
+                              <span className="font-bold">
+                                K{opt.new_expected_interest.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <div className="flex justify-between">
+                              <span className="font-semibold">Interest delta (corrective JE)</span>
+                              <span className={`font-bold ${deltaText}`}>
+                                {delta >= 0 ? '+' : ''}K
+                                {delta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-[11px]">
+                              {isShorten
+                                ? (delta > 0
+                                    ? 'Shorter term at a higher rate — the ledger will accrue more interest against you.'
+                                    : delta < 0
+                                    ? "Shorter term at a lower rate — some previously-accrued interest is credited back."
+                                    : 'Shorter term at the same effective rate — no interest adjustment.')
+                                : (delta > 0
+                                    ? 'Longer term at a higher rate — the ledger will accrue additional interest against you.'
+                                    : delta < 0
+                                    ? "Longer term at a lower rate — some previously-accrued interest is credited back."
+                                    : 'Longer term at the same effective rate — no interest adjustment.')
+                              }
+                            </p>
+                            <p className="mt-1 text-[11px] text-blue-900">
+                              After confirming, edit your next declaration to pay the updated interest amount.
+                            </p>
+                          </div>
+                        );
+                      })()}
+                    </>
+                  )}
+                </>
+              )}
+            </div>
+            <div className="shrink-0 flex flex-col sm:flex-row justify-end gap-3 p-4 md:p-6 border-t-2 border-gray-200 bg-white">
+              <button
+                type="button"
+                onClick={closeRetermModal}
+                disabled={retermSubmitting}
+                className="btn-secondary disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmReterm}
+                disabled={
+                  retermSubmitting
+                  || !retermData?.eligible
+                  || !selectedRetermTerm
+                }
+                className={`px-4 py-2 md:px-6 md:py-3 ${primaryBtn} text-white rounded-xl text-sm md:text-base font-semibold disabled:opacity-50`}
+              >
+                {retermSubmitting ? 'Updating…' : 'Confirm new term'}
+              </button>
+            </div>
+          </div>
+        </div>
+        );
+      })()}
     </div>
   );
 }

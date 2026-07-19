@@ -1029,17 +1029,29 @@ export default function TreasurerDashboard() {
     setMessage(null);
     try {
       const url = `/api/treasurer/loans/${loanToApprove.id}/approve${force ? '?force=true' : ''}`;
-      const response = await api.post<{ surcharge_penalty_name?: string | null }>(
+      const response = await api.post<{
+        surcharge_penalty_name?: string | null;
+        auto_reversed_late_loan_penalty_id?: string | null;
+      }>(
         url,
         Object.keys(body).length ? body : undefined,
       );
       if (!response.error) {
         const surchargeName = response.data?.surcharge_penalty_name;
+        const autoReversed = !!response.data?.auto_reversed_late_loan_penalty_id;
         setMessage({
           type: 'success',
           text: surchargeName
-            ? `Loan approved & disbursed. ${surchargeName} penalty also issued — member will see it on their next declaration.`
-            : 'Loan approved, disbursed, and posted to member\'s account successfully!',
+            ? (
+                autoReversed
+                  ? `Loan approved & disbursed. ${surchargeName} penalty issued and the member's Late Loan Application fee for this month was auto-reversed (double-charge prevented).`
+                  : `Loan approved & disbursed. ${surchargeName} penalty also issued — member will see it on their next declaration.`
+              )
+            : (
+                autoReversed
+                  ? 'Loan approved & disbursed. Late Loan Application fee auto-reversed for this month.'
+                  : 'Loan approved, disbursed, and posted to member\'s account successfully!'
+              ),
         });
         await loadData();
         setShowLoanApprovalModal(false);

@@ -1338,6 +1338,118 @@ def approve_loan_application(
         surcharge_record_id = str(surcharge_record.id)
         surcharge_name = surcharge_type.name
 
+    # Auto-reverse the double-charge: if this application also triggered an
+    # auto Late Loan Application penalty AND the treasurer now charges an
+    # Emergency Loan surcharge, they're two ways of billing the same
+    # offense (applying outside the window). Reverse the Late Loan
+    # Application so only the surcharge stands. Runs regardless of whether
+    # a surcharge is currently being applied — an Emergency Loan penalty
+    # created earlier for this application should also cancel the late fee.
+    auto_reversed_late_loan_penalty_id = None
+    auto_reversed_late_loan_reason = None
+    try:
+        _app_date = application.application_date or datetime.utcnow()
+        # Detect: does the member have an active Emergency Loan (or other
+        # "loan"-flavoured surcharge) penalty in the same month as this
+        # application? If yes, and a Late Loan Application penalty exists
+        # for the same month, reverse the Late Loan Application.
+        _month_start = _app_date.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        _next_year = _month_start.year + (1 if _month_start.month == 12 else 0)
+        _next_month = 1 if _month_start.month == 12 else _month_start.month + 1
+        _month_end = _month_start.replace(year=_next_year, month=_next_month)
+
+        _emergency_pen = db.query(PenaltyRecord).join(
+            PenaltyType, PenaltyRecord.penalty_type_id == PenaltyType.id
+        ).filter(
+            PenaltyRecord.member_id == application.member_id,
+            PenaltyType.name.ilike("%emergency%loan%"),
+            PenaltyRecord.status.in_([
+                PenaltyRecordStatus.PENDING.value,
+                PenaltyRecordStatus.APPROVED.value,
+                PenaltyRecordStatus.PAID.value,
+            ]),
+            PenaltyRecord.date_issued >= _month_start,
+            PenaltyRecord.date_issued < _month_end,
+        ).first()
+
+        if _emergency_pen:
+            _month_name = _app_date.strftime("%B %Y")
+            _late_pen = db.query(PenaltyRecord).join(
+                PenaltyType, PenaltyRecord.penalty_type_id == PenaltyType.id
+            ).filter(
+                PenaltyRecord.member_id == application.member_id,
+                PenaltyType.name.ilike("%late%loan%application%"),
+                PenaltyRecord.notes.ilike(f"%{_month_name}%"),
+                PenaltyRecord.status.in_([
+                    PenaltyRecordStatus.APPROVED.value,
+                    PenaltyRecordStatus.PAID.value,
+                ]),
+            ).order_by(PenaltyRecord.date_issued.desc()).first()
+
+            if _late_pen:
+                from app.models.ledger import JournalEntry as _JE, JournalLine as _JL
+                from app.services.accounting import create_journal_entry as _mkje
+                _reason = (
+                    f"Auto-reversed: member charged Emergency Loan surcharge for the same "
+                    f"application (loan {str(loan.id)[:8]}, {_month_name}) — Late Loan "
+                    "Application fee cancelled to avoid double-charging."
+                )
+                # Reverse the ledger post if the late-fee penalty had one.
+                _reversal_je_id = None
+                if _late_pen.journal_entry_id:
+                    _orig_je = db.query(_JE).filter(_JE.id == _late_pen.journal_entry_id).first()
+                    if _orig_je and not _orig_je.reversed_by:
+                        _orig_lines = db.query(_JL).filter(
+                            _JL.journal_entry_id == _orig_je.id
+                        ).all()
+                        _rev_lines = [
+                            {
+                                "account_id": ln.ledger_account_id,
+                                "debit_amount": ln.credit_amount,
+                                "credit_amount": ln.debit_amount,
+                                "description": f"Reversal: {ln.description or ''}",
+                            }
+                            for ln in _orig_lines
+                        ]
+                        _rev_je = _mkje(
+                            db=db,
+                            description=(
+                                f"Late Loan Application auto-reversal — member charged "
+                                f"Emergency Loan surcharge instead ({_month_name})"
+                            ),
+                            lines=_rev_lines,
+                            dealing_month=_orig_je.dealing_month,
+                            cycle_id=_orig_je.cycle_id,
+                            source_ref=str(_late_pen.id),
+                            source_type="penalty_reversal",
+                            created_by=current_user.id,
+                        )
+                        _orig_je.reversed_by = current_user.id
+                        _orig_je.reversed_at = datetime.utcnow()
+                        _orig_je.reversal_reason = _reason
+                        _reversal_je_id = _rev_je.id
+
+                _late_pen.status = PenaltyRecordStatus.REVERSED.value
+                _late_pen.reversed_by = current_user.id
+                _late_pen.reversed_at = datetime.utcnow()
+                _late_pen.reversal_reason = _reason
+                if _reversal_je_id:
+                    _late_pen.reversal_journal_entry_id = _reversal_je_id
+                db.commit()
+                auto_reversed_late_loan_penalty_id = str(_late_pen.id)
+                auto_reversed_late_loan_reason = _reason
+    except Exception:
+        # Auto-reversal is best-effort — a failure here should not stop the
+        # loan approval itself. Errors are logged and the treasurer can
+        # still reverse the Late Loan Application penalty manually via the
+        # normal compliance-side flow.
+        import logging
+        logging.getLogger(__name__).exception(
+            "Auto-reverse of Late Loan Application penalty failed for member %s",
+            application.member_id,
+        )
+        db.rollback()
+
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
         user_role=current_user.role.value if current_user.role else "treasurer",
@@ -1345,6 +1457,10 @@ def approve_loan_application(
         details=(
             f"member={_loan_name}, amount=K {application.amount}"
             + (f", surcharge={surcharge_name}" if surcharge_name else "")
+            + (
+                f", auto_reversed_late_loan_penalty={auto_reversed_late_loan_penalty_id}"
+                if auto_reversed_late_loan_penalty_id else ""
+            )
         ),
     )
     return {
@@ -1353,6 +1469,8 @@ def approve_loan_application(
         "application_id": str(application.id),
         "surcharge_penalty_id": surcharge_record_id,
         "surcharge_penalty_name": surcharge_name,
+        "auto_reversed_late_loan_penalty_id": auto_reversed_late_loan_penalty_id,
+        "auto_reversed_late_loan_reason": auto_reversed_late_loan_reason,
     }
 
 

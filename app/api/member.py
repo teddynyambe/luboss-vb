@@ -1918,6 +1918,631 @@ def get_current_loan(
     }
 
 
+@router.get("/loans/{loan_id}/early-payoff-options")
+def get_loan_early_payoff_options(
+    loan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the term-shortening options available to the member for early
+    loan payoff.
+
+    Rules (from user requirements):
+      * Loan must belong to the current user and be active
+        (APPROVED / DISBURSED / OPEN).
+      * ``elapsed_months`` counts full calendar months between the loan's
+        disbursement month and the current month. If disbursed in April
+        and today is May, elapsed = 1.
+      * A valid new term is any integer N where
+        ``elapsed_months <= N < original_term_months`` — the loan lasted
+        at least the time already used but strictly less than the
+        original commitment.
+      * For each candidate N, the interest rate is looked up from the
+        member's credit-rating × N-month range. Terms without a
+        configured rate are hidden — the member can only pick from what
+        the schedule officially prices.
+      * The endpoint is view-only; nothing is committed.
+
+    Response shape:
+        {
+          "loan": { id, amount, current_term_months, current_rate,
+                    current_expected_interest, interest_already_paid,
+                    interest_outstanding, disbursement_date, cycle_id },
+          "elapsed_months": int,
+          "eligible": bool,
+          "reason_if_ineligible": str | None,
+          "options": [
+             { "new_term_months": "1",
+               "new_percentage_interest": 6.0,
+               "new_expected_interest": 600.0,
+               "interest_delta": -200.0 },
+             ...
+          ]
+        }
+    """
+    from app.models.transaction import LoanStatus, Loan, Repayment
+    from app.models.policy import (
+        MemberCreditRating, CreditRatingInterestRange,
+    )
+    from decimal import Decimal
+    from datetime import date as _date
+
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+
+    loan = db.query(Loan).filter(Loan.id == loan_uuid).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.member_id != member_profile.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only inspect early-payoff options for your own loans",
+        )
+    if loan.loan_status not in (LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loan is not active (status: {loan.loan_status.value if loan.loan_status else 'unknown'})",
+        )
+
+    current_amount = Decimal(str(loan.loan_amount or 0))
+    current_rate = Decimal(str(loan.percentage_interest or 0))
+    current_expected_interest = (current_amount * current_rate / Decimal("100")).quantize(Decimal("0.01"))
+
+    try:
+        original_term = int((loan.number_of_instalments or "").strip())
+    except (TypeError, ValueError):
+        original_term = 0
+
+    interest_paid = Decimal("0.00")
+    for rep in loan.repayments:
+        interest_paid += Decimal(str(rep.interest_amount or 0))
+    interest_outstanding = max(Decimal("0.00"), current_expected_interest - interest_paid)
+
+    disbursement_date = loan.disbursement_date
+    today = _date.today()
+    elapsed_months = 0
+    if disbursement_date:
+        elapsed_months = (
+            (today.year - disbursement_date.year) * 12
+            + (today.month - disbursement_date.month)
+        )
+        if elapsed_months < 0:
+            elapsed_months = 0
+
+    loan_summary = {
+        "id": str(loan.id),
+        "amount": float(current_amount),
+        "current_term_months": loan.number_of_instalments,
+        "current_rate": float(current_rate),
+        "current_expected_interest": float(current_expected_interest),
+        "interest_already_paid": float(interest_paid),
+        "interest_outstanding": float(interest_outstanding),
+        "disbursement_date": disbursement_date.isoformat() if disbursement_date else None,
+        "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
+    }
+
+    # Eligibility gates: the loan must have a disbursement date, an
+    # original term > 1, and at least one month must have elapsed. Members
+    # can't shrink a loan to less than the time already used.
+    if not disbursement_date:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": "Loan has not been disbursed yet.",
+            "options": [],
+        }
+    if original_term <= 1:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": "Loan is already a 1-month loan — nothing to shorten.",
+            "options": [],
+        }
+    if elapsed_months < 1:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": (
+                "Loan was disbursed this month — early payoff opens once you're at least one month in."
+            ),
+            "options": [],
+        }
+    if elapsed_months >= original_term:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": (
+                "Loan has already reached its original maturity — no early-payoff to offer."
+            ),
+            "options": [],
+        }
+
+    # Look up the member's credit rating for this loan's cycle so the new
+    # rate follows the same schedule as their original loan pricing.
+    rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_profile.id,
+        MemberCreditRating.cycle_id == loan.cycle_id,
+    ).first()
+    if not rating:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": (
+                "No credit rating configured for this cycle — cannot look up a new rate."
+            ),
+            "options": [],
+        }
+
+    # Build candidate new terms: from elapsed_months up to original_term - 1.
+    # Only include terms with a configured rate on the schedule.
+    options = []
+    for candidate in range(elapsed_months, original_term):
+        rng = db.query(CreditRatingInterestRange).filter(
+            CreditRatingInterestRange.tier_id == rating.tier_id,
+            CreditRatingInterestRange.cycle_id == loan.cycle_id,
+            CreditRatingInterestRange.term_months == str(candidate),
+        ).first()
+        if not rng:
+            continue
+        new_rate = Decimal(str(rng.effective_rate_percent or 0))
+        new_expected = (current_amount * new_rate / Decimal("100")).quantize(Decimal("0.01"))
+        interest_delta = (new_expected - current_expected_interest).quantize(Decimal("0.01"))
+        options.append({
+            "new_term_months": str(candidate),
+            "new_percentage_interest": float(new_rate),
+            "new_expected_interest": float(new_expected),
+            "interest_delta": float(interest_delta),
+        })
+
+    reason = None
+    if not options:
+        reason = (
+            "No shorter term has a configured interest rate for your credit rating. "
+            "Ask the chairman to update the rate schedule if you need an early payoff option."
+        )
+
+    return {
+        "loan": loan_summary,
+        "elapsed_months": elapsed_months,
+        "eligible": bool(options),
+        "reason_if_ineligible": reason,
+        "options": options,
+    }
+
+
+class PayLoanEarlyRequest(BaseModel):
+    new_term_months: str
+
+
+@router.post("/loans/{loan_id}/pay-early")
+def pay_loan_early(
+    loan_id: str,
+    body: PayLoanEarlyRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Shorten an active loan to the selected term.
+
+    Server-side re-validates against the same rules as the
+    early-payoff-options endpoint: term must be within
+    [elapsed_months, original_term - 1] AND have a rate configured on the
+    member's credit-rating × term schedule for the loan's cycle. The rate
+    is not accepted from the client — it's looked up server-side to
+    prevent tampering.
+
+    On success:
+      * ``loan.number_of_instalments`` and ``loan.percentage_interest``
+        are updated in place via the existing ``edit_loan_terms`` service.
+      * A corrective JE is posted for the interest delta so the ledger
+        stays in sync (same behaviour as the treasurer's Edit loan terms
+        flow — reuses that machinery).
+      * Full audit line lands on the JE + audit log.
+    """
+    from app.models.transaction import LoanStatus, Loan
+    from app.models.policy import MemberCreditRating, CreditRatingInterestRange
+    from app.services.loan_repair import edit_loan_terms
+    from decimal import Decimal
+    from datetime import date as _date
+
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+
+    if not body.new_term_months or not body.new_term_months.strip():
+        raise HTTPException(status_code=400, detail="new_term_months is required")
+    new_term = body.new_term_months.strip()
+    try:
+        new_term_int = int(new_term)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="new_term_months must be a positive integer")
+    if new_term_int < 1:
+        raise HTTPException(status_code=400, detail="new_term_months must be at least 1")
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+
+    loan = db.query(Loan).filter(Loan.id == loan_uuid).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="You can only pay off your own loans early")
+    if loan.loan_status not in (LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN):
+        raise HTTPException(status_code=400, detail="Loan is not active")
+
+    try:
+        original_term = int((loan.number_of_instalments or "").strip())
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Loan has no valid original term to shorten")
+    if new_term_int >= original_term:
+        raise HTTPException(
+            status_code=400,
+            detail=f"New term ({new_term_int}) must be shorter than the current term ({original_term}).",
+        )
+
+    today = _date.today()
+    elapsed_months = 0
+    if loan.disbursement_date:
+        elapsed_months = (
+            (today.year - loan.disbursement_date.year) * 12
+            + (today.month - loan.disbursement_date.month)
+        )
+        if elapsed_months < 0:
+            elapsed_months = 0
+    if new_term_int < elapsed_months:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"New term ({new_term_int}) is less than the {elapsed_months} months "
+                "already elapsed — pick a term at least as long as the time you've been in the loan."
+            ),
+        )
+
+    # Rate is server-side — look up the officially configured rate for
+    # this member × new term. If no row exists, the option isn't valid.
+    rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_profile.id,
+        MemberCreditRating.cycle_id == loan.cycle_id,
+    ).first()
+    if not rating:
+        raise HTTPException(
+            status_code=400,
+            detail="No credit rating configured for this loan's cycle.",
+        )
+    rng = db.query(CreditRatingInterestRange).filter(
+        CreditRatingInterestRange.tier_id == rating.tier_id,
+        CreditRatingInterestRange.cycle_id == loan.cycle_id,
+        CreditRatingInterestRange.term_months == new_term,
+    ).first()
+    if not rng:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No configured interest rate for a {new_term}-month loan under your credit rating."
+            ),
+        )
+    new_rate = Decimal(str(rng.effective_rate_percent or 0))
+
+    reason = (
+        f"Member-initiated early payoff — original term "
+        f"{loan.number_of_instalments}mo shortened to {new_term}mo at {new_rate}% "
+        f"(from credit-rating × term schedule)."
+    )
+
+    try:
+        result = edit_loan_terms(
+            db=db,
+            loan_id=loan.id,
+            new_term_months=new_term,
+            new_percentage_interest=new_rate,
+            reason=reason,
+            user_id=current_user.id,
+            new_loan_amount=None,  # amount stays fixed
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Loan shortened via Pay Loan Early",
+        details=(
+            f"loan={str(loan.id)[:8]} term={loan.number_of_instalments}→{new_term}mo "
+            f"rate={result.get('old_percentage_interest')}→{result.get('new_percentage_interest')} "
+            f"interest_delta={result.get('interest_delta')}"
+        ),
+    )
+    return result
+
+
+@router.get("/loans/{loan_id}/extend-options")
+def get_loan_extend_options(
+    loan_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the term-lengthening options available to the member.
+
+    Mirror of ``get_loan_early_payoff_options`` for the OTHER direction:
+    a member with a 1-month loan (or any active loan) can extend to a
+    longer term, provided:
+      * the loan is theirs and active (APPROVED / DISBURSED / OPEN)
+      * a longer term has a rate configured on the member's credit-rating
+        × term schedule for the loan's cycle
+
+    The list of extension candidates is derived from what the schedule
+    actually prices — there's no arbitrary upper bound. Any tier × cycle
+    row with ``term_months > current_term`` is a valid option.
+    Rates are locked to the schedule; nothing is typed by hand.
+
+    Interest usually goes UP for a longer loan (longer term = higher
+    rate) so the corrective JE lands on the same INTEREST_RECEIVABLE /
+    INTEREST_INCOME accounts, in the opposite direction from the
+    early-payoff case.
+    """
+    from app.models.transaction import LoanStatus, Loan
+    from app.models.policy import MemberCreditRating, CreditRatingInterestRange
+    from decimal import Decimal
+    from datetime import date as _date
+
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+
+    loan = db.query(Loan).filter(Loan.id == loan_uuid).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.member_id != member_profile.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You can only inspect extension options for your own loans",
+        )
+    if loan.loan_status not in (LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Loan is not active (status: {loan.loan_status.value if loan.loan_status else 'unknown'})",
+        )
+
+    current_amount = Decimal(str(loan.loan_amount or 0))
+    current_rate = Decimal(str(loan.percentage_interest or 0))
+    current_expected_interest = (current_amount * current_rate / Decimal("100")).quantize(Decimal("0.01"))
+    interest_paid = Decimal("0.00")
+    for rep in loan.repayments:
+        interest_paid += Decimal(str(rep.interest_amount or 0))
+    interest_outstanding = max(Decimal("0.00"), current_expected_interest - interest_paid)
+
+    try:
+        original_term = int((loan.number_of_instalments or "").strip())
+    except (TypeError, ValueError):
+        original_term = 0
+
+    disbursement_date = loan.disbursement_date
+    today = _date.today()
+    elapsed_months = 0
+    if disbursement_date:
+        elapsed_months = (
+            (today.year - disbursement_date.year) * 12
+            + (today.month - disbursement_date.month)
+        )
+        if elapsed_months < 0:
+            elapsed_months = 0
+
+    loan_summary = {
+        "id": str(loan.id),
+        "amount": float(current_amount),
+        "current_term_months": loan.number_of_instalments,
+        "current_rate": float(current_rate),
+        "current_expected_interest": float(current_expected_interest),
+        "interest_already_paid": float(interest_paid),
+        "interest_outstanding": float(interest_outstanding),
+        "disbursement_date": disbursement_date.isoformat() if disbursement_date else None,
+        "cycle_id": str(loan.cycle_id) if loan.cycle_id else None,
+    }
+
+    if original_term <= 0:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": "Loan has no valid current term to extend from.",
+            "options": [],
+        }
+
+    # Look up the member's credit-rating × cycle so extensions are priced
+    # off the same schedule the original loan was.
+    rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_profile.id,
+        MemberCreditRating.cycle_id == loan.cycle_id,
+    ).first()
+    if not rating:
+        return {
+            "loan": loan_summary,
+            "elapsed_months": elapsed_months,
+            "eligible": False,
+            "reason_if_ineligible": (
+                "No credit rating configured for this cycle — cannot look up a new rate."
+            ),
+            "options": [],
+        }
+
+    # Every schedule row where term_months > original_term is a candidate.
+    # Sort numerically (schedules store term_months as strings).
+    ranges = db.query(CreditRatingInterestRange).filter(
+        CreditRatingInterestRange.tier_id == rating.tier_id,
+        CreditRatingInterestRange.cycle_id == loan.cycle_id,
+    ).all()
+
+    options = []
+    for rng in ranges:
+        try:
+            candidate = int((rng.term_months or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if candidate <= original_term:
+            continue
+        new_rate = Decimal(str(rng.effective_rate_percent or 0))
+        new_expected = (current_amount * new_rate / Decimal("100")).quantize(Decimal("0.01"))
+        interest_delta = (new_expected - current_expected_interest).quantize(Decimal("0.01"))
+        options.append({
+            "new_term_months": str(candidate),
+            "new_percentage_interest": float(new_rate),
+            "new_expected_interest": float(new_expected),
+            "interest_delta": float(interest_delta),
+        })
+    options.sort(key=lambda o: int(o["new_term_months"]))
+
+    reason = None
+    if not options:
+        reason = (
+            "No longer term has a configured interest rate for your credit rating. "
+            "Ask the chairman to update the rate schedule if a longer term is needed."
+        )
+
+    return {
+        "loan": loan_summary,
+        "elapsed_months": elapsed_months,
+        "eligible": bool(options),
+        "reason_if_ineligible": reason,
+        "options": options,
+    }
+
+
+class ExtendLoanRequest(BaseModel):
+    new_term_months: str
+
+
+@router.post("/loans/{loan_id}/extend")
+def extend_loan(
+    loan_id: str,
+    body: ExtendLoanRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Lengthen an active loan to the selected term.
+
+    Mirror of ``pay_loan_early`` for the extend direction. Server-side
+    re-validates the term > current_term rule and re-fetches the rate
+    from the schedule (never accepted from the client). Delegates to the
+    existing ``edit_loan_terms`` service so the corrective JE for the
+    interest delta lands under the loan's disbursement month using the
+    same accounting machinery the treasurer already uses.
+    """
+    from app.models.transaction import LoanStatus, Loan
+    from app.models.policy import MemberCreditRating, CreditRatingInterestRange
+    from app.services.loan_repair import edit_loan_terms
+    from decimal import Decimal
+
+    try:
+        loan_uuid = UUID(loan_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid loan_id")
+
+    if not body.new_term_months or not body.new_term_months.strip():
+        raise HTTPException(status_code=400, detail="new_term_months is required")
+    new_term = body.new_term_months.strip()
+    try:
+        new_term_int = int(new_term)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="new_term_months must be a positive integer")
+    if new_term_int < 1:
+        raise HTTPException(status_code=400, detail="new_term_months must be at least 1")
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+
+    loan = db.query(Loan).filter(Loan.id == loan_uuid).first()
+    if not loan:
+        raise HTTPException(status_code=404, detail="Loan not found")
+    if loan.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="You can only extend your own loans")
+    if loan.loan_status not in (LoanStatus.APPROVED, LoanStatus.DISBURSED, LoanStatus.OPEN):
+        raise HTTPException(status_code=400, detail="Loan is not active")
+
+    try:
+        original_term = int((loan.number_of_instalments or "").strip())
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Loan has no valid original term to extend")
+    if new_term_int <= original_term:
+        raise HTTPException(
+            status_code=400,
+            detail=f"New term ({new_term_int}) must be longer than the current term ({original_term}).",
+        )
+
+    rating = db.query(MemberCreditRating).filter(
+        MemberCreditRating.member_id == member_profile.id,
+        MemberCreditRating.cycle_id == loan.cycle_id,
+    ).first()
+    if not rating:
+        raise HTTPException(
+            status_code=400,
+            detail="No credit rating configured for this loan's cycle.",
+        )
+    rng = db.query(CreditRatingInterestRange).filter(
+        CreditRatingInterestRange.tier_id == rating.tier_id,
+        CreditRatingInterestRange.cycle_id == loan.cycle_id,
+        CreditRatingInterestRange.term_months == new_term,
+    ).first()
+    if not rng:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No configured interest rate for a {new_term}-month loan under your credit rating."
+            ),
+        )
+    new_rate = Decimal(str(rng.effective_rate_percent or 0))
+
+    reason = (
+        f"Member-initiated loan extension — original term "
+        f"{loan.number_of_instalments}mo lengthened to {new_term}mo at {new_rate}% "
+        f"(from credit-rating × term schedule)."
+    )
+
+    try:
+        result = edit_loan_terms(
+            db=db,
+            loan_id=loan.id,
+            new_term_months=new_term,
+            new_percentage_interest=new_rate,
+            reason=reason,
+            user_id=current_user.id,
+            new_loan_amount=None,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Loan extended via member request",
+        details=(
+            f"loan={str(loan.id)[:8]} term={loan.number_of_instalments}→{new_term}mo "
+            f"rate={result.get('old_percentage_interest')}→{result.get('new_percentage_interest')} "
+            f"interest_delta={result.get('interest_delta')}"
+        ),
+    )
+    return result
+
+
 @router.get("/loans")
 def get_my_loans(
     current_user: User = Depends(require_not_admin()),
