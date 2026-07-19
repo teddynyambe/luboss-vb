@@ -187,7 +187,7 @@ def get_penalty_types(
 
 @router.get("/members")
 def get_members_for_penalty(
-    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman")),
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
     db: Session = Depends(get_db)
 ):
     """Get list of active members for penalty assignment. Accessible by Compliance, Admin, and Chairman."""
@@ -247,7 +247,7 @@ def _penalty_detail(p: PenaltyRecord, db: Session) -> dict:
 
 @router.get("/penalties/approved")
 def get_approved_penalties(
-    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman")),
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
 ):
     """Get approved penalties that can be reversed."""
@@ -260,11 +260,105 @@ def get_approved_penalties(
     return [_penalty_detail(p, db) for p in penalties]
 
 
+@router.get("/members/{member_id}/penalties")
+def get_member_penalties(
+    member_id: str,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Full penalty history for a single member — every status, oldest to
+    newest.
+
+    Used by the compliance dashboard's per-member detail view so a compliance
+    officer can audit why each penalty was charged (via the narration in
+    `notes`), when the offending action actually happened, and what happened
+    to the penalty afterward (approved / reversal-pending / reversed).
+
+    Timestamps are returned as ISO 8601 UTC — the frontend renders them in
+    the browser's locale so a Zambian officer sees CAT and a US auditor sees
+    CDT without the record itself ever becoming ambiguous.
+    """
+    try:
+        member_uuid = UUID(member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id")
+
+    member = db.query(MemberProfile).filter(MemberProfile.id == member_uuid).first()
+    if not member:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    penalties = (
+        db.query(PenaltyRecord)
+        .filter(PenaltyRecord.member_id == member_uuid)
+        .order_by(PenaltyRecord.date_issued.desc())
+        .all()
+    )
+
+    user = db.query(User).filter(User.id == member.user_id).first()
+    member_name = (
+        f"{(user.first_name or '').strip()} {(user.last_name or '').strip()}".strip()
+        if user else "Unknown"
+    )
+
+    # Summary rollup so the compliance officer sees the state of play at a
+    # glance without having to eyeball every row.
+    summary = {
+        "total_count": len(penalties),
+        "pending_count": 0,
+        "approved_count": 0,
+        "reversal_pending_count": 0,
+        "reversed_count": 0,
+        "paid_count": 0,
+        "total_approved_fee": 0.0,
+    }
+    for p in penalties:
+        status_val = p.status.value if isinstance(p.status, PenaltyRecordStatus) else p.status
+        if status_val == PenaltyRecordStatus.PENDING.value:
+            summary["pending_count"] += 1
+        elif status_val == PenaltyRecordStatus.APPROVED.value:
+            summary["approved_count"] += 1
+            summary["total_approved_fee"] += float(p.penalty_type.fee_amount) if p.penalty_type else 0.0
+        elif status_val == PenaltyRecordStatus.REVERSAL_PENDING.value:
+            summary["reversal_pending_count"] += 1
+            summary["total_approved_fee"] += float(p.penalty_type.fee_amount) if p.penalty_type else 0.0
+        elif status_val == PenaltyRecordStatus.REVERSED.value:
+            summary["reversed_count"] += 1
+        elif status_val == PenaltyRecordStatus.PAID.value:
+            summary["paid_count"] += 1
+            summary["total_approved_fee"] += float(p.penalty_type.fee_amount) if p.penalty_type else 0.0
+
+    creators = {}
+    for p in penalties:
+        if p.created_by and p.created_by not in creators:
+            creator = db.query(User).filter(User.id == p.created_by).first()
+            creators[p.created_by] = (
+                f"{(creator.first_name or '').strip()} {(creator.last_name or '').strip()}".strip()
+                if creator else "System"
+            )
+
+    rows = []
+    for p in penalties:
+        detail = _penalty_detail(p, db)
+        detail["approved_at"] = p.approved_at.isoformat() if p.approved_at else None
+        detail["created_by_name"] = creators.get(p.created_by) or "System"
+        detail["penalty_type_description"] = (
+            p.penalty_type.description if p.penalty_type else None
+        )
+        rows.append(detail)
+
+    return {
+        "member_id": str(member.id),
+        "member_name": member_name,
+        "summary": summary,
+        "penalties": rows,
+    }
+
+
 @router.put("/penalties/{penalty_id}/request-reversal")
 def request_penalty_reversal(
     penalty_id: str,
     body: PenaltyReversalRequest,
-    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman")),
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
 ):
     """Request reversal of an approved penalty. Goes to Treasurer for approval."""

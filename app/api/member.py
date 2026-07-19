@@ -676,6 +676,32 @@ def get_applicable_penalties(
                         # Get system user for system-generated penalties
                         system_user_id = get_system_user_id(db)
                         if system_user_id:
+                            # Rich audit narration — same shape as the
+                            # write-path in transaction.py::create_declaration
+                            # so a compliance officer reading either source
+                            # sees consistent language.
+                            from app.services.transaction import build_late_penalty_narration
+                            try:
+                                import calendar as _cal
+                                _, _last_day = _cal.monthrange(effective_date.year, effective_date.month)
+                                _decl_end_date = _date(
+                                    effective_date.year,
+                                    effective_date.month,
+                                    min(monthly_end_day, _last_day),
+                                )
+                            except Exception:
+                                _decl_end_date = None
+                            _decl_offending_at = (
+                                getattr(existing_declaration, "created_at", None)
+                                if existing_declaration else None
+                            ) or datetime.utcnow()
+                            _narration = build_late_penalty_narration(
+                                kind="Late Declaration",
+                                effective_month=effective_date,
+                                offending_at=_decl_offending_at,
+                                period_end=_decl_end_date,
+                                monthly_end_day=monthly_end_day,
+                            )
                             # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
                             penalty_obj = PenaltyRecord(
                                 id=uuid.uuid4(),
@@ -683,7 +709,7 @@ def get_applicable_penalties(
                                 penalty_type_id=penalty_type_id,
                                 status=PenaltyRecordStatus.APPROVED,
                                 created_by=system_user_id,
-                                notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_date.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})",
+                                notes=_narration,
                                 date_issued=datetime.utcnow(),
                             )
                             db.add(penalty_obj)
@@ -1561,20 +1587,47 @@ def apply_for_loan(
                     
                     if not existing_penalty:
                         # Get system user for system-generated penalties
-                        from app.services.transaction import get_system_user_id
+                        from app.services.transaction import get_system_user_id, build_late_penalty_narration
                         system_user_id = get_system_user_id(db)
                         if not system_user_id:
                             # If no admin exists, skip penalty creation (shouldn't happen in production)
                             import logging
                             logging.warning(f"No admin user found to create system penalty for member {member_profile.id}")
                         else:
+                            # Rich audit narration — captures the exact
+                            # timestamp of the loan application relative
+                            # to the phase window.
+                            _la_start_day = getattr(loan_application_phase, "monthly_start_day", None)
+                            _la_effective_month = date_type(today.year, today.month, 1)
+                            try:
+                                import calendar as _cal
+                                _, _last_day = _cal.monthrange(today.year, today.month)
+                                _la_period_end = date_type(today.year, today.month, min(monthly_end_day, _last_day))
+                            except Exception:
+                                _la_period_end = None
+                            _la_period_start = None
+                            if _la_start_day:
+                                try:
+                                    _la_period_start = date_type(today.year, today.month, _la_start_day)
+                                except Exception:
+                                    _la_period_start = None
+                            _la_offending_at = getattr(loan_application, "application_date", None) or datetime.utcnow()
+                            _narration = build_late_penalty_narration(
+                                kind="Late Loan Application",
+                                effective_month=_la_effective_month,
+                                offending_at=_la_offending_at,
+                                period_start=_la_period_start,
+                                period_end=_la_period_end,
+                                monthly_start_day=_la_start_day,
+                                monthly_end_day=monthly_end_day,
+                            )
                             # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
                             late_penalty = PenaltyRecord(
                                 member_id=member_profile.id,
                                 penalty_type_id=penalty_type_id,
                                 status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
                                 created_by=system_user_id,  # Use admin user for system-generated penalties
-                                notes=f"Late Loan Application - Loan application submitted after day {monthly_end_day} of {today.strftime('%B %Y')} (Loan application period ends on day {monthly_end_day})"
+                                notes=_narration,
                             )
                             db.add(late_penalty)
                             db.flush()
@@ -2750,20 +2803,40 @@ def upload_deposit_proof(
                     
                     if not existing_penalty:
                         # Get system user for system-generated penalties
-                        from app.services.transaction import get_system_user_id
+                        from app.services.transaction import get_system_user_id, build_late_penalty_narration
                         system_user_id = get_system_user_id(db)
                         if not system_user_id:
                             # If no admin exists, skip penalty creation (shouldn't happen in production)
                             import logging
                             logging.warning(f"No admin user found to create system penalty for member {member_profile.id}")
                         else:
+                            # Rich audit narration — captures the exact
+                            # timestamp of the deposit proof upload.
+                            _dep_period_start = None
+                            if monthly_start_day is not None:
+                                try:
+                                    _dep_period_start = date_type(
+                                        effective_date.year, effective_date.month, monthly_start_day,
+                                    )
+                                except Exception:
+                                    _dep_period_start = None
+                            _dep_offending_at = getattr(deposit_proof, "uploaded_at", None) or datetime.utcnow()
+                            _narration = build_late_penalty_narration(
+                                kind="Late Deposits",
+                                effective_month=effective_date,
+                                offending_at=_dep_offending_at,
+                                period_start=_dep_period_start,
+                                period_end=period_end,
+                                monthly_start_day=monthly_start_day,
+                                monthly_end_day=monthly_end_day,
+                            )
                             # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
                             late_penalty = PenaltyRecord(
                                 member_id=member_profile.id,
                                 penalty_type_id=penalty_type_id,
                                 status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
                                 created_by=system_user_id,  # Use admin user for system-generated penalties
-                                notes=f"Late Deposits - Deposit submitted after day {monthly_end_day} of {next_month_name} (Deposit period: {start_s} of {effective_name} to {end_s} of {next_month_name})"
+                                notes=_narration,
                             )
                             db.add(late_penalty)
                             db.flush()

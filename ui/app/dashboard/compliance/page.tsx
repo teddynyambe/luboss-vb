@@ -38,6 +38,74 @@ interface ApprovedPenalty {
   reversal_requested_at: string | null;
 }
 
+interface MemberPenalty {
+  id: string;
+  member_id: string;
+  member_name: string;
+  penalty_type_name: string;
+  penalty_type_description?: string | null;
+  fee_amount: number;
+  status: string;
+  date_issued: string | null;
+  approved_at?: string | null;
+  notes: string | null;
+  created_by_name?: string | null;
+  reversal_reason: string | null;
+  reversal_requested_by_name?: string | null;
+  reversal_requested_at: string | null;
+  reversed_by_name?: string | null;
+  reversed_at?: string | null;
+}
+
+interface MemberPenaltyAudit {
+  member_id: string;
+  member_name: string;
+  summary: {
+    total_count: number;
+    pending_count: number;
+    approved_count: number;
+    reversal_pending_count: number;
+    reversed_count: number;
+    paid_count: number;
+    total_approved_fee: number;
+  };
+  penalties: MemberPenalty[];
+}
+
+// Render an ISO 8601 UTC timestamp in the browser's locale. Used for the
+// "date issued", "reversed at" etc. columns AND for the timestamps embedded
+// inside the narration (see `renderNarrationWithLocalDates` below).
+const formatIsoInBrowserLocale = (iso: string | null | undefined, withTime: boolean): string => {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    if (withTime) {
+      return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    }
+    return d.toLocaleDateString(undefined, { dateStyle: 'medium' });
+  } catch {
+    return iso;
+  }
+};
+
+// Detect ISO 8601 date/datetime tokens inside a narration string and swap
+// them for browser-locale-formatted equivalents. Keeps the surrounding
+// English text intact so the "why was this charged" sentence stays
+// readable, just with the timestamps auto-translated to the reader's
+// timezone / regional format.
+const renderNarrationWithLocalDates = (text: string | null | undefined): string => {
+  if (!text) return '';
+  // Match full UTC datetimes (2026-06-27T05:12:00Z) first — with `Z` — so
+  // the date-only fallback doesn't strip the time portion.
+  let out = text.replace(/\b(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})Z\b/g, (m) =>
+    formatIsoInBrowserLocale(m, true)
+  );
+  // Then bare YYYY-MM-DD dates (period_start / period_end).
+  out = out.replace(/\b(\d{4}-\d{2}-\d{2})\b(?!T)/g, (m) => formatIsoInBrowserLocale(m, false));
+  return out;
+};
+
 export default function ComplianceDashboard() {
   const { user } = useAuth();
   const router = useRouter();
@@ -64,6 +132,15 @@ export default function ComplianceDashboard() {
   const [reversingId, setReversingId] = useState<string | null>(null);
   const [reversalReason, setReversalReason] = useState('');
 
+  // Per-member penalty audit — the "why was this charged" view. State lives
+  // separate from the create-penalty picker so the officer can be looking at
+  // one member's audit while considering issuing a penalty to another.
+  const [auditMemberSearch, setAuditMemberSearch] = useState('');
+  const [auditMemberId, setAuditMemberId] = useState('');
+  const [auditData, setAuditData] = useState<MemberPenaltyAudit | null>(null);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState('');
+
   useEffect(() => {
     loadPenaltyTypes();
     loadMembers();
@@ -88,6 +165,26 @@ export default function ComplianceDashboard() {
   const loadApprovedPenalties = async () => {
     const res = await api.get<ApprovedPenalty[]>('/api/compliance/penalties/approved');
     if (res.data) setApprovedPenalties(res.data);
+  };
+
+  const loadMemberPenaltyAudit = async (memberId: string) => {
+    if (!memberId) {
+      setAuditData(null);
+      setAuditError('');
+      return;
+    }
+    setAuditLoading(true);
+    setAuditError('');
+    try {
+      const res = await api.get<MemberPenaltyAudit>(`/api/compliance/members/${memberId}/penalties`);
+      if (res.data) {
+        setAuditData(res.data);
+      } else {
+        setAuditError(res.error || 'Failed to load penalties for this member.');
+      }
+    } finally {
+      setAuditLoading(false);
+    }
   };
 
   const handleRequestReversal = async () => {
@@ -554,6 +651,179 @@ export default function ComplianceDashboard() {
               Create Penalty (Pending Treasurer Approval)
             </button>
           </form>
+        </div>
+
+        {/* Per-member penalty audit — the "why was this charged" view.
+            Every penalty for the picked member is listed with the full
+            narration and browser-locale timestamps so the officer can
+            justify (or reverse) each charge without cross-referencing
+            other records. */}
+        <div className="card mt-6">
+          <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-4 md:mb-6 gap-3">
+            <div>
+              <h2 className="text-xl md:text-2xl font-bold text-blue-900">Member Penalty Audit</h2>
+              <p className="text-sm text-blue-600 mt-1">
+                Pick a member to see every penalty charged to them, why it was charged, and the current status.
+                Times shown in your local timezone.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+            <div>
+              <label className="block text-sm md:text-base font-semibold text-blue-900 mb-2">
+                Filter members
+              </label>
+              <input
+                type="text"
+                value={auditMemberSearch}
+                onChange={(e) => setAuditMemberSearch(e.target.value)}
+                placeholder="Filter by first name or last name"
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="block text-sm md:text-base font-semibold text-blue-900 mb-2">
+                Member
+              </label>
+              <select
+                value={auditMemberId}
+                onChange={(e) => {
+                  setAuditMemberId(e.target.value);
+                  loadMemberPenaltyAudit(e.target.value);
+                }}
+                className="w-full"
+              >
+                <option value="">Pick a member…</option>
+                {members
+                  .filter((m) => {
+                    const q = auditMemberSearch.trim().toLowerCase();
+                    if (!q) return true;
+                    const fn = (m.user?.first_name || '').toLowerCase();
+                    const ln = (m.user?.last_name || '').toLowerCase();
+                    return fn.includes(q) || ln.includes(q);
+                  })
+                  .map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {getMemberDisplayName(member)} {member.user?.email ? `(${member.user.email})` : ''}
+                    </option>
+                  ))}
+              </select>
+            </div>
+          </div>
+
+          {auditError && (
+            <p className="text-sm text-red-800 bg-red-50 border border-red-300 rounded px-3 py-2 mb-3">
+              {auditError}
+            </p>
+          )}
+
+          {auditLoading && (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
+              <p className="mt-3 text-blue-700 text-sm">Loading penalties…</p>
+            </div>
+          )}
+
+          {!auditLoading && auditData && (
+            <>
+              {/* Summary strip */}
+              <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4">
+                <div className="p-2 bg-gray-50 border border-gray-200 rounded-lg text-center">
+                  <p className="text-[10px] text-gray-600 uppercase">Total</p>
+                  <p className="text-base font-bold text-gray-900">{auditData.summary.total_count}</p>
+                </div>
+                <div className="p-2 bg-yellow-50 border border-yellow-200 rounded-lg text-center">
+                  <p className="text-[10px] text-yellow-700 uppercase">Pending</p>
+                  <p className="text-base font-bold text-yellow-900">{auditData.summary.pending_count}</p>
+                </div>
+                <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg text-center">
+                  <p className="text-[10px] text-blue-700 uppercase">Approved</p>
+                  <p className="text-base font-bold text-blue-900">{auditData.summary.approved_count}</p>
+                </div>
+                <div className="p-2 bg-orange-50 border border-orange-200 rounded-lg text-center">
+                  <p className="text-[10px] text-orange-700 uppercase">Rev. pending</p>
+                  <p className="text-base font-bold text-orange-900">{auditData.summary.reversal_pending_count}</p>
+                </div>
+                <div className="p-2 bg-green-50 border border-green-200 rounded-lg text-center">
+                  <p className="text-[10px] text-green-700 uppercase">Paid</p>
+                  <p className="text-base font-bold text-green-900">{auditData.summary.paid_count}</p>
+                </div>
+                <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-center">
+                  <p className="text-[10px] text-red-700 uppercase">Reversed</p>
+                  <p className="text-base font-bold text-red-900">{auditData.summary.reversed_count}</p>
+                </div>
+              </div>
+              <p className="text-xs text-blue-700 mb-4">
+                Total exposure (approved + reversal-pending + paid): <strong>K{auditData.summary.total_approved_fee.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+              </p>
+
+              {auditData.penalties.length === 0 ? (
+                <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded p-3">
+                  No penalties on record for this member.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {auditData.penalties.map((p) => {
+                    const statusStyle = (() => {
+                      switch (p.status) {
+                        case 'approved':          return 'bg-blue-100 text-blue-800 border-blue-300';
+                        case 'reversal_pending':  return 'bg-orange-100 text-orange-800 border-orange-300';
+                        case 'reversed':          return 'bg-red-100 text-red-800 border-red-300';
+                        case 'paid':              return 'bg-green-100 text-green-800 border-green-300';
+                        case 'pending':           return 'bg-yellow-100 text-yellow-800 border-yellow-300';
+                        default:                  return 'bg-gray-100 text-gray-800 border-gray-300';
+                      }
+                    })();
+                    return (
+                      <div key={p.id} className="bg-white border-2 border-blue-100 rounded-lg p-3 md:p-4">
+                        <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                          <div>
+                            <h3 className="font-bold text-blue-900">{p.penalty_type_name}</h3>
+                            <p className="text-xs text-blue-700">
+                              K{p.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              {' · issued '}{formatIsoInBrowserLocale(p.date_issued, true)}
+                              {p.created_by_name ? <> {' · by '}{p.created_by_name}</> : null}
+                            </p>
+                          </div>
+                          <span className={`px-2 py-0.5 text-xs font-semibold rounded border ${statusStyle}`}>
+                            {p.status.replace(/_/g, ' ')}
+                          </span>
+                        </div>
+                        {p.notes && (
+                          <p className="mt-2 text-sm text-blue-900 bg-blue-50 border border-blue-200 rounded px-3 py-2 whitespace-pre-wrap">
+                            {renderNarrationWithLocalDates(p.notes)}
+                          </p>
+                        )}
+                        {(p.approved_at || p.reversal_requested_at || p.reversed_at || p.reversal_reason) && (
+                          <div className="mt-2 text-[11px] text-blue-700 space-y-0.5">
+                            {p.approved_at && (
+                              <div>Approved by treasurer at <strong>{formatIsoInBrowserLocale(p.approved_at, true)}</strong>.</div>
+                            )}
+                            {p.reversal_requested_at && (
+                              <div>
+                                Reversal requested by {p.reversal_requested_by_name || 'compliance'} at{' '}
+                                <strong>{formatIsoInBrowserLocale(p.reversal_requested_at, true)}</strong>.
+                              </div>
+                            )}
+                            {p.reversal_reason && (
+                              <div>Reversal reason: <em>{p.reversal_reason}</em></div>
+                            )}
+                            {p.reversed_at && (
+                              <div>
+                                Reversed by {p.reversed_by_name || 'treasurer'} at{' '}
+                                <strong>{formatIsoInBrowserLocale(p.reversed_at, true)}</strong>.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
         </div>
         </>)}
 

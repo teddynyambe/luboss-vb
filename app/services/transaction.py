@@ -47,13 +47,122 @@ def is_cycle_defined_penalty_type(penalty_type_name: str) -> bool:
 
 def get_system_user_id(db: Session) -> Optional[UUID]:
     """Get a system user ID (admin) for system-generated records.
-    
+
     Returns the first admin user ID, or None if no admin exists.
     This is used for system-generated penalty records where created_by is required.
     """
     from app.models.user import User, UserRoleEnum
     admin_user = db.query(User).filter(User.role == UserRoleEnum.ADMIN).first()
     return admin_user.id if admin_user else None
+
+
+def build_late_penalty_narration(
+    kind: str,
+    effective_month,
+    offending_at,
+    period_start=None,
+    period_end=None,
+    monthly_start_day=None,
+    monthly_end_day=None,
+) -> str:
+    """Rich audit narration written into PenaltyRecord.notes for cycle-defined
+    (auto-issued) late penalties.
+
+    The output is a single line (may be long) that captures:
+      * the penalty kind (keeps 'Late Declaration' / 'Late Deposits' /
+        'Late Loan Application' as the leading substring so existing
+        duplicate-check ILIKE queries still match)
+      * the effective month it belongs to (also kept as a substring so
+        duplicate-check queries by "%<month name>%" still match)
+      * the EXACT date+time the offending action landed
+      * how many days past the cutoff that was
+      * the missed window's start/end (dates when known, otherwise days)
+
+    A treasurer or compliance officer reading a penalty record should not
+    need to open any other record to justify or dispute the charge — it's
+    all there.
+
+    kind:
+        Must be one of "Late Declaration", "Late Deposits",
+        "Late Loan Application" (matches PenaltyType.name conventions).
+    effective_month:
+        Date (or datetime) identifying the reporting month the penalty
+        belongs to. Used purely for the human label; not the same as the
+        cutoff date.
+    offending_at:
+        Datetime the offending action actually took place — e.g.
+        `Declaration.created_at`, `LoanApplication.application_date`,
+        `DepositProof.uploaded_at`. Time-of-day is preserved.
+    period_start / period_end:
+        Optional exact date bounds of the missed window. When set, "days
+        late" is computed vs period_end.
+    monthly_start_day / monthly_end_day:
+        Fallbacks used only for wording when concrete dates aren't
+        available.
+    """
+    from datetime import datetime as _dt, date as _date
+
+    def _fmt_dt(v):
+        # Serialise as ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ'). The frontend
+        # detects this pattern and rewrites it to the browser's locale so a
+        # Zambian treasurer sees CAT while a US auditor sees CDT — the
+        # underlying record stays unambiguous either way.
+        if not v:
+            return "unknown time"
+        if isinstance(v, _dt):
+            return v.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return v.strftime("%Y-%m-%d")
+
+    def _fmt_date(v):
+        # Dates render as YYYY-MM-DD — same detection pattern lets the
+        # frontend format them in the browser's locale.
+        if not v:
+            return "unknown date"
+        if isinstance(v, _dt):
+            v = v.date()
+        return v.strftime("%Y-%m-%d")
+
+    if isinstance(effective_month, _dt):
+        effective_month = effective_month.date()
+    month_label = effective_month.strftime("%B %Y") if effective_month else "unknown month"
+
+    action_label = {
+        "Late Declaration":       "Declaration",
+        "Late Deposits":          "Deposit proof",
+        "Late Deposit":           "Deposit proof",
+        "Late Loan Application":  "Loan application",
+    }.get(kind, "Action")
+
+    days_late = None
+    if offending_at and period_end:
+        try:
+            action_date = offending_at.date() if isinstance(offending_at, _dt) else offending_at
+            end_date = period_end.date() if isinstance(period_end, _dt) else period_end
+            delta = (action_date - end_date).days
+            if delta > 0:
+                days_late = delta
+        except Exception:
+            days_late = None
+
+    days_late_clause = ""
+    if days_late is not None:
+        days_late_clause = f", {days_late} day{'s' if days_late != 1 else ''} after the cutoff"
+
+    action_at_str = _fmt_dt(offending_at) if offending_at else "an unrecorded time"
+
+    if period_start and period_end:
+        window_clause = f" Allowed window: {_fmt_date(period_start)} to {_fmt_date(period_end)}."
+    elif period_end:
+        window_clause = f" Cutoff: {_fmt_date(period_end)}."
+    elif monthly_end_day:
+        window_clause = f" Cutoff: day {monthly_end_day} of the effective month."
+    else:
+        window_clause = ""
+
+    return (
+        f"{kind} for {month_label} — {action_label} was made on {action_at_str}"
+        f"{days_late_clause}.{window_clause}"
+    ).strip()
 
 
 def create_declaration(
@@ -343,13 +452,72 @@ def create_declaration(
                             if not penalty_income:
                                 logger.warning(f"PENALTY_INCOME account not found, cannot post late declaration penalty to ledger")
                             else:
+                                # Rich audit narration — captures the exact
+                                # timestamp of the offending action + the
+                                # window it missed so the treasurer can
+                                # justify or dispute later without cross-
+                                # referencing other records.
+                                _decl_start_day = getattr(declaration_phase, "monthly_start_day", None)
+                                _decl_start_date = None
+                                _decl_end_date = date_type(
+                                    effective_month.year,
+                                    effective_month.month,
+                                    min(monthly_end_day, 28),  # 28 = safe upper bound for all months
+                                )
+                                # Guard against monthly_end_day > actual days in month.
+                                try:
+                                    import calendar as _cal
+                                    _, _last_day = _cal.monthrange(effective_month.year, effective_month.month)
+                                    _decl_end_date = date_type(
+                                        effective_month.year,
+                                        effective_month.month,
+                                        min(monthly_end_day, _last_day),
+                                    )
+                                except Exception:
+                                    pass
+                                if _decl_start_day:
+                                    # Declaration windows typically start in the
+                                    # PRIOR month (e.g. 15 May → 25 Jun). If the
+                                    # start day > end day it must have wrapped
+                                    # back to the prior month.
+                                    if _decl_start_day > monthly_end_day:
+                                        _prev_month = effective_month.month - 1 or 12
+                                        _prev_year = effective_month.year - (1 if effective_month.month == 1 else 0)
+                                        try:
+                                            import calendar as _cal
+                                            _, _prev_last = _cal.monthrange(_prev_year, _prev_month)
+                                            _decl_start_date = date_type(
+                                                _prev_year, _prev_month, min(_decl_start_day, _prev_last),
+                                            )
+                                        except Exception:
+                                            _decl_start_date = None
+                                    else:
+                                        try:
+                                            _decl_start_date = date_type(
+                                                effective_month.year,
+                                                effective_month.month,
+                                                _decl_start_day,
+                                            )
+                                        except Exception:
+                                            _decl_start_date = None
+                                _decl_offending_at = getattr(declaration, "created_at", None) or datetime.utcnow()
+                                _narration = build_late_penalty_narration(
+                                    kind="Late Declaration",
+                                    effective_month=effective_month,
+                                    offending_at=_decl_offending_at,
+                                    period_start=_decl_start_date,
+                                    period_end=_decl_end_date,
+                                    monthly_start_day=_decl_start_day,
+                                    monthly_end_day=monthly_end_day,
+                                )
+
                                 # Create PenaltyRecord with APPROVED status (cycle-defined penalties are auto-approved)
                                 late_penalty = PenaltyRecord(
                                     member_id=member_id,
                                     penalty_type_id=penalty_type_id,
                                     status=PenaltyRecordStatus.APPROVED.value,  # Use .value to ensure lowercase string is sent
                                     created_by=system_user_id,  # Use admin user for system-generated penalties
-                                    notes=f"Late Declaration - Declaration made after day {monthly_end_day} of {effective_month.strftime('%B %Y')} (Declaration period ends on day {monthly_end_day})"
+                                    notes=_narration,
                                 )
                                 db.add(late_penalty)
                                 db.flush()
