@@ -687,10 +687,64 @@ def get_my_penalties(
             "is_reconciliation_penalty": is_reconciliation_penalty,
         })
 
+    # Ghost declared penalties — same diagnostic the compliance dashboard
+    # shows, scoped to the caller. Any month where declared_penalties on
+    # the member's Declaration exceeds the sum of matching live
+    # PenaltyRecord fees for that effective month.
+    from app.models.transaction import Declaration, DeclarationStatus
+    from datetime import date as _date
+
+    ghosts: list[dict] = []
+    live_pen_statuses = {
+        PenaltyRecordStatus.APPROVED.value,
+        PenaltyRecordStatus.PAID.value,
+        PenaltyRecordStatus.REVERSAL_PENDING.value,
+        PenaltyRecordStatus.PENDING.value,
+    }
+    live_by_month: dict = {}
+    for p in penalties:
+        status_val = p.status.value if isinstance(p.status, PenaltyRecordStatus) else p.status
+        if status_val not in live_pen_statuses:
+            continue
+        eff = _extract_effective_month_from_notes(p.notes or "") if p.notes else None
+        if not eff and p.date_issued:
+            eff = _date(p.date_issued.year, p.date_issued.month, 1)
+        if not eff:
+            continue
+        key = (eff.year, eff.month)
+        fee = float(p.penalty_type.fee_amount) if p.penalty_type and p.penalty_type.fee_amount else 0.0
+        live_by_month[key] = live_by_month.get(key, 0.0) + fee
+
+    decls = (
+        db.query(Declaration)
+        .filter(
+            Declaration.member_id == member_profile.id,
+            Declaration.status == DeclarationStatus.APPROVED,
+            Declaration.declared_penalties > 0,
+        )
+        .order_by(Declaration.effective_month.asc())
+        .all()
+    )
+    for d in decls:
+        declared = float(d.declared_penalties or 0)
+        if declared <= 0:
+            continue
+        key = (d.effective_month.year, d.effective_month.month)
+        matched = live_by_month.get(key, 0.0)
+        gap = round(declared - matched, 2)
+        if gap > 0.01:
+            ghosts.append({
+                "effective_month": d.effective_month.isoformat(),
+                "declared": declared,
+                "matched_records": matched,
+                "ghost_amount": gap,
+            })
+
     return {
         "member_id": str(member_profile.id),
         "summary": summary,
         "penalties": rows,
+        "ghost_declared_penalties": ghosts,
     }
 
 

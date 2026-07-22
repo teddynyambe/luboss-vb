@@ -61,6 +61,13 @@ interface MemberPenalty {
   is_reconciliation_penalty?: boolean;
 }
 
+interface GhostDeclaredPenalty {
+  effective_month: string;
+  declared: number;
+  matched_records: number;
+  ghost_amount: number;
+}
+
 interface MemberPenaltyAudit {
   member_id: string;
   member_name: string;
@@ -74,6 +81,7 @@ interface MemberPenaltyAudit {
     total_approved_fee: number;
   };
   penalties: MemberPenalty[];
+  ghost_declared_penalties?: GhostDeclaredPenalty[];
 }
 
 // Render an ISO 8601 UTC timestamp in the browser's locale. Used for the
@@ -985,6 +993,51 @@ export default function ComplianceDashboard() {
               <p className="text-xs text-blue-700 mb-4">
                 Total exposure (approved + reversal-pending + paid): <strong>K{auditData.summary.total_approved_fee.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
               </p>
+
+              {/* Ghost declared penalties — months where the member's
+                  declaration form has a `declared_penalties` figure that
+                  is larger than the sum of matching PenaltyRecord fees
+                  for that same effective month. The K amount still
+                  credited PENALTIES_PAYABLE on the ledger, but there's
+                  no per-month audit record for it — usually because a
+                  member self-declared K50 in penalties without a
+                  corresponding auto-issued record, or FIFO matched the
+                  declared amount to an older PENDING record from a
+                  different month. */}
+              {(auditData.ghost_declared_penalties?.length ?? 0) > 0 && (
+                <div className="mb-4 p-3 bg-amber-50 border-2 border-amber-300 rounded-lg">
+                  <p className="text-xs font-bold text-amber-900 mb-1">
+                    ⚠ Ghost declared penalties
+                  </p>
+                  <p className="text-[11px] text-amber-800 mb-2">
+                    These months show a K amount declared under &quot;Penalties&quot; on the member&apos;s
+                    declaration form that doesn&apos;t correspond to any live PenaltyRecord for that
+                    month. The declared K credited PENALTIES_PAYABLE but there&apos;s no per-month
+                    audit trail. Common causes: member self-declared without a matching auto-issued
+                    record, or FIFO matched the K to an older PENDING record from a different
+                    month.
+                  </p>
+                  <div className="space-y-1">
+                    {auditData.ghost_declared_penalties!.map((g) => {
+                      const mLabel = new Date(g.effective_month + 'T00:00:00').toLocaleDateString(
+                        undefined,
+                        { year: 'numeric', month: 'long' },
+                      );
+                      return (
+                        <div key={g.effective_month} className="text-[11px] text-amber-900 flex justify-between">
+                          <span><strong>{mLabel}</strong></span>
+                          <span>
+                            Declared K{g.declared.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            {' · matched K'}{g.matched_records.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            {' · '}
+                            <strong>unmatched K{g.ghost_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               {auditData.penalties.length === 0 ? (
                 <p className="text-sm text-blue-700 bg-blue-50 border border-blue-200 rounded p-3">

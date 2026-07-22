@@ -70,6 +70,12 @@ export default function MemberDashboard() {
       reversed_at: string | null;
       is_reconciliation_penalty?: boolean;
     }[];
+    ghost_declared_penalties?: {
+      effective_month: string;
+      declared: number;
+      matched_records: number;
+      ghost_amount: number;
+    }[];
   } | null>(null);
   const [modalType, setModalType] = useState<'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null>(null);
   const [currentLoan, setCurrentLoan] = useState<any>(null);
@@ -582,6 +588,37 @@ export default function MemberDashboard() {
                     Total currently on your account (approved + reversal-pending + paid):{' '}
                     <strong>K{penaltyAudit.summary.total_owed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
                   </p>
+
+                  {(penaltyAudit.ghost_declared_penalties?.length ?? 0) > 0 && (
+                    <div className="p-3 bg-amber-50 border-2 border-amber-300 rounded-lg">
+                      <p className="text-xs font-bold text-amber-900 mb-1">⚠ Unmatched declared penalties</p>
+                      <p className="text-[11px] text-amber-800 mb-2">
+                        These months show a K amount you declared under &quot;Penalties&quot; that isn&apos;t backed
+                        by an official penalty record. The K did go through — it credited the group&apos;s
+                        penalties account — but there&apos;s no per-month audit trail for it. Ask the treasurer
+                        or compliance officer to clarify.
+                      </p>
+                      <div className="space-y-1">
+                        {penaltyAudit.ghost_declared_penalties!.map((g) => {
+                          const mLabel = new Date(g.effective_month + 'T00:00:00').toLocaleDateString(
+                            undefined,
+                            { year: 'numeric', month: 'long' },
+                          );
+                          return (
+                            <div key={g.effective_month} className="text-[11px] text-amber-900 flex justify-between">
+                              <span><strong>{mLabel}</strong></span>
+                              <span>
+                                Declared K{g.declared.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {' · matched K'}{g.matched_records.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                {' · '}
+                                <strong>unmatched K{g.ghost_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
 
                   {penaltyAudit.penalties.length === 0 ? (
                     <p className="text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded p-3">
