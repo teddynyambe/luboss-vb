@@ -508,7 +508,7 @@ def post_reverse_unexplained_all_members(
     """
     from app.services.transaction import reverse_unexplained_declared_penalties
     from app.core.audit import write_audit_log
-    from app.models.member import Member as _Member
+    from app.models.member import MemberProfile as _Member
 
     members = db.query(_Member).all()
     per_member: list[dict] = []
