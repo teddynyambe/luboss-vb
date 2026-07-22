@@ -299,6 +299,34 @@ export default function MemberStatementPage() {
                     row.deposited = (row.deposited ?? 0) + entry.amount;
                   }
                 }
+                // Fold penalty reversals into each month's postedItems so
+                // the Penalties/Savings lines render with the "declared →
+                // posted" strikethrough pattern already used by the split /
+                // reconciliation flows. For a K100 declared / K50 reversed
+                // month, Penalties goes K100 → K50 and Savings goes
+                // 2,000 → 2,050 (the reversed K50 landed in savings). The
+                // green "Penalty refunded to savings" line still renders
+                // for the explanatory reason.
+                for (const row of monthMap.values()) {
+                  if (row.penaltyReversalsInMonth.length === 0) continue;
+                  const reversedTotal = row.penaltyReversalsInMonth.reduce(
+                    (s, r) => s + (r.fee_amount || 0), 0,
+                  );
+                  if (reversedTotal <= 0) continue;
+                  const currentPenalty =
+                    row.postedItems?.penalty ??
+                    row.declarationItems?.penalties ??
+                    0;
+                  const currentSavings =
+                    row.postedItems?.savings ??
+                    row.declarationItems?.savings_amount ??
+                    0;
+                  row.postedItems = {
+                    ...(row.postedItems ?? {}),
+                    penalty: Math.max(0, currentPenalty - reversedTotal),
+                    savings: currentSavings + reversedTotal,
+                  };
+                }
                 const rows = Array.from(monthMap.values()).sort((a, b) => a.month.localeCompare(b.month));
                 const totalDeclared = rows.reduce((s, r) => {
                   if (!r.declarationItems) return s;
