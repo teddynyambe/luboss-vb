@@ -216,12 +216,16 @@ export default function ComplianceDashboard() {
     }
   };
 
-  const runBackfillNarrations = async (dryRun: boolean) => {
+  const runBackfillNarrations = async (dryRun: boolean, force: boolean = false) => {
     setBackfillLoading(true);
     setBackfillResult(null);
     try {
+      const params = new URLSearchParams({
+        dry_run: dryRun ? 'true' : 'false',
+        force: force ? 'true' : 'false',
+      });
       const res = await api.post<typeof backfillResult>(
-        `/api/compliance/penalties/backfill-narrations?dry_run=${dryRun ? 'true' : 'false'}`,
+        `/api/compliance/penalties/backfill-narrations?${params.toString()}`,
         {},
       );
       if (res.data) {
@@ -748,10 +752,10 @@ export default function ComplianceDashboard() {
                 to run more than once; records already carrying the rich
                 narration are skipped. Dry-run first to preview counts. */}
             <div className="flex flex-col items-end gap-1">
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => runBackfillNarrations(true)}
+                  onClick={() => runBackfillNarrations(true, false)}
                   disabled={backfillLoading}
                   className="px-3 py-1.5 border-2 border-blue-300 text-blue-700 rounded-lg text-xs font-semibold hover:bg-blue-50 disabled:opacity-50"
                 >
@@ -759,12 +763,21 @@ export default function ComplianceDashboard() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => runBackfillNarrations(false)}
+                  onClick={() => runBackfillNarrations(false, false)}
                   disabled={backfillLoading}
                   className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
-                  title="Rewrite legacy penalty notes with the actual offending timestamp + missed-window audit line"
+                  title="Rewrite legacy penalty notes with the actual offending timestamp + missed-window audit line. Skips records that already have a rich narration."
                 >
                   {backfillLoading ? 'Working…' : 'Rewrite legacy narrations'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runBackfillNarrations(false, true)}
+                  disabled={backfillLoading}
+                  className="px-3 py-1.5 border-2 border-purple-300 text-purple-700 rounded-lg text-xs font-semibold hover:bg-purple-50 disabled:opacity-50"
+                  title="Force-rewrite EVERY cycle-defined penalty, even ones already carrying a rich narration. Use after an extractor fix to heal records the previous run mis-tagged."
+                >
+                  {backfillLoading ? 'Working…' : 'Force re-rewrite all'}
                 </button>
               </div>
               {backfillResult && (

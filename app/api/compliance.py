@@ -421,6 +421,7 @@ def post_reverse_reconciliation_penalties(
 @router.post("/penalties/backfill-narrations")
 def post_backfill_penalty_narrations(
     dry_run: bool = False,
+    force: bool = False,
     current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
     db: Session = Depends(get_db),
 ):
@@ -431,18 +432,28 @@ def post_backfill_penalty_narrations(
 
     Optional ``?dry_run=true`` runs the pass without committing so you can
     preview the counts before applying.
+
+    Optional ``?force=true`` overrides idempotency and rewrites every
+    cycle-defined record, even ones that already carry an ISO timestamp.
+    Use this after an extractor fix to heal records the previous run
+    mis-tagged (e.g. Late Deposits penalties written under the wrong
+    effective month).
     """
     from app.services.transaction import backfill_penalty_narrations
     from app.core.audit import write_audit_log
     try:
-        summary = backfill_penalty_narrations(db, dry_run=dry_run)
+        summary = backfill_penalty_narrations(db, dry_run=dry_run, force=force)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
 
     write_audit_log(
         user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
         user_role=current_user.role.value if current_user.role else "compliance",
-        action="Penalty narrations backfilled" + (" (dry-run)" if dry_run else ""),
+        action=(
+            "Penalty narrations backfilled"
+            + (" (dry-run)" if dry_run else "")
+            + (" (force)" if force else "")
+        ),
         details=(
             f"scanned={summary['scanned']} rewritten={summary['rewritten']} "
             f"skipped={summary['skipped']}"

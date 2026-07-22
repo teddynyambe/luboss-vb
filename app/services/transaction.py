@@ -227,35 +227,85 @@ _MONTH_NAME_RE = re.compile(
 )
 
 
+def _month_name_to_num() -> dict:
+    from calendar import month_name as _mn
+    return {mn.lower(): i for i, mn in enumerate(_mn) if mn}
+
+
+def _extract_all_months_from_notes(notes: str) -> list:
+    """Return a de-duplicated, chronologically-sorted list of every
+    `%B %Y` month reference found in ``notes``. Used by the backfill so
+    Late Deposits notes (which mention both the effective month AND the
+    cutoff month) resolve to the right one."""
+    if not notes:
+        return []
+    names = _month_name_to_num()
+    seen = set()
+    out = []
+    for m in _MONTH_NAME_RE.finditer(notes):
+        idx = names.get(m.group(1).lower())
+        if not idx:
+            continue
+        try:
+            d = date(int(m.group(2)), idx, 1)
+        except (TypeError, ValueError):
+            continue
+        if d in seen:
+            continue
+        seen.add(d)
+        out.append(d)
+    out.sort()
+    return out
+
+
 def _extract_effective_month_from_notes(notes: str) -> Optional[date]:
-    """Best-effort extraction of a `%B %Y` month name from a legacy penalty
-    notes string. Returns the first-of-month date, or None if nothing matches.
-    Used by the backfill so we don't misattribute a penalty when multiple
-    months appear in the same text (uses the first match)."""
+    """Best-effort extraction of the effective (declaration) month a
+    legacy penalty was issued for.
+
+    Rules:
+      * For Late Deposits notes ("… Deposit period: 1st of X to Nth of
+        Y"), the EARLIEST month is the declaration's effective month —
+        the later month is just the cutoff. Otherwise the first-mentioned
+        month is right for Late Declaration / Late Loan Application
+        (they only reference one month).
+      * Returns the first-of-month date, or None if no month can be
+        extracted.
+    """
     if not notes:
         return None
+    months = _extract_all_months_from_notes(notes)
+    if not months:
+        return None
+    lower = notes.lower()
+    if "late deposit" in lower:
+        # Earliest is the effective declaration month.
+        return months[0]
+    # Late Declaration / Late Loan Application — first mention is the
+    # one and only month.
     m = _MONTH_NAME_RE.search(notes)
     if not m:
-        return None
-    from calendar import month_name as _mn
-    month_names = {mn.lower(): i for i, mn in enumerate(_mn) if mn}
-    idx = month_names.get(m.group(1).lower())
+        return months[0]
+    names = _month_name_to_num()
+    idx = names.get(m.group(1).lower())
     if not idx:
-        return None
+        return months[0]
     try:
         return date(int(m.group(2)), idx, 1)
     except (TypeError, ValueError):
-        return None
+        return months[0]
 
 
-def rewrite_legacy_penalty_narration(db: Session, penalty) -> Optional[str]:
+def rewrite_legacy_penalty_narration(db: Session, penalty, force: bool = False) -> Optional[str]:
     """Rewrite a single PenaltyRecord's notes with the rich narration that
     includes the actual offending timestamp. Returns the new notes on
     success or None if the penalty isn't a cycle-defined type or the
     corresponding offending action can't be found.
 
-    Idempotent — a note that already contains an ISO 8601 UTC token is
-    left alone.
+    Idempotent by default — a note that already contains an ISO 8601 UTC
+    token is left alone. Pass ``force=True`` to overwrite anyway; use
+    this when an earlier backfill wrote the wrong effective month (e.g.
+    old Late-Deposits extractor picked June instead of May) and you
+    need to heal those records.
     """
     from app.models.transaction import (
         Declaration, DeclarationStatus,
@@ -285,8 +335,13 @@ def rewrite_legacy_penalty_narration(db: Session, penalty) -> Optional[str]:
         return None  # not a cycle-defined kind we know how to backfill
 
     # Skip if the note already carries an ISO timestamp — the rich
-    # narration has already been applied.
-    if penalty.notes and re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", penalty.notes):
+    # narration has already been applied. Overridden by force=True so a
+    # re-run after an extractor fix can heal previously-mis-tagged records.
+    if (
+        not force
+        and penalty.notes
+        and re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", penalty.notes)
+    ):
         return None
 
     effective_month = _extract_effective_month_from_notes(penalty.notes or "")
@@ -381,6 +436,23 @@ def rewrite_legacy_penalty_narration(db: Session, penalty) -> Optional[str]:
             _extract("year", Declaration.effective_month) == effective_month.year,
             _extract("month", Declaration.effective_month) == effective_month.month,
         ).order_by(DepositProof.uploaded_at.asc()).first()
+
+        # Second-attempt fallback: some historical DepositProofs may have
+        # a null declaration_id (older data) or the effective_month
+        # inference from notes was wrong. Look for any of THIS member's
+        # deposit proofs uploaded within a few days of the penalty being
+        # issued — auto-issue happens in the same request as upload, so
+        # the two timestamps are ≤ a few seconds apart in practice.
+        if deposit is None and penalty.date_issued:
+            from datetime import timedelta as _td
+            window_start = penalty.date_issued - _td(days=2)
+            window_end = penalty.date_issued + _td(days=2)
+            deposit = db.query(DepositProof).filter(
+                DepositProof.member_id == penalty.member_id,
+                DepositProof.uploaded_at >= window_start,
+                DepositProof.uploaded_at <= window_end,
+            ).order_by(DepositProof.uploaded_at.asc()).first()
+
         offending_at = getattr(deposit, "uploaded_at", None) if deposit else None
         cycle_id = deposit.cycle_id if deposit else None
         if cycle_id:
@@ -420,12 +492,19 @@ def rewrite_legacy_penalty_narration(db: Session, penalty) -> Optional[str]:
     return new_notes
 
 
-def backfill_penalty_narrations(db: Session, dry_run: bool = False) -> dict:
+def backfill_penalty_narrations(
+    db: Session, dry_run: bool = False, force: bool = False
+) -> dict:
     """Sweep every PenaltyRecord and rewrite legacy notes for cycle-defined
-    types. Idempotent — records already carrying an ISO 8601 UTC token in
-    their notes are skipped.
+    types. Idempotent by default — records already carrying an ISO 8601
+    UTC token in their notes are skipped.
 
-    Returns a summary: ``{scanned, rewritten, skipped, by_kind}``.
+    Pass ``force=True`` to rewrite EVERY cycle-defined record, even if it
+    already carries a rich narration. Use this after fixing an
+    extraction bug (e.g. wrong effective-month for Late Deposits) to heal
+    records the previous run left mis-tagged.
+
+    Returns a summary: ``{scanned, rewritten, skipped, by_kind, force}``.
     """
     from app.models.transaction import PenaltyRecord
 
@@ -437,7 +516,7 @@ def backfill_penalty_narrations(db: Session, dry_run: bool = False) -> dict:
     penalties = db.query(PenaltyRecord).all()
     for p in penalties:
         scanned += 1
-        new_notes = rewrite_legacy_penalty_narration(db, p)
+        new_notes = rewrite_legacy_penalty_narration(db, p, force=force)
         if new_notes is None:
             skipped += 1
             continue
@@ -460,6 +539,7 @@ def backfill_penalty_narrations(db: Session, dry_run: bool = False) -> dict:
         "skipped": skipped,
         "by_kind": by_kind,
         "dry_run": dry_run,
+        "force": force,
     }
 
 
