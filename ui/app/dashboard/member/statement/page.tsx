@@ -53,6 +53,10 @@ interface SavingsEntry {
   // Set when this row represents a reversed penalty being credited back
   // to the member's savings account (Dr PENALTY_INCOME / Cr MEM_SAV).
   is_penalty_reversal?: boolean;
+  // Data-correction refunds from the compliance "reverse unexplained"
+  // action. Not a reversal of a real charge, so it's rendered as a
+  // separate refund line WITHOUT reducing the row's Penalties posted.
+  is_unexplained_reversal?: boolean;
   penalty_type_name?: string;
   fee_amount?: number;
   reversal_reason?: string | null;
@@ -275,6 +279,7 @@ export default function MemberStatementPage() {
                     fee_amount: number;
                     reversal_reason: string | null;
                     reversed_at: string | null;
+                    is_unexplained: boolean;
                   }[];
                 }>();
                 for (const entry of savingsHistory) {
@@ -307,22 +312,27 @@ export default function MemberStatementPage() {
                       fee_amount: entry.fee_amount || entry.amount || 0,
                       reversal_reason: entry.reversal_reason ?? null,
                       reversed_at: entry.reversed_at ?? entry.date,
+                      is_unexplained: !!entry.is_unexplained_reversal,
                     });
                   } else {
                     row.deposited = (row.deposited ?? 0) + entry.amount;
                   }
                 }
-                // Fold penalty reversals into each month's postedItems so
-                // the Penalties/Savings lines render with the "declared →
-                // posted" strikethrough pattern already used by the split /
-                // reconciliation flows. For a K100 declared / K50 reversed
-                // month, Penalties goes K100 → K50 and Savings goes
-                // 2,000 → 2,050 (the reversed K50 landed in savings). The
-                // green "Penalty refunded to savings" line still renders
-                // for the explanatory reason.
+                // Fold ONLY genuine penalty reversals (a real PenaltyRecord
+                // was reversed) into each month's postedItems so the
+                // Penalties/Savings lines render with the "declared →
+                // posted" strikethrough pattern. Unexplained data-correction
+                // refunds are excluded here — the underlying charge they
+                // partially reduce is still a real charge that should keep
+                // counting toward the row's posted penalty. Those still
+                // appear below as a "Refunded to savings" line but leave
+                // the row's Penalties figure alone.
                 for (const row of monthMap.values()) {
                   if (row.penaltyReversalsInMonth.length === 0) continue;
-                  const reversedTotal = row.penaltyReversalsInMonth.reduce(
+                  const realReversals = row.penaltyReversalsInMonth.filter(
+                    (r) => !r.is_unexplained,
+                  );
+                  const reversedTotal = realReversals.reduce(
                     (s, r) => s + (r.fee_amount || 0), 0,
                   );
                   if (reversedTotal <= 0) continue;

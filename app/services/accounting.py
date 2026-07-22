@@ -455,6 +455,14 @@ def compute_posted_breakdown(
             ym = _bucket_for_je(je)
             if ym is None or ym != (year, month):
                 continue
+            # Exclude unexplained-declared-penalty refund JEs from the
+            # posted-penalty figure so the row shows the *gross* penalty
+            # that actually hit the ledger (e.g. Emergency Loan K150),
+            # while the refund is rendered as a separate line elsewhere.
+            # Without this, a K150 gross - K50 refund would display as
+            # "K100 posted" and hide the real charge amount.
+            if category == "penalty" and je.source_type == "unexplained_penalty_reversal":
+                continue
             cred = Decimal(str(line.credit_amount or 0))
             deb = Decimal(str(line.debit_amount or 0))
             posted[category] += float(cred - deb)

@@ -3181,6 +3181,14 @@ def get_account_transactions(
                         "credit": _amt,
                         "amount": _amt,
                         "is_penalty_reversal": True,
+                        # Flag this as a data-correction refund (not a
+                        # reversal of a real penalty charge). The Statement
+                        # uses this to skip subtracting it from the row's
+                        # "Penalties posted" figure — the underlying
+                        # PenaltyRecord charge (e.g. Emergency Loan K150)
+                        # is real and should keep counting as posted; the
+                        # refund is shown separately as a refund line only.
+                        "is_unexplained_reversal": True,
                         "reversal_reason": _reason,
                         "penalty_type_name": "Unexplained declared penalty",
                         "fee_amount": _amt,
