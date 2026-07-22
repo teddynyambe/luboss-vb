@@ -3016,16 +3016,27 @@ def get_account_transactions(
                 .all()
             )
             penalty_reversals_dto = []
+            from app.services.transaction import _extract_effective_month_from_notes
             for _p in _reversed_penalties:
                 _ptype = _p.penalty_type
                 _fee = float(_ptype.fee_amount) if _ptype and _ptype.fee_amount is not None else 0.0
                 _pname = (_ptype.name if _ptype else "") or "Penalty"
                 if _fee <= 0:
                     continue
-                # Reversal effective_date defaults to when it was reversed;
-                # falls back to when it was issued (for pre-reversed_at data).
-                _ref_dt = _p.reversed_at or _p.date_issued
-                _iso = _ref_dt.isoformat() if _ref_dt else None
+                # Bucket the reversal under the ORIGINAL penalty's effective
+                # month (extracted from the notes narration), not the date
+                # it was reversed on. Members expect to see the "refund"
+                # attached to the month the penalty was for — e.g. a Late
+                # Deposit for December that was reversed in July should show
+                # under December's row on the statement, not July's.
+                # Falls back to when it was reversed (for pre-narration data
+                # where the effective month can't be parsed).
+                _eff = _extract_effective_month_from_notes(_p.notes or "")
+                if _eff:
+                    _iso = _eff.isoformat()
+                else:
+                    _ref_dt = _p.reversed_at or _p.date_issued
+                    _iso = _ref_dt.isoformat() if _ref_dt else None
                 # Push as a transaction so the monthly table can render it.
                 transactions.append({
                     "id": f"penalty_reversal_{_p.id}",

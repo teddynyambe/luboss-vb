@@ -582,21 +582,28 @@ export default function MemberStatementPage() {
                 },
                 { savings: 0, social_fund: 0, admin_fund: 0, penalties: 0 }
               );
-              // Prefer live balances from the backend when available so the
-              // Contribution Summary matches exactly what the member sees on
-              // their Account Status card and Penalty Audit modal. Falls
-              // back to declared totals only when the backend didn't ship
-              // the live_balances field (older backends, or query errors).
+              // Tile sources:
+              //   * Savings  — live ledger balance (matches Account Status
+              //     card exactly; already reflects any penalty-reversal
+              //     credits that hit MEM_SAV).
+              //   * Penalties — live PenaltyRecord total (matches Audit
+              //     modal; only counts approved / paid / reversal-pending).
+              //   * Social Fund / Admin Fund — sum of DECLARED amounts
+              //     across all months (their `_balance` helpers return
+              //     "balance due" not "amount contributed", which showed
+              //     K0 for members who had paid up).
               const totalReversedPenalties = penaltyReversals.reduce(
                 (s, r) => s + (r.fee_amount || 0), 0,
               );
               if (liveBalances) {
                 totals.savings = liveBalances.savings;
-                totals.social_fund = liveBalances.social_fund;
-                totals.admin_fund = liveBalances.admin_fund;
                 totals.penalties = liveBalances.penalties;
+                // Deliberately do NOT overwrite social_fund / admin_fund —
+                // the declared-sum from the loop above is the right figure
+                // for "how much the member contributed".
               } else {
-                // Legacy fallback: adjust declared totals by reversals.
+                // Legacy fallback for older backends: mirror the ledger
+                // effect of reversals on the declared totals.
                 totals.savings += totalReversedPenalties;
                 totals.penalties = Math.max(0, totals.penalties - totalReversedPenalties);
               }
