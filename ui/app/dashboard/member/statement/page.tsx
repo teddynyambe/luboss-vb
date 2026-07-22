@@ -50,6 +50,23 @@ interface SavingsEntry {
   reconciliation_notes?: ReconciliationNote[];
   is_excess_transfer?: boolean;
   excess_source?: string; // "social_fund" | "admin_fund"
+  // Set when this row represents a reversed penalty being credited back
+  // to the member's savings account (Dr PENALTY_INCOME / Cr MEM_SAV).
+  is_penalty_reversal?: boolean;
+  penalty_type_name?: string;
+  fee_amount?: number;
+  reversal_reason?: string | null;
+  reversed_at?: string | null;
+  original_date_issued?: string | null;
+}
+
+interface PenaltyReversal {
+  id: string;
+  penalty_type_name: string;
+  fee_amount: number;
+  reversed_at: string | null;
+  reversal_reason: string | null;
+  original_date_issued: string | null;
 }
 
 interface RepaymentThisMonth {
@@ -74,6 +91,7 @@ interface MonthlyLoanBalance {
 export default function MemberStatementPage() {
   const [bankStatements, setBankStatements] = useState<BankStatementItem[]>([]);
   const [savingsHistory, setSavingsHistory] = useState<SavingsEntry[]>([]);
+  const [penaltyReversals, setPenaltyReversals] = useState<PenaltyReversal[]>([]);
   const [monthlyLoanBalances, setMonthlyLoanBalances] = useState<MonthlyLoanBalance[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -95,6 +113,7 @@ export default function MemberStatementPage() {
         type: string;
         transactions: SavingsEntry[];
         monthly_loan_balances?: MonthlyLoanBalance[];
+        penalty_reversals?: PenaltyReversal[];
       }>('/api/member/transactions?type=savings'),
     ]);
 
@@ -102,6 +121,7 @@ export default function MemberStatementPage() {
     if (savingsRes.data) {
       setSavingsHistory(savingsRes.data.transactions);
       setMonthlyLoanBalances(savingsRes.data.monthly_loan_balances || []);
+      setPenaltyReversals(savingsRes.data.penalty_reversals || []);
     }
     setLoading(false);
   };
@@ -223,6 +243,13 @@ export default function MemberStatementPage() {
                   hasDiscrepancy: boolean;
                   reconciliationNotes: ReconciliationNote[];
                   deposited: number | null;
+                  penaltyReversalsInMonth: {
+                    id: string;
+                    penalty_type_name: string;
+                    fee_amount: number;
+                    reversal_reason: string | null;
+                    reversed_at: string | null;
+                  }[];
                 }>();
                 for (const entry of savingsHistory) {
                   const key = entry.date.substring(0, 7); // "YYYY-MM"
@@ -234,6 +261,7 @@ export default function MemberStatementPage() {
                       hasDiscrepancy: false,
                       reconciliationNotes: [],
                       deposited: null,
+                      penaltyReversalsInMonth: [],
                     });
                   }
                   const row = monthMap.get(key)!;
@@ -242,6 +270,18 @@ export default function MemberStatementPage() {
                     row.postedItems = entry.posted_items ?? null;
                     row.hasDiscrepancy = !!entry.has_reconciliation_discrepancy;
                     row.reconciliationNotes = entry.reconciliation_notes ?? [];
+                  } else if (entry.is_penalty_reversal) {
+                    // Reversals are neither declarations nor deposits — track
+                    // them separately so we can render a clear "penalty
+                    // refunded" line in the month row without inflating the
+                    // Approved Deposit total.
+                    row.penaltyReversalsInMonth.push({
+                      id: entry.id,
+                      penalty_type_name: entry.penalty_type_name || 'Penalty',
+                      fee_amount: entry.fee_amount || entry.amount || 0,
+                      reversal_reason: entry.reversal_reason ?? null,
+                      reversed_at: entry.reversed_at ?? entry.date,
+                    });
                   } else {
                     row.deposited = (row.deposited ?? 0) + entry.amount;
                   }
@@ -386,30 +426,67 @@ export default function MemberStatementPage() {
                                       </div>
                                     );
                                   })()}
+                                  {/* Penalty reversals credited back to savings
+                                      in this month — each shows fee + reason so
+                                      the member sees the refund explicitly. */}
+                                  {row.penaltyReversalsInMonth.length > 0 && (
+                                    <div className="mt-1 pt-1 border-t border-emerald-200 text-[11px] text-emerald-800 space-y-0.5 leading-tight text-left">
+                                      <div className="font-semibold text-emerald-800">Penalty refunded to savings:</div>
+                                      {row.penaltyReversalsInMonth.map((pr) => (
+                                        <div key={pr.id} title={pr.reversal_reason ?? undefined}>
+                                          <span className="font-semibold">{pr.penalty_type_name}:</span>{' '}
+                                          +K{pr.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                          {pr.reversal_reason && (
+                                            <span className="ml-1 italic text-emerald-700">
+                                              — {pr.reversal_reason}
+                                            </span>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               ) : (() => {
                                 const bal = balanceByMonth.get(row.month.substring(0, 7));
                                 const reps = bal?.repayments_this_month ?? [];
-                                if (reps.length === 0) return '—';
+                                if (reps.length === 0 && row.penaltyReversalsInMonth.length === 0) return '—';
                                 return (
                                   <div className="text-[11px] text-blue-700 space-y-0.5 leading-tight text-left">
-                                    <div className="font-semibold text-blue-800">Posted to loans:</div>
-                                    {reps.map((r, i) => (
-                                      <div key={i} className={r.was_carved_out ? 'text-amber-700' : ''}>
-                                        <span className="font-semibold">{r.loan_label}:</span>{' '}
-                                        {r.principal > 0 && <span>P {fmt(r.principal)}</span>}
-                                        {r.principal > 0 && r.interest > 0 && <span> · </span>}
-                                        {r.interest > 0 && <span>I {fmt(r.interest)}</span>}
-                                        {r.was_carved_out && (
-                                          <span
-                                            className="ml-1 text-amber-700"
-                                            title={r.narration || 'Moved by treasurer'}
-                                          >
-                                            (moved by treasurer)
-                                          </span>
-                                        )}
+                                    {reps.length > 0 && (
+                                      <>
+                                        <div className="font-semibold text-blue-800">Posted to loans:</div>
+                                        {reps.map((r, i) => (
+                                          <div key={i} className={r.was_carved_out ? 'text-amber-700' : ''}>
+                                            <span className="font-semibold">{r.loan_label}:</span>{' '}
+                                            {r.principal > 0 && <span>P {fmt(r.principal)}</span>}
+                                            {r.principal > 0 && r.interest > 0 && <span> · </span>}
+                                            {r.interest > 0 && <span>I {fmt(r.interest)}</span>}
+                                            {r.was_carved_out && (
+                                              <span
+                                                className="ml-1 text-amber-700"
+                                                title={r.narration || 'Moved by treasurer'}
+                                              >
+                                                (moved by treasurer)
+                                              </span>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </>
+                                    )}
+                                    {row.penaltyReversalsInMonth.length > 0 && (
+                                      <div className={reps.length > 0 ? 'mt-1 pt-1 border-t border-emerald-200' : ''}>
+                                        <div className="font-semibold text-emerald-800">Penalty refunded to savings:</div>
+                                        {row.penaltyReversalsInMonth.map((pr) => (
+                                          <div key={pr.id} className="text-emerald-700" title={pr.reversal_reason ?? undefined}>
+                                            <span className="font-semibold">{pr.penalty_type_name}:</span>{' '}
+                                            +K{pr.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            {pr.reversal_reason && (
+                                              <span className="ml-1 italic">— {pr.reversal_reason}</span>
+                                            )}
+                                          </div>
+                                        ))}
                                       </div>
-                                    ))}
+                                    )}
                                   </div>
                                 );
                               })()}
@@ -492,6 +569,15 @@ export default function MemberStatementPage() {
                 },
                 { savings: 0, social_fund: 0, admin_fund: 0, penalties: 0 }
               );
+              // Apply penalty reversals: the reversed fee is refunded to the
+              // member's savings account (accounting: Dr PENALTY_INCOME /
+              // Cr MEM_SAV) so it should show up as savings-plus and reduce
+              // the effective penalties paid.
+              const totalReversedPenalties = penaltyReversals.reduce(
+                (s, r) => s + (r.fee_amount || 0), 0,
+              );
+              totals.savings += totalReversedPenalties;
+              totals.penalties = Math.max(0, totals.penalties - totalReversedPenalties);
               const fmtS = (n: number) =>
                 `K ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
               const grand = totals.savings + totals.social_fund + totals.admin_fund + totals.penalties;
@@ -503,6 +589,11 @@ export default function MemberStatementPage() {
                     <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-center">
                       <p className="text-xs font-semibold text-blue-500 uppercase tracking-wider mb-2">Savings</p>
                       <p className="text-base md:text-lg font-bold text-blue-900">{fmtS(totals.savings)}</p>
+                      {totalReversedPenalties > 0 && (
+                        <p className="text-[10px] text-emerald-700 mt-1">
+                          Includes {fmtS(totalReversedPenalties)} refunded from reversed penalties
+                        </p>
+                      )}
                     </div>
                     <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 text-center">
                       <p className="text-xs font-semibold text-indigo-500 uppercase tracking-wider mb-2">Social Fund</p>
@@ -515,6 +606,11 @@ export default function MemberStatementPage() {
                     <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center">
                       <p className="text-xs font-semibold text-red-500 uppercase tracking-wider mb-2">Penalties</p>
                       <p className="text-base md:text-lg font-bold text-red-900">{fmtS(totals.penalties)}</p>
+                      {totalReversedPenalties > 0 && (
+                        <p className="text-[10px] text-red-700 mt-1">
+                          Net after {fmtS(totalReversedPenalties)} reversed
+                        </p>
+                      )}
                     </div>
                   </div>
                   <div className="mt-5 pt-4 border-t-2 border-blue-200 flex justify-between items-center">

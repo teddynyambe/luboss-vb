@@ -2998,6 +2998,62 @@ def get_account_transactions(
             # Sort all transactions by date (most recent first)
             transactions.sort(key=lambda x: x["date"], reverse=True)
 
+            # -------------------------------------------------------------
+            # Penalty reversals — surface each one as a savings-side credit
+            # entry so the member sees the refund on their statement with a
+            # clear narration. Reversal accounting: Dr PENALTY_INCOME /
+            # Cr MEM_SAV — the fee amount lands back in the member's
+            # savings, so it's a genuine "Approved Deposit"-style credit
+            # from the member's point of view.
+            # -------------------------------------------------------------
+            from app.models.transaction import PenaltyRecord as _PR, PenaltyRecordStatus as _PRS, PenaltyType as _PT
+            _reversed_penalties = (
+                db.query(_PR)
+                .filter(
+                    _PR.member_id == member_profile.id,
+                    _PR.status == _PRS.REVERSED.value,
+                )
+                .all()
+            )
+            penalty_reversals_dto = []
+            for _p in _reversed_penalties:
+                _ptype = _p.penalty_type
+                _fee = float(_ptype.fee_amount) if _ptype and _ptype.fee_amount is not None else 0.0
+                _pname = (_ptype.name if _ptype else "") or "Penalty"
+                if _fee <= 0:
+                    continue
+                # Reversal effective_date defaults to when it was reversed;
+                # falls back to when it was issued (for pre-reversed_at data).
+                _ref_dt = _p.reversed_at or _p.date_issued
+                _iso = _ref_dt.isoformat() if _ref_dt else None
+                # Push as a transaction so the monthly table can render it.
+                transactions.append({
+                    "id": f"penalty_reversal_{_p.id}",
+                    "date": _iso or "",
+                    "description": (
+                        f"Penalty refund — {_pname} K{_fee:.2f} reversed"
+                    ),
+                    "debit": 0.0,
+                    "credit": _fee,
+                    "amount": _fee,
+                    "is_penalty_reversal": True,
+                    "reversal_reason": _p.reversal_reason,
+                    "penalty_type_name": _pname,
+                    "fee_amount": _fee,
+                    "reversed_at": _p.reversed_at.isoformat() if _p.reversed_at else None,
+                    "original_date_issued": _p.date_issued.isoformat() if _p.date_issued else None,
+                })
+                penalty_reversals_dto.append({
+                    "id": str(_p.id),
+                    "penalty_type_name": _pname,
+                    "fee_amount": _fee,
+                    "reversed_at": _p.reversed_at.isoformat() if _p.reversed_at else None,
+                    "reversal_reason": _p.reversal_reason,
+                    "original_date_issued": _p.date_issued.isoformat() if _p.date_issued else None,
+                })
+
+            transactions.sort(key=lambda x: x.get("date") or "", reverse=True)
+
         elif type == "penalties":
             from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType, Declaration, DeclarationStatus
             from app.models.cycle import Cycle, CyclePhase, PhaseType
@@ -3364,10 +3420,14 @@ def get_account_transactions(
         except Exception:
             monthly_loan_balances = []
 
+    # Also expose the aggregate penalty-reversals list so the statement's
+    # Contribution Summary can correctly subtract them from the total
+    # penalties paid and add them to the total savings credited.
     return {
         "type": type,
         "transactions": transactions,
         "monthly_loan_balances": monthly_loan_balances,
+        "penalty_reversals": penalty_reversals_dto if type == "savings" else [],
     }
 
 
