@@ -3588,11 +3588,56 @@ def get_account_transactions(
         except Exception:
             live_balances = None
 
+    # Per-month itemization of live PenaltyRecord charges so the
+    # statement can render "Penalty charges this month:" under each
+    # declaration row. Bucketing uses date_issued (the day the fee hit
+    # savings) so a fee auto-issued Jun 29 shows under June's row, and
+    # separately the member's July declaration matches it via the
+    # 1-month carry-back rule used elsewhere.
+    penalty_charges_dto: list[dict] = []
+    if type == "savings":
+        try:
+            from app.models.transaction import PenaltyRecord as _PRC, PenaltyRecordStatus as _PRCS
+            live_pen_statuses = {
+                _PRCS.APPROVED.value,
+                _PRCS.PAID.value,
+                _PRCS.REVERSAL_PENDING.value,
+                _PRCS.PENDING.value,
+            }
+            _prs = (
+                db.query(_PRC)
+                .filter(_PRC.member_id == member_profile.id)
+                .all()
+            )
+            for _pr in _prs:
+                _sv = _pr.status.value if isinstance(_pr.status, _PRCS) else _pr.status
+                if _sv not in live_pen_statuses:
+                    continue
+                if not _pr.date_issued:
+                    continue
+                _pt = _pr.penalty_type
+                _fee = float(_pt.fee_amount) if _pt and _pt.fee_amount else 0.0
+                if _fee <= 0:
+                    continue
+                _bucket = date(_pr.date_issued.year, _pr.date_issued.month, 1)
+                penalty_charges_dto.append({
+                    "id": str(_pr.id),
+                    "penalty_type_name": (_pt.name if _pt else "Penalty"),
+                    "fee_amount": _fee,
+                    "date_issued": _pr.date_issued.isoformat(),
+                    "effective_month": _bucket.isoformat(),
+                    "notes": _pr.notes or "",
+                    "status": _sv,
+                })
+        except Exception:
+            penalty_charges_dto = []
+
     return {
         "type": type,
         "transactions": transactions,
         "monthly_loan_balances": monthly_loan_balances,
         "penalty_reversals": penalty_reversals_dto if type == "savings" else [],
+        "penalty_charges": penalty_charges_dto,
         "live_balances": live_balances,
     }
 

@@ -69,6 +69,16 @@ interface PenaltyReversal {
   original_date_issued: string | null;
 }
 
+interface PenaltyCharge {
+  id: string;
+  penalty_type_name: string;
+  fee_amount: number;
+  date_issued: string;
+  effective_month: string; // YYYY-MM-01 — bucket month (= date_issued month)
+  notes: string;
+  status: string;
+}
+
 interface LiveBalances {
   savings: number;
   social_fund: number;
@@ -99,6 +109,7 @@ export default function MemberStatementPage() {
   const [bankStatements, setBankStatements] = useState<BankStatementItem[]>([]);
   const [savingsHistory, setSavingsHistory] = useState<SavingsEntry[]>([]);
   const [penaltyReversals, setPenaltyReversals] = useState<PenaltyReversal[]>([]);
+  const [penaltyCharges, setPenaltyCharges] = useState<PenaltyCharge[]>([]);
   // Live balances from the backend (same source as the member's Account
   // Status card and Penalty Audit modal). Used for the Contribution
   // Summary tiles so all three views agree on the numbers.
@@ -125,6 +136,7 @@ export default function MemberStatementPage() {
         transactions: SavingsEntry[];
         monthly_loan_balances?: MonthlyLoanBalance[];
         penalty_reversals?: PenaltyReversal[];
+        penalty_charges?: PenaltyCharge[];
         live_balances?: LiveBalances | null;
       }>('/api/member/transactions?type=savings'),
     ]);
@@ -134,6 +146,7 @@ export default function MemberStatementPage() {
       setSavingsHistory(savingsRes.data.transactions);
       setMonthlyLoanBalances(savingsRes.data.monthly_loan_balances || []);
       setPenaltyReversals(savingsRes.data.penalty_reversals || []);
+      setPenaltyCharges(savingsRes.data.penalty_charges || []);
       setLiveBalances(savingsRes.data.live_balances ?? null);
     }
     setLoading(false);
@@ -341,6 +354,40 @@ export default function MemberStatementPage() {
                 for (const b of monthlyLoanBalances) {
                   balanceByMonth.set(b.month.substring(0, 7), b);
                 }
+                // Live PenaltyRecord charges keyed by "YYYY-MM" (bucket by
+                // date_issued month) so each declaration row can list the
+                // individual charges that hit that month — e.g. an
+                // Emergency Loan fee auto-issued Jun 29 shows under June.
+                // If the exact month has no row (member had no declaration
+                // that month), roll the charge forward month-by-month until
+                // a row exists — otherwise the charge would be invisible on
+                // the statement even though it hit the ledger.
+                const availableRowMonths = new Set(
+                  Array.from(monthMap.keys()).map((k) => k.substring(0, 7)),
+                );
+                const chargesByMonth = new Map<string, PenaltyCharge[]>();
+                for (const c of penaltyCharges) {
+                  let key = c.effective_month.substring(0, 7);
+                  if (!availableRowMonths.has(key)) {
+                    // Roll forward up to 6 months looking for a row to attach to.
+                    let [yy, mm] = key.split('-').map(Number);
+                    let hopped = false;
+                    for (let i = 0; i < 6; i++) {
+                      mm += 1;
+                      if (mm > 12) { mm = 1; yy += 1; }
+                      const candidate = `${yy}-${String(mm).padStart(2, '0')}`;
+                      if (availableRowMonths.has(candidate)) {
+                        key = candidate;
+                        hopped = true;
+                        break;
+                      }
+                    }
+                    if (!hopped) continue; // no row within 6 months — skip
+                  }
+                  const arr = chargesByMonth.get(key) ?? [];
+                  arr.push(c);
+                  chargesByMonth.set(key, arr);
+                }
                 const hasAnyLoanActivity = monthlyLoanBalances.some(
                   (b) => b.loan_balance > 0 || b.interest_balance > 0 || b.loans_disbursed_this_month.length > 0,
                 );
@@ -460,6 +507,32 @@ export default function MemberStatementPage() {
                                                 title={r.narration || 'Moved by treasurer'}
                                               >
                                                 (moved by treasurer)
+                                              </span>
+                                            )}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    );
+                                  })()}
+                                  {/* Individual PenaltyRecord charges that hit
+                                      the member's savings in this month
+                                      (bucketed by date_issued). Lets the
+                                      member see e.g. "Emergency Loan K150"
+                                      itemized rather than just aggregated into
+                                      the Penalties row above. */}
+                                  {(() => {
+                                    const charges = chargesByMonth.get(row.month.substring(0, 7)) ?? [];
+                                    if (charges.length === 0) return null;
+                                    return (
+                                      <div className="mt-1 pt-1 border-t border-rose-200 text-[11px] text-rose-800 space-y-0.5 leading-tight text-left">
+                                        <div className="font-semibold text-rose-800">Penalty charges this month:</div>
+                                        {charges.map((c) => (
+                                          <div key={c.id} title={c.notes || undefined}>
+                                            <span className="font-semibold">{c.penalty_type_name}:</span>{' '}
+                                            K{c.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            {c.notes && (
+                                              <span className="ml-1 italic text-rose-700">
+                                                — {c.notes.length > 120 ? `${c.notes.slice(0, 120)}…` : c.notes}
                                               </span>
                                             )}
                                           </div>
