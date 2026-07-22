@@ -3009,12 +3009,66 @@ def get_account_transactions(
             
             from app.services.accounting import compute_posted_breakdown as _posted_bd
             from app.services.accounting import get_reconciliation_notes as _recon_notes
+
+            # -------------------------------------------------------------
+            # Precompute per-declaration "ghost" penalty amounts via the
+            # same greedy carry-back matcher used by the compliance audit.
+            # Each declaration's posted-penalty is then set to:
+            #     posted.penalty = declared_penalty - ghost
+            # so a fully-unexplained month (December K50 declared, no
+            # matching PenaltyRecord) shows K50 → K0 crossed, while a
+            # month backed by a real charge (July K150 with Emergency
+            # Loan K150) stays at K150 uncrossed.
+            # -------------------------------------------------------------
+            from app.models.transaction import PenaltyRecord as _PRG, PenaltyRecordStatus as _PRGS
+            from app.services.transaction import _extract_effective_month_from_notes as _eff_g
+            _live_pen_statuses_g = {
+                _PRGS.APPROVED.value, _PRGS.PAID.value,
+                _PRGS.REVERSAL_PENDING.value, _PRGS.PENDING.value,
+            }
+            _live_by_month_g: dict = {}
+            for _p in db.query(_PRG).filter(_PRG.member_id == member_profile.id).all():
+                _sv = _p.status.value if isinstance(_p.status, _PRGS) else _p.status
+                if _sv not in _live_pen_statuses_g:
+                    continue
+                _e = _eff_g(_p.notes or "") if _p.notes else None
+                if not _e and _p.date_issued:
+                    _e = date(_p.date_issued.year, _p.date_issued.month, 1)
+                if not _e:
+                    continue
+                _f = float(_p.penalty_type.fee_amount) if _p.penalty_type and _p.penalty_type.fee_amount else 0.0
+                _live_by_month_g[(_e.year, _e.month)] = _live_by_month_g.get((_e.year, _e.month), 0.0) + _f
+            # Ghost per declaration id — greedy consume with 1-month carry-back
+            # over declarations ordered ascending by effective_month.
+            _remaining_g = dict(_live_by_month_g)
+            _ghost_by_decl_id: dict = {}
+            for _d in sorted(
+                [d for d in declarations if float(d.declared_penalties or 0) > 0],
+                key=lambda x: x.effective_month,
+            ):
+                _decl = float(_d.declared_penalties or 0)
+                _kc = (_d.effective_month.year, _d.effective_month.month)
+                _kp = (_d.effective_month.year - 1, 12) if _d.effective_month.month == 1 else (_d.effective_month.year, _d.effective_month.month - 1)
+                _ac = _remaining_g.get(_kc, 0.0)
+                _ap = _remaining_g.get(_kp, 0.0)
+                _tc = min(_decl, _ac)
+                _tp = min(_decl - _tc, _ap)
+                _remaining_g[_kc] = _ac - _tc
+                _remaining_g[_kp] = _ap - _tp
+                _ghost_by_decl_id[_d.id] = max(0.0, round(_decl - (_tc + _tp), 2))
+
             for declaration in declarations:
                 posted_items = _posted_bd(
                     db, member_profile.id,
                     declaration.effective_month.year,
                     declaration.effective_month.month,
                 )
+                # Adjust penalty: posted = declared - ghost. Fully-ghost
+                # months show "declared → 0 posted"; partially-explained
+                # months show the amount actually backed by real charges.
+                _decl_pen = float(declaration.declared_penalties or 0)
+                _ghost = _ghost_by_decl_id.get(declaration.id, 0.0)
+                posted_items["penalty"] = max(0.0, _decl_pen - _ghost)
                 declared_items_chk = {
                     "savings": float(declaration.declared_savings_amount or 0),
                     "social_fund": float(declaration.declared_social_fund or 0),
