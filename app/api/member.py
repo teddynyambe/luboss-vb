@@ -725,18 +725,34 @@ def get_my_penalties(
         .order_by(Declaration.effective_month.asc())
         .all()
     )
+    # Greedy consume with 1-month carry-back: for each declaration, first
+    # consume live records with the same effective month, then any unclaimed
+    # leftovers from the previous month (handles fees issued near month-end
+    # that the member reasonably declares next month, e.g. Emergency Loan
+    # fees auto-issued Jun 29 and declared in the July declaration).
+    remaining_by_month = dict(live_by_month)
     for d in decls:
         declared = float(d.declared_penalties or 0)
         if declared <= 0:
             continue
-        key = (d.effective_month.year, d.effective_month.month)
-        matched = live_by_month.get(key, 0.0)
+        key_curr = (d.effective_month.year, d.effective_month.month)
+        if d.effective_month.month == 1:
+            key_prev = (d.effective_month.year - 1, 12)
+        else:
+            key_prev = (d.effective_month.year, d.effective_month.month - 1)
+        avail_curr = remaining_by_month.get(key_curr, 0.0)
+        avail_prev = remaining_by_month.get(key_prev, 0.0)
+        take_curr = min(declared, avail_curr)
+        take_prev = min(declared - take_curr, avail_prev)
+        remaining_by_month[key_curr] = avail_curr - take_curr
+        remaining_by_month[key_prev] = avail_prev - take_prev
+        matched = take_curr + take_prev
         gap = round(declared - matched, 2)
         if gap > 0.01:
             ghosts.append({
                 "effective_month": d.effective_month.isoformat(),
                 "declared": declared,
-                "matched_records": matched,
+                "matched_records": round(matched, 2),
                 "ghost_amount": gap,
             })
 
@@ -3077,20 +3093,13 @@ def get_account_transactions(
                 _pname = (_ptype.name if _ptype else "") or "Penalty"
                 if _fee <= 0:
                     continue
-                # Bucket the reversal under the ORIGINAL penalty's effective
-                # month (extracted from the notes narration), not the date
-                # it was reversed on. Members expect to see the "refund"
-                # attached to the month the penalty was for — e.g. a Late
-                # Deposit for December that was reversed in July should show
-                # under December's row on the statement, not July's.
-                # Falls back to when it was reversed (for pre-narration data
-                # where the effective month can't be parsed).
-                _eff = _extract_effective_month_from_notes(_p.notes or "")
-                if _eff:
-                    _iso = _eff.isoformat()
-                else:
-                    _ref_dt = _p.reversed_at or _p.date_issued
-                    _iso = _ref_dt.isoformat() if _ref_dt else None
+                # Bucket the reversal under the ORIGINAL penalty's
+                # date_issued month — that's the month the charge actually
+                # hit the member's savings, so the refund logically belongs
+                # to the same row. Falls back to reversed_at if date_issued
+                # is missing.
+                _ref_dt = _p.date_issued or _p.reversed_at
+                _iso = _ref_dt.isoformat() if _ref_dt else None
                 # Push as a transaction so the monthly table can render it.
                 transactions.append({
                     "id": f"penalty_reversal_{_p.id}",
@@ -3116,6 +3125,76 @@ def get_account_transactions(
                     "reversal_reason": _p.reversal_reason,
                     "original_date_issued": _p.date_issued.isoformat() if _p.date_issued else None,
                 })
+
+            # -------------------------------------------------------------
+            # Unexplained declared-penalty reversals — posted via the
+            # bulk compliance action. These have no PenaltyRecord; they
+            # exist only as JEs with source_type =
+            # "unexplained_penalty_reversal", source_ref = declaration id,
+            # dealing_month = declaration effective_month. Surface each
+            # as an `is_penalty_reversal` transaction bucketed under the
+            # declaration month, so the Statement's existing fold-into-row
+            # logic renders the strikethrough and "refunded to savings"
+            # line automatically.
+            # -------------------------------------------------------------
+            from app.models.ledger import JournalEntry as _JE2, JournalLine as _JL2
+            from app.models.transaction import Declaration as _D2
+            _savings_acc = db.query(LedgerAccount).filter(
+                LedgerAccount.member_id == member_profile.id,
+                LedgerAccount.account_name.ilike("%savings%"),
+            ).first()
+            if _savings_acc:
+                _unexp_lines = (
+                    db.query(_JL2)
+                    .join(_JE2, _JL2.journal_entry_id == _JE2.id)
+                    .filter(
+                        _JL2.ledger_account_id == _savings_acc.id,
+                        _JE2.source_type == "unexplained_penalty_reversal",
+                        _JE2.reversed_by.is_(None),
+                        _JL2.credit_amount > 0,
+                    )
+                    .all()
+                )
+                for _ln in _unexp_lines:
+                    _je = _ln.journal_entry
+                    _amt = float(_ln.credit_amount or 0)
+                    if _amt <= 0:
+                        continue
+                    # Bucket under the declaration's effective month
+                    # (dealing_month on the JE); fall back to entry_date.
+                    _bucket_dt = _je.dealing_month or _je.entry_date
+                    _iso = _bucket_dt.isoformat() if _bucket_dt else None
+                    _decl_month_str = (
+                        _bucket_dt.strftime("%B %Y") if _bucket_dt else ""
+                    )
+                    _reason = (
+                        f"No compliance record explained this K{_amt:.2f} on the "
+                        f"{_decl_month_str} declaration, so it was refunded to savings."
+                    )
+                    transactions.append({
+                        "id": f"unexplained_penalty_reversal_{_je.id}",
+                        "date": _iso or "",
+                        "description": (
+                            f"Unexplained penalty refund — K{_amt:.2f} returned to savings"
+                        ),
+                        "debit": 0.0,
+                        "credit": _amt,
+                        "amount": _amt,
+                        "is_penalty_reversal": True,
+                        "reversal_reason": _reason,
+                        "penalty_type_name": "Unexplained declared penalty",
+                        "fee_amount": _amt,
+                        "reversed_at": _je.entry_date.isoformat() if _je.entry_date else None,
+                        "original_date_issued": _iso,
+                    })
+                    penalty_reversals_dto.append({
+                        "id": f"unexplained_{_je.id}",
+                        "penalty_type_name": "Unexplained declared penalty",
+                        "fee_amount": _amt,
+                        "reversed_at": _je.entry_date.isoformat() if _je.entry_date else None,
+                        "reversal_reason": _reason,
+                        "original_date_issued": _iso,
+                    })
 
             transactions.sort(key=lambda x: x.get("date") or "", reverse=True)
 

@@ -758,6 +758,189 @@ def heal_double_cancelled_penalty_reversals(
     }
 
 
+def reverse_unexplained_declared_penalties(
+    db: Session,
+    member_id: UUID,
+    actor_user_id: UUID,
+    dry_run: bool = False,
+) -> dict:
+    """Refund every unexplained declared penalty back to the member's savings.
+
+    An "unexplained declared penalty" is a `Declaration.declared_penalties`
+    amount (on an APPROVED declaration) that exceeds the sum of live
+    PenaltyRecord fees plausibly attached to it (same effective month
+    plus a 1-month carry-back to catch fees issued near month-end that
+    the member declared in the following declaration). The gap credited
+    PENALTIES_PAYABLE on the ledger via `approve_deposit`, but there's
+    no per-month audit record explaining the charge.
+
+    For each ghost month with a non-zero gap this posts:
+        Dr PENALTIES_PAYABLE  (member)   ← undo the earlier credit
+        Cr MEM_SAV            (member)   ← refund to savings
+    with `source_type = "unexplained_penalty_reversal"` and
+    `source_ref = str(declaration_id)`. dealing_month = declaration
+    effective_month so it lands in the right statement bucket.
+
+    Idempotent per (member, effective_month): re-running skips months
+    already fully reversed by an earlier call, because the earlier
+    reversal JE credits PENALTIES_PAYABLE — which is a liability
+    account, but that JE is source_type='unexplained_penalty_reversal'
+    so we detect it by scanning existing reversal JEs by source_ref.
+    """
+    from app.models.ledger import JournalEntry, LedgerAccount, AccountType
+
+    if isinstance(member_id, str):
+        member_id = UUID(member_id)
+
+    savings_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%savings%"),
+    ).first()
+    penalties_account = db.query(LedgerAccount).filter(
+        LedgerAccount.member_id == member_id,
+        LedgerAccount.account_name.ilike("%penalties payable%"),
+    ).first()
+
+    result_base = {
+        "scanned_declarations": 0,
+        "reversed_months": 0,
+        "total_refunded": 0.0,
+        "reversed": [],
+        "skipped_already_reversed": 0,
+        "skipped_no_accounts": False,
+        "dry_run": dry_run,
+    }
+
+    if not savings_account or not penalties_account:
+        result_base["skipped_no_accounts"] = True
+        return result_base
+
+    # Compute ghosts the same way the audit endpoints do: greedy
+    # consume vs live PenaltyRecord fees, with 1-month carry-back.
+    reversible_statuses = {
+        PenaltyRecordStatus.APPROVED.value,
+        PenaltyRecordStatus.PAID.value,
+        PenaltyRecordStatus.REVERSAL_PENDING.value,
+        PenaltyRecordStatus.PENDING.value,
+    }
+    live_penalties = (
+        db.query(PenaltyRecord)
+        .filter(PenaltyRecord.member_id == member_id)
+        .all()
+    )
+    live_by_month: dict = {}
+    for p in live_penalties:
+        status_val = p.status.value if isinstance(p.status, PenaltyRecordStatus) else p.status
+        if status_val not in reversible_statuses:
+            continue
+        eff = _extract_effective_month_from_notes(p.notes or "") if p.notes else None
+        if not eff and p.date_issued:
+            eff = date(p.date_issued.year, p.date_issued.month, 1)
+        if not eff:
+            continue
+        fee = float(p.penalty_type.fee_amount) if p.penalty_type and p.penalty_type.fee_amount else 0.0
+        key = (eff.year, eff.month)
+        live_by_month[key] = live_by_month.get(key, 0.0) + fee
+
+    decls = (
+        db.query(Declaration)
+        .filter(
+            Declaration.member_id == member_id,
+            Declaration.status == DeclarationStatus.APPROVED,
+            Declaration.declared_penalties > 0,
+        )
+        .order_by(Declaration.effective_month.asc())
+        .all()
+    )
+    remaining_by_month = dict(live_by_month)
+    reversed_ids_this_run: list[str] = []
+    total_refunded = 0.0
+    scanned = 0
+
+    for d in decls:
+        scanned += 1
+        declared = float(d.declared_penalties or 0)
+        if declared <= 0:
+            continue
+        key_curr = (d.effective_month.year, d.effective_month.month)
+        if d.effective_month.month == 1:
+            key_prev = (d.effective_month.year - 1, 12)
+        else:
+            key_prev = (d.effective_month.year, d.effective_month.month - 1)
+        avail_curr = remaining_by_month.get(key_curr, 0.0)
+        avail_prev = remaining_by_month.get(key_prev, 0.0)
+        take_curr = min(declared, avail_curr)
+        take_prev = min(declared - take_curr, avail_prev)
+        remaining_by_month[key_curr] = avail_curr - take_curr
+        remaining_by_month[key_prev] = avail_prev - take_prev
+        gap = round(declared - (take_curr + take_prev), 2)
+        if gap <= 0.01:
+            continue
+
+        # Idempotency: skip if we've already posted a reversal JE for
+        # this declaration.
+        prior_rev = db.query(JournalEntry).filter(
+            JournalEntry.source_type == "unexplained_penalty_reversal",
+            JournalEntry.source_ref == str(d.id),
+            JournalEntry.reversed_by.is_(None),
+        ).first()
+        if prior_rev:
+            result_base["skipped_already_reversed"] += 1
+            continue
+
+        lines = [
+            {
+                "account_id": penalties_account.id,
+                "debit_amount": Decimal(str(gap)),
+                "credit_amount": Decimal("0.00"),
+                "description": (
+                    f"Reversal of unexplained declared penalty for "
+                    f"{d.effective_month.strftime('%B %Y')}"
+                ),
+            },
+            {
+                "account_id": savings_account.id,
+                "debit_amount": Decimal("0.00"),
+                "credit_amount": Decimal(str(gap)),
+                "description": (
+                    f"Refund of unexplained declared penalty for "
+                    f"{d.effective_month.strftime('%B %Y')} to savings"
+                ),
+            },
+        ]
+        create_journal_entry(
+            db=db,
+            description=(
+                f"Unexplained declared penalty reversal — K{gap:.2f} refunded "
+                f"to savings ({d.effective_month.strftime('%B %Y')})"
+            ),
+            lines=lines,
+            dealing_month=d.effective_month,
+            cycle_id=d.cycle_id,
+            source_ref=str(d.id),
+            source_type="unexplained_penalty_reversal",
+            created_by=actor_user_id,
+        )
+        reversed_ids_this_run.append(str(d.id))
+        total_refunded += gap
+        result_base["reversed"].append({
+            "declaration_id": str(d.id),
+            "effective_month": d.effective_month.isoformat(),
+            "refunded": gap,
+        })
+
+    result_base["scanned_declarations"] = scanned
+    result_base["reversed_months"] = len(reversed_ids_this_run)
+    result_base["total_refunded"] = round(total_refunded, 2)
+
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    return result_base
+
+
 def create_declaration(
     db: Session,
     member_id: UUID,

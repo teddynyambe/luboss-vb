@@ -591,12 +591,12 @@ export default function MemberDashboard() {
 
                   {(penaltyAudit.ghost_declared_penalties?.length ?? 0) > 0 && (
                     <div className="p-3 bg-amber-50 border-2 border-amber-300 rounded-lg">
-                      <p className="text-xs font-bold text-amber-900 mb-1">⚠ Unmatched declared penalties</p>
+                      <p className="text-xs font-bold text-amber-900 mb-1">⚠ Unexplained declared penalties</p>
                       <p className="text-[11px] text-amber-800 mb-2">
-                        These months show a K amount you declared under &quot;Penalties&quot; that isn&apos;t backed
-                        by an official penalty record. The K did go through — it credited the group&apos;s
-                        penalties account — but there&apos;s no per-month audit trail for it. Ask the treasurer
-                        or compliance officer to clarify.
+                        You paid these penalty amounts on your declaration, but the system doesn&apos;t have a
+                        record explaining <em>why</em> for those months. The money went through — it credited
+                        the group&apos;s penalties account — but there&apos;s no specific charge attached.
+                        Ask the treasurer or compliance officer to clarify or reverse if it was declared in error.
                       </p>
                       <div className="space-y-1">
                         {penaltyAudit.ghost_declared_penalties!.map((g) => {

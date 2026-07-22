@@ -416,18 +416,37 @@ def get_member_penalties(
         .order_by(Declaration.effective_month.asc())
         .all()
     )
+    # Greedy consume: for each declaration in month order, subtract
+    # matched amount from the declaration's month bucket first, then from
+    # unclaimed leftovers of the previous month. This handles fees issued
+    # near the end of a month (e.g. Emergency Loan fee issued Jun 29) that
+    # the member reasonably declares in the following month's declaration.
+    remaining_by_month = dict(live_by_month)
     for d in decls:
         declared = float(d.declared_penalties or 0)
         if declared <= 0:
             continue
-        key = (d.effective_month.year, d.effective_month.month)
-        matched = live_by_month.get(key, 0.0)
+        key_curr = (d.effective_month.year, d.effective_month.month)
+        # Previous calendar month (no dateutil dep — plain date math).
+        if d.effective_month.month == 1:
+            prev_y, prev_m = d.effective_month.year - 1, 12
+        else:
+            prev_y, prev_m = d.effective_month.year, d.effective_month.month - 1
+        key_prev = (prev_y, prev_m)
+        available_curr = remaining_by_month.get(key_curr, 0.0)
+        available_prev = remaining_by_month.get(key_prev, 0.0)
+        consume_curr = min(declared, available_curr)
+        remaining_after_curr = declared - consume_curr
+        consume_prev = min(remaining_after_curr, available_prev)
+        remaining_by_month[key_curr] = available_curr - consume_curr
+        remaining_by_month[key_prev] = available_prev - consume_prev
+        matched = consume_curr + consume_prev
         gap = round(declared - matched, 2)
         if gap > 0.01:
             ghosts.append({
                 "effective_month": d.effective_month.isoformat(),
                 "declared": declared,
-                "matched_records": matched,
+                "matched_records": round(matched, 2),
                 "ghost_amount": gap,
             })
 
@@ -471,6 +490,120 @@ def post_heal_double_cancelled_reversals(
             f"scanned={summary['scanned']} healed={summary['healed']} "
             f"skipped_no_mirror={summary['skipped_no_mirror']} "
             f"skipped_not_reversed={summary['skipped_not_reversed']}"
+        ),
+    )
+    return summary
+
+
+@router.post("/penalties/reverse-unexplained-all")
+def post_reverse_unexplained_all_members(
+    dry_run: bool = False,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Sweep every member and refund unexplained declared penalties to
+    savings across the whole application. For each member, runs the same
+    reversal as the per-member endpoint. Idempotent — members with no
+    ghosts (or already-reversed ghosts) are no-ops.
+    """
+    from app.services.transaction import reverse_unexplained_declared_penalties
+    from app.core.audit import write_audit_log
+    from app.models.member import Member as _Member
+
+    members = db.query(_Member).all()
+    per_member: list[dict] = []
+    total_refunded = 0.0
+    total_reversed_months = 0
+    members_touched = 0
+    errors: list[dict] = []
+
+    for m in members:
+        try:
+            summary = reverse_unexplained_declared_penalties(
+                db=db,
+                member_id=m.id,
+                actor_user_id=current_user.id,
+                dry_run=dry_run,
+            )
+        except Exception as e:
+            errors.append({"member_id": str(m.id), "error": str(e)})
+            continue
+        if summary["reversed_months"] > 0:
+            members_touched += 1
+            total_reversed_months += summary["reversed_months"]
+            total_refunded += summary["total_refunded"]
+            per_member.append({
+                "member_id": str(m.id),
+                "reversed_months": summary["reversed_months"],
+                "total_refunded": summary["total_refunded"],
+            })
+
+    result = {
+        "members_scanned": len(members),
+        "members_touched": members_touched,
+        "total_reversed_months": total_reversed_months,
+        "total_refunded": round(total_refunded, 2),
+        "per_member": per_member,
+        "errors": errors,
+        "dry_run": dry_run,
+    }
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "compliance",
+        action=(
+            "Unexplained declared penalties refunded across all members"
+            + (" (dry-run)" if dry_run else "")
+        ),
+        details=(
+            f"scanned={len(members)} touched={members_touched} "
+            f"reversed_months={total_reversed_months} "
+            f"total_refunded={round(total_refunded, 2):.2f}"
+        ),
+    )
+    return result
+
+
+@router.post("/penalties/reverse-unexplained/{member_id}")
+def post_reverse_unexplained_declared_penalties(
+    member_id: str,
+    dry_run: bool = False,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Refund every unexplained declared penalty for one member back to
+    savings. For each APPROVED declaration where declared_penalties
+    exceeds the sum of matching live PenaltyRecord fees (with 1-month
+    carry-back), post Dr PENALTIES_PAYABLE / Cr MEM_SAV for the gap so
+    the money returns to the member. Idempotent per declaration.
+    """
+    from app.services.transaction import reverse_unexplained_declared_penalties
+    from app.core.audit import write_audit_log
+    try:
+        member_uuid = UUID(member_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member id")
+    try:
+        summary = reverse_unexplained_declared_penalties(
+            db=db,
+            member_id=member_uuid,
+            actor_user_id=current_user.id,
+            dry_run=dry_run,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reversal failed: {e}")
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "compliance",
+        action=(
+            "Unexplained declared penalties refunded to savings"
+            + (" (dry-run)" if dry_run else "")
+        ),
+        details=(
+            f"member={member_id} scanned={summary['scanned_declarations']} "
+            f"reversed={summary['reversed_months']} "
+            f"total_refunded={summary['total_refunded']:.2f}"
         ),
     )
     return summary

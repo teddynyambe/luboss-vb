@@ -193,6 +193,21 @@ export default function ComplianceDashboard() {
     | null
   >(null);
 
+  // Bulk reversal of unexplained declared penalties across all members —
+  // refunds the ghost portion (declared_penalties beyond what live
+  // PenaltyRecord fees explain) back to each member's savings.
+  const [unexpLoading, setUnexpLoading] = useState(false);
+  const [unexpResult, setUnexpResult] = useState<
+    {
+      members_scanned: number;
+      members_touched: number;
+      total_reversed_months: number;
+      total_refunded: number;
+      dry_run: boolean;
+    }
+    | null
+  >(null);
+
   useEffect(() => {
     loadPenaltyTypes();
     loadMembers();
@@ -288,6 +303,35 @@ export default function ComplianceDashboard() {
       setError(err?.message || 'Heal failed.');
     } finally {
       setHealLoading(false);
+    }
+  };
+
+  const runReverseUnexplainedAll = async (dryRun: boolean) => {
+    if (!dryRun) {
+      const ok = window.confirm(
+        'This will refund every unexplained declared penalty across ALL members back to their savings by posting real journal entries. Proceed?',
+      );
+      if (!ok) return;
+    }
+    setUnexpLoading(true);
+    setUnexpResult(null);
+    try {
+      const res = await api.post<typeof unexpResult>(
+        `/api/compliance/penalties/reverse-unexplained-all?dry_run=${dryRun ? 'true' : 'false'}`,
+        {},
+      );
+      if (res.data) {
+        setUnexpResult(res.data);
+        if (!dryRun && res.data.members_touched > 0 && auditMemberId) {
+          loadMemberPenaltyAudit(auditMemberId);
+        }
+      } else {
+        setError(res.error || 'Reversal failed.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Reversal failed.');
+    } finally {
+      setUnexpLoading(false);
     }
   };
 
@@ -902,6 +946,37 @@ export default function ComplianceDashboard() {
                   {' '}skipped-not-reversed <strong>{healResult.skipped_not_reversed}</strong>
                 </p>
               )}
+              {/* Bulk refund of unexplained declared penalties across the
+                  whole application — posts Dr PENALTIES_PAYABLE / Cr
+                  MEM_SAV for each ghost. Idempotent per declaration. */}
+              <div className="flex gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => runReverseUnexplainedAll(true)}
+                  disabled={unexpLoading}
+                  className="px-3 py-1.5 border-2 border-emerald-300 text-emerald-700 rounded-lg text-xs font-semibold hover:bg-emerald-50 disabled:opacity-50"
+                >
+                  {unexpLoading ? 'Working…' : 'Dry-run refund unexplained (all members)'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runReverseUnexplainedAll(false)}
+                  disabled={unexpLoading}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50"
+                  title="Sweep every member and refund any declared penalty amount that has no matching PenaltyRecord back to their savings. Idempotent."
+                >
+                  {unexpLoading ? 'Working…' : 'Refund unexplained penalties (all members)'}
+                </button>
+              </div>
+              {unexpResult && (
+                <p className="text-[11px] text-emerald-800">
+                  {unexpResult.dry_run ? 'Dry-run: ' : 'Done: '}
+                  members-scanned <strong>{unexpResult.members_scanned}</strong>,
+                  {' '}members-touched <strong>{unexpResult.members_touched}</strong>,
+                  {' '}reversed-months <strong>{unexpResult.total_reversed_months}</strong>,
+                  {' '}total-refunded <strong>K{unexpResult.total_refunded.toFixed(2)}</strong>
+                </p>
+              )}
             </div>
           </div>
 
@@ -1007,15 +1082,16 @@ export default function ComplianceDashboard() {
               {(auditData.ghost_declared_penalties?.length ?? 0) > 0 && (
                 <div className="mb-4 p-3 bg-amber-50 border-2 border-amber-300 rounded-lg">
                   <p className="text-xs font-bold text-amber-900 mb-1">
-                    ⚠ Ghost declared penalties
+                    ⚠ Unexplained declared penalties
                   </p>
                   <p className="text-[11px] text-amber-800 mb-2">
-                    These months show a K amount declared under &quot;Penalties&quot; on the member&apos;s
-                    declaration form that doesn&apos;t correspond to any live PenaltyRecord for that
-                    month. The declared K credited PENALTIES_PAYABLE but there&apos;s no per-month
-                    audit trail. Common causes: member self-declared without a matching auto-issued
-                    record, or FIFO matched the K to an older PENDING record from a different
-                    month.
+                    The member declared and paid these penalty amounts, but no compliance record
+                    exists explaining <em>why</em> they were charged for that month. The K credited
+                    PENALTIES_PAYABLE on the ledger, but the audit trail can&apos;t point to a
+                    specific charge. Common causes: member self-declared without a matching
+                    auto-issued record, or the payment cleared an older PENDING record from a
+                    different month (in which case that other record still exists in the list
+                    below).
                   </p>
                   <div className="space-y-1">
                     {auditData.ghost_declared_penalties!.map((g) => {
