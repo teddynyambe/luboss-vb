@@ -69,6 +69,13 @@ interface PenaltyReversal {
   original_date_issued: string | null;
 }
 
+interface LiveBalances {
+  savings: number;
+  social_fund: number;
+  admin_fund: number;
+  penalties: number;
+}
+
 interface RepaymentThisMonth {
   loan_id: string;
   loan_label: string;
@@ -92,6 +99,10 @@ export default function MemberStatementPage() {
   const [bankStatements, setBankStatements] = useState<BankStatementItem[]>([]);
   const [savingsHistory, setSavingsHistory] = useState<SavingsEntry[]>([]);
   const [penaltyReversals, setPenaltyReversals] = useState<PenaltyReversal[]>([]);
+  // Live balances from the backend (same source as the member's Account
+  // Status card and Penalty Audit modal). Used for the Contribution
+  // Summary tiles so all three views agree on the numbers.
+  const [liveBalances, setLiveBalances] = useState<LiveBalances | null>(null);
   const [monthlyLoanBalances, setMonthlyLoanBalances] = useState<MonthlyLoanBalance[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -114,6 +125,7 @@ export default function MemberStatementPage() {
         transactions: SavingsEntry[];
         monthly_loan_balances?: MonthlyLoanBalance[];
         penalty_reversals?: PenaltyReversal[];
+        live_balances?: LiveBalances | null;
       }>('/api/member/transactions?type=savings'),
     ]);
 
@@ -122,6 +134,7 @@ export default function MemberStatementPage() {
       setSavingsHistory(savingsRes.data.transactions);
       setMonthlyLoanBalances(savingsRes.data.monthly_loan_balances || []);
       setPenaltyReversals(savingsRes.data.penalty_reversals || []);
+      setLiveBalances(savingsRes.data.live_balances ?? null);
     }
     setLoading(false);
   };
@@ -569,15 +582,24 @@ export default function MemberStatementPage() {
                 },
                 { savings: 0, social_fund: 0, admin_fund: 0, penalties: 0 }
               );
-              // Apply penalty reversals: the reversed fee is refunded to the
-              // member's savings account (accounting: Dr PENALTY_INCOME /
-              // Cr MEM_SAV) so it should show up as savings-plus and reduce
-              // the effective penalties paid.
+              // Prefer live balances from the backend when available so the
+              // Contribution Summary matches exactly what the member sees on
+              // their Account Status card and Penalty Audit modal. Falls
+              // back to declared totals only when the backend didn't ship
+              // the live_balances field (older backends, or query errors).
               const totalReversedPenalties = penaltyReversals.reduce(
                 (s, r) => s + (r.fee_amount || 0), 0,
               );
-              totals.savings += totalReversedPenalties;
-              totals.penalties = Math.max(0, totals.penalties - totalReversedPenalties);
+              if (liveBalances) {
+                totals.savings = liveBalances.savings;
+                totals.social_fund = liveBalances.social_fund;
+                totals.admin_fund = liveBalances.admin_fund;
+                totals.penalties = liveBalances.penalties;
+              } else {
+                // Legacy fallback: adjust declared totals by reversals.
+                totals.savings += totalReversedPenalties;
+                totals.penalties = Math.max(0, totals.penalties - totalReversedPenalties);
+              }
               const fmtS = (n: number) =>
                 `K ${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
               const grand = totals.savings + totals.social_fund + totals.admin_fund + totals.penalties;

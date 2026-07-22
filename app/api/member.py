@@ -3421,13 +3421,35 @@ def get_account_transactions(
             monthly_loan_balances = []
 
     # Also expose the aggregate penalty-reversals list so the statement's
-    # Contribution Summary can correctly subtract them from the total
-    # penalties paid and add them to the total savings credited.
+    # Contribution Summary can render each reversal inline as an audit
+    # line. The Contribution Summary tiles themselves come from
+    # `live_balances` below (record- and ledger-based), so the numbers
+    # match what the member's Account Status card and Penalty Audit
+    # modal display — a single source of truth across all three views.
+    live_balances = None
+    if type == "savings":
+        try:
+            from app.services.accounting import (
+                get_member_savings_balance,
+                get_member_social_fund_balance,
+                get_member_admin_fund_balance,
+                get_member_penalties_balance,
+            )
+            live_balances = {
+                "savings": float(get_member_savings_balance(db, member_profile.id)),
+                "social_fund": float(get_member_social_fund_balance(db, member_profile.id)),
+                "admin_fund": float(get_member_admin_fund_balance(db, member_profile.id)),
+                "penalties": float(get_member_penalties_balance(db, member_profile.id)),
+            }
+        except Exception:
+            live_balances = None
+
     return {
         "type": type,
         "transactions": transactions,
         "monthly_loan_balances": monthly_loan_balances,
         "penalty_reversals": penalty_reversals_dto if type == "savings" else [],
+        "live_balances": live_balances,
     }
 
 

@@ -648,9 +648,15 @@ def reverse_penalties_for_reconciliation_declarations(
                     source_type="penalty_reversal",
                     created_by=actor_user_id,
                 )
-                orig_je.reversed_by = actor_user_id
-                orig_je.reversed_at = datetime.utcnow()
-                orig_je.reversal_reason = reason
+                # Deliberately do NOT set orig_je.reversed_by / reversed_at.
+                # The mirror JE above already cancels the original on the
+                # ledger — marking the original as reversed AS WELL removes
+                # its lines from balance queries (which filter reversed
+                # JEs), while the mirror still adds its own lines, causing
+                # a double-cancellation that over-credits MEM_SAV by the
+                # penalty fee. Leaving both JEs live makes them offset
+                # exactly on the ledger, matching what a member sees on
+                # their Account Status / Statement / Audit view.
                 reversal_je_id = rev_je.id
 
         p.status = PenaltyRecordStatus.REVERSED.value
@@ -674,6 +680,80 @@ def reverse_penalties_for_reconciliation_declarations(
         "skipped_not_reconciled": skipped_not_reconciled,
         "skipped_no_link": skipped_no_link,
         "reversed_penalty_ids": reversed_ids,
+        "dry_run": dry_run,
+    }
+
+
+def heal_double_cancelled_penalty_reversals(
+    db: Session, dry_run: bool = False
+) -> dict:
+    """One-shot healer for penalties reversed by pre-fix code that BOTH
+    posted a mirror reversal JE AND marked the original JE as reversed.
+
+    That combination double-cancels: balance queries exclude the original
+    (reversed_by set) but still include the mirror, so `MEM_SAV` ends up
+    over-credited by the fee amount. This healer unsets `reversed_by /
+    reversed_at / reversal_reason` on those originals so both the
+    original and its mirror stay live and offset each other exactly on
+    the ledger — matching the record-based `get_member_penalties_balance`
+    figure that the Account Status card, Penalty Audit modal, and
+    Statement Contribution Summary all show.
+
+    Idempotent — skips penalties whose original JE isn't currently
+    marked reversed (already healed, or manually cleaned).
+
+    Returns ``{scanned, healed, skipped_no_mirror, skipped_not_reversed,
+    healed_penalty_ids, dry_run}``.
+    """
+    from app.models.ledger import JournalEntry
+
+    scanned = 0
+    healed = 0
+    skipped_no_mirror = 0
+    skipped_not_reversed = 0
+    healed_penalty_ids: list[str] = []
+
+    penalties = (
+        db.query(PenaltyRecord)
+        .filter(PenaltyRecord.status == PenaltyRecordStatus.REVERSED.value)
+        .all()
+    )
+    for p in penalties:
+        scanned += 1
+        # No mirror JE was posted → nothing to double-cancel, leave alone.
+        if not p.reversal_journal_entry_id:
+            skipped_no_mirror += 1
+            continue
+        if not p.journal_entry_id:
+            skipped_no_mirror += 1
+            continue
+        orig_je = db.query(JournalEntry).filter(JournalEntry.id == p.journal_entry_id).first()
+        if not orig_je:
+            skipped_no_mirror += 1
+            continue
+        # Original not currently marked reversed → already correct; skip.
+        if not orig_je.reversed_by and not orig_je.reversed_at:
+            skipped_not_reversed += 1
+            continue
+        # Un-mark: bring the original JE's lines back into balance queries
+        # so the mirror JE's lines actually offset them.
+        orig_je.reversed_by = None
+        orig_je.reversed_at = None
+        orig_je.reversal_reason = None
+        healed += 1
+        healed_penalty_ids.append(str(p.id))
+
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    return {
+        "scanned": scanned,
+        "healed": healed,
+        "skipped_no_mirror": skipped_no_mirror,
+        "skipped_not_reversed": skipped_not_reversed,
+        "healed_penalty_ids": healed_penalty_ids,
         "dry_run": dry_run,
     }
 

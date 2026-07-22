@@ -170,6 +170,21 @@ export default function ComplianceDashboard() {
     | null
   >(null);
 
+  // Healer for penalties that pre-fix code reversed twice (mirror JE +
+  // orig_je.reversed_by) — unsets reversed_by on the originals so the
+  // mirror actually offsets them on the ledger.
+  const [healLoading, setHealLoading] = useState(false);
+  const [healResult, setHealResult] = useState<
+    {
+      scanned: number;
+      healed: number;
+      skipped_no_mirror: number;
+      skipped_not_reversed: number;
+      dry_run: boolean;
+    }
+    | null
+  >(null);
+
   useEffect(() => {
     loadPenaltyTypes();
     loadMembers();
@@ -242,6 +257,29 @@ export default function ComplianceDashboard() {
       setError(err?.message || 'Backfill failed.');
     } finally {
       setBackfillLoading(false);
+    }
+  };
+
+  const runHealDoubleCancelled = async (dryRun: boolean) => {
+    setHealLoading(true);
+    setHealResult(null);
+    try {
+      const res = await api.post<typeof healResult>(
+        `/api/compliance/penalties/heal-double-cancelled-reversals?dry_run=${dryRun ? 'true' : 'false'}`,
+        {},
+      );
+      if (res.data) {
+        setHealResult(res.data);
+        if (!dryRun && res.data.healed > 0 && auditMemberId) {
+          loadMemberPenaltyAudit(auditMemberId);
+        }
+      } else {
+        setError(res.error || 'Heal failed.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Heal failed.');
+    } finally {
+      setHealLoading(false);
     }
   };
 
@@ -822,6 +860,38 @@ export default function ComplianceDashboard() {
                   {' '}reversed <strong>{reconSweepResult.reversed}</strong>,
                   {' '}skipped-not-reconciled <strong>{reconSweepResult.skipped_not_reconciled}</strong>,
                   {' '}skipped-non-cycle <strong>{reconSweepResult.skipped_not_cycle_defined}</strong>
+                </p>
+              )}
+              {/* Heal pre-fix double-cancelled reversals — mirror JE was
+                  posted AND original was marked reversed, over-crediting
+                  the member's savings. Unsets reversed_by on the original
+                  so it and the mirror offset correctly. */}
+              <div className="flex gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => runHealDoubleCancelled(true)}
+                  disabled={healLoading}
+                  className="px-3 py-1.5 border-2 border-purple-300 text-purple-700 rounded-lg text-xs font-semibold hover:bg-purple-50 disabled:opacity-50"
+                >
+                  {healLoading ? 'Working…' : 'Dry-run heal double-cancelled'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runHealDoubleCancelled(false)}
+                  disabled={healLoading}
+                  className="px-3 py-1.5 bg-purple-600 text-white rounded-lg text-xs font-semibold hover:bg-purple-700 disabled:opacity-50"
+                  title="For penalties reversed by pre-fix code: un-marks the original JE reversed so its mirror actually offsets it (rather than double-cancelling and over-crediting savings)."
+                >
+                  {healLoading ? 'Working…' : 'Heal double-cancelled reversals'}
+                </button>
+              </div>
+              {healResult && (
+                <p className="text-[11px] text-purple-800">
+                  {healResult.dry_run ? 'Dry-run: ' : 'Done: '}
+                  scanned <strong>{healResult.scanned}</strong>,
+                  {' '}healed <strong>{healResult.healed}</strong>,
+                  {' '}skipped-no-mirror <strong>{healResult.skipped_no_mirror}</strong>,
+                  {' '}skipped-not-reversed <strong>{healResult.skipped_not_reversed}</strong>
                 </p>
               )}
             </div>

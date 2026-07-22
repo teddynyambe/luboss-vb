@@ -379,6 +379,42 @@ def get_member_penalties(
     }
 
 
+@router.post("/penalties/heal-double-cancelled-reversals")
+def post_heal_double_cancelled_reversals(
+    dry_run: bool = False,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Heal penalties reversed by pre-fix code that double-cancelled on
+    the ledger — posted a mirror reversal JE AND marked the original JE
+    as reversed. The combination inflates `MEM_SAV` by the penalty fee.
+    This action unsets `reversed_by / reversed_at / reversal_reason` on
+    each affected original JE so both live-and-mirror JEs offset exactly.
+
+    Idempotent — records already correct are skipped.
+
+    Optional ``?dry_run=true`` previews the counts without committing.
+    """
+    from app.services.transaction import heal_double_cancelled_penalty_reversals
+    from app.core.audit import write_audit_log
+    try:
+        summary = heal_double_cancelled_penalty_reversals(db=db, dry_run=dry_run)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Healer failed: {e}")
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "compliance",
+        action="Double-cancelled penalty reversals healed" + (" (dry-run)" if dry_run else ""),
+        details=(
+            f"scanned={summary['scanned']} healed={summary['healed']} "
+            f"skipped_no_mirror={summary['skipped_no_mirror']} "
+            f"skipped_not_reversed={summary['skipped_not_reversed']}"
+        ),
+    )
+    return summary
+
+
 @router.post("/penalties/reverse-reconciliation-penalties")
 def post_reverse_reconciliation_penalties(
     dry_run: bool = False,

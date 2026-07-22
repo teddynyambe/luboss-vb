@@ -1424,9 +1424,12 @@ def approve_loan_application(
                             source_type="penalty_reversal",
                             created_by=current_user.id,
                         )
-                        _orig_je.reversed_by = current_user.id
-                        _orig_je.reversed_at = datetime.utcnow()
-                        _orig_je.reversal_reason = _reason
+                        # Deliberately leave _orig_je live — the mirror JE
+                        # above already offsets it. Setting reversed_by
+                        # would remove the original's lines from balance
+                        # queries (which filter reversed JEs) while the
+                        # mirror still adds its own lines, double-cancelling
+                        # and over-crediting the member's savings.
                         _reversal_je_id = _rev_je.id
 
                 _late_pen.status = PenaltyRecordStatus.REVERSED.value
@@ -2808,9 +2811,14 @@ def approve_penalty_reversal(
                 created_by=current_user.id,
             )
 
-            original_je.reversed_by = current_user.id
-            original_je.reversed_at = datetime.utcnow()
-            original_je.reversal_reason = penalty.reversal_reason
+            # Leave original_je live — the mirror `reversal_je` above
+            # already offsets it. Marking it as reversed here would
+            # remove the original's lines from balance queries (which
+            # filter reversed JEs) while the mirror still adds its own
+            # lines, double-cancelling the ledger and over-crediting
+            # MEM_SAV. Reversal is captured on the PenaltyRecord itself
+            # (reversal_journal_entry_id, reversed_by, reversed_at) plus
+            # the mirror JE for the audit trail.
 
     penalty.status = PenaltyRecordStatus.REVERSED
     penalty.reversed_by = current_user.id
