@@ -633,10 +633,16 @@ def get_applicable_penalties(
             ).first()
 
             if existing_declaration:
+                # Skip if this declaration was created via treasurer
+                # reconciliation — the treasurer entered it retroactively,
+                # not a live member submission missing the window.
+                from app.services.transaction import is_reconciliation_declaration
+                if is_reconciliation_declaration(db, existing_declaration.id):
+                    is_late = False
                 # Member already has a declaration — they declared on time.
                 # Check if the ORIGINAL declaration was made late
                 # (only apply penalty if the declaration was first created after the deadline).
-                if existing_declaration.created_at:
+                elif existing_declaration.created_at:
                     created_day = existing_declaration.created_at.day
                     is_late = created_day > monthly_end_day
                 else:
@@ -1572,7 +1578,18 @@ def apply_for_loan(
             # Check if loan application is late (after monthly_end_day for the current month)
             if today.day > monthly_end_day:
                 is_late = True
-            
+
+            # Skip if this member has a reconciliation-flagged declaration
+            # for the same month — this loan application likely rides on
+            # the treasurer's retrospective bookkeeping rather than a
+            # missed live deadline.
+            if is_late:
+                from app.services.transaction import is_reconciliation_declaration_for_member_month
+                if is_reconciliation_declaration_for_member_month(
+                    db, member_profile.id, today.year, today.month
+                ):
+                    is_late = False
+
             if is_late:
                 # Get penalty type
                 from app.models.transaction import PenaltyType, PenaltyRecord, PenaltyRecordStatus
@@ -3406,7 +3423,16 @@ def upload_deposit_proof(
             
             if today > period_end:
                 is_late = True
-            
+
+            # Skip if the underlying declaration was created via treasurer
+            # reconciliation — the treasurer entered the record on behalf
+            # of the member for a past period; the deposit-window
+            # deadline doesn't apply.
+            if is_late:
+                from app.services.transaction import is_reconciliation_declaration
+                if is_reconciliation_declaration(db, declaration.id):
+                    is_late = False
+
             if is_late:
                 # Get penalty type
                 from app.models.transaction import PenaltyType, PenaltyRecord, PenaltyRecordStatus

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 
 from fastapi import APIRouter, Depends, HTTPException, Form
 from sqlalchemy.orm import Session
@@ -336,6 +336,14 @@ def get_member_penalties(
                 if creator else "System"
             )
 
+    # Determine which penalties are tied to reconciliation-created
+    # declarations so the frontend can flag them (and hint that they
+    # should be reversed via the sweep).
+    from app.services.transaction import (
+        is_reconciliation_declaration_for_member_month,
+        _extract_effective_month_from_notes,
+    )
+
     rows = []
     for p in penalties:
         detail = _penalty_detail(p, db)
@@ -344,6 +352,23 @@ def get_member_penalties(
         detail["penalty_type_description"] = (
             p.penalty_type.description if p.penalty_type else None
         )
+
+        ptype_name = (p.penalty_type.name if p.penalty_type else "") or ""
+        k_lower = ptype_name.strip().lower()
+        is_cycle_defined = (
+            ("late" in k_lower and "declaration" in k_lower)
+            or ("late" in k_lower and "deposit" in k_lower)
+            or ("late" in k_lower and "loan" in k_lower and "application" in k_lower)
+        )
+        detail["is_reconciliation_penalty"] = False
+        if is_cycle_defined:
+            eff = _extract_effective_month_from_notes(p.notes or "")
+            if not eff and p.date_issued:
+                eff = date(p.date_issued.year, p.date_issued.month, 1)
+            if eff and is_reconciliation_declaration_for_member_month(
+                db, p.member_id, eff.year, eff.month,
+            ):
+                detail["is_reconciliation_penalty"] = True
         rows.append(detail)
 
     return {
@@ -352,6 +377,78 @@ def get_member_penalties(
         "summary": summary,
         "penalties": rows,
     }
+
+
+@router.post("/penalties/reverse-reconciliation-penalties")
+def post_reverse_reconciliation_penalties(
+    dry_run: bool = False,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """Sweep every live cycle-defined penalty and auto-reverse the ones
+    tied to declarations that were created via treasurer reconciliation.
+
+    These penalties were charged in error under the old code path — the
+    treasurer's retrospective bookkeeping shouldn't have triggered a
+    late-window penalty against the member. The forward-facing fix
+    (guards on the four penalty auto-issue sites) prevents new ones from
+    firing; this endpoint mops up existing rows.
+
+    Optional ``?dry_run=true`` runs the sweep without committing so you
+    can preview the counts before applying.
+    """
+    from app.services.transaction import reverse_penalties_for_reconciliation_declarations
+    from app.core.audit import write_audit_log
+    try:
+        summary = reverse_penalties_for_reconciliation_declarations(
+            db=db, actor_user_id=current_user.id, dry_run=dry_run,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sweep failed: {e}")
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "compliance",
+        action="Reconciliation-penalty sweep" + (" (dry-run)" if dry_run else ""),
+        details=(
+            f"scanned={summary['scanned']} reversed={summary['reversed']} "
+            f"skipped_not_reconciled={summary['skipped_not_reconciled']}"
+        ),
+    )
+    return summary
+
+
+@router.post("/penalties/backfill-narrations")
+def post_backfill_penalty_narrations(
+    dry_run: bool = False,
+    current_user: User = Depends(require_any_role("Compliance", "Admin", "Chairman", "Treasurer")),
+    db: Session = Depends(get_db),
+):
+    """One-shot sweep that rewrites every legacy cycle-defined penalty's
+    notes with the rich audit narration (offending timestamp + missed
+    window). Idempotent — records already carrying the rich narration
+    (identified by an ISO 8601 UTC token in notes) are skipped.
+
+    Optional ``?dry_run=true`` runs the pass without committing so you can
+    preview the counts before applying.
+    """
+    from app.services.transaction import backfill_penalty_narrations
+    from app.core.audit import write_audit_log
+    try:
+        summary = backfill_penalty_narrations(db, dry_run=dry_run)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Backfill failed: {e}")
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "compliance",
+        action="Penalty narrations backfilled" + (" (dry-run)" if dry_run else ""),
+        details=(
+            f"scanned={summary['scanned']} rewritten={summary['rewritten']} "
+            f"skipped={summary['skipped']}"
+        ),
+    )
+    return summary
 
 
 @router.put("/penalties/{penalty_id}/request-reversal")

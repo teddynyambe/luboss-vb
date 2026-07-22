@@ -55,6 +55,10 @@ interface MemberPenalty {
   reversal_requested_at: string | null;
   reversed_by_name?: string | null;
   reversed_at?: string | null;
+  // True when the underlying declaration was created via treasurer
+  // reconciliation — the penalty should not have fired and the sweep
+  // action will auto-reverse it.
+  is_reconciliation_penalty?: boolean;
 }
 
 interface MemberPenaltyAudit {
@@ -141,6 +145,31 @@ export default function ComplianceDashboard() {
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState('');
 
+  // One-shot backfill of legacy penalty narrations — sweeps every
+  // cycle-defined PenaltyRecord and rewrites its `notes` with the rich
+  // "You made X on <ISO time>, N days after the cutoff (…)" line.
+  const [backfillLoading, setBackfillLoading] = useState(false);
+  const [backfillResult, setBackfillResult] = useState<
+    { scanned: number; rewritten: number; skipped: number; by_kind: Record<string, number>; dry_run: boolean }
+    | null
+  >(null);
+
+  // Reversal sweep for penalties charged in error against
+  // reconciliation-created declarations. Same UX pattern as the
+  // narration backfill: dry-run + commit buttons with a result strip.
+  const [reconSweepLoading, setReconSweepLoading] = useState(false);
+  const [reconSweepResult, setReconSweepResult] = useState<
+    {
+      scanned: number;
+      reversed: number;
+      skipped_not_cycle_defined: number;
+      skipped_not_reconciled: number;
+      skipped_no_link: number;
+      dry_run: boolean;
+    }
+    | null
+  >(null);
+
   useEffect(() => {
     loadPenaltyTypes();
     loadMembers();
@@ -184,6 +213,54 @@ export default function ComplianceDashboard() {
       }
     } finally {
       setAuditLoading(false);
+    }
+  };
+
+  const runBackfillNarrations = async (dryRun: boolean) => {
+    setBackfillLoading(true);
+    setBackfillResult(null);
+    try {
+      const res = await api.post<typeof backfillResult>(
+        `/api/compliance/penalties/backfill-narrations?dry_run=${dryRun ? 'true' : 'false'}`,
+        {},
+      );
+      if (res.data) {
+        setBackfillResult(res.data);
+        // If we actually rewrote records AND we're currently looking at a
+        // member's audit, refresh it so the new narrations appear inline.
+        if (!dryRun && res.data.rewritten > 0 && auditMemberId) {
+          loadMemberPenaltyAudit(auditMemberId);
+        }
+      } else {
+        setError(res.error || 'Backfill failed.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Backfill failed.');
+    } finally {
+      setBackfillLoading(false);
+    }
+  };
+
+  const runReconciliationSweep = async (dryRun: boolean) => {
+    setReconSweepLoading(true);
+    setReconSweepResult(null);
+    try {
+      const res = await api.post<typeof reconSweepResult>(
+        `/api/compliance/penalties/reverse-reconciliation-penalties?dry_run=${dryRun ? 'true' : 'false'}`,
+        {},
+      );
+      if (res.data) {
+        setReconSweepResult(res.data);
+        if (!dryRun && res.data.reversed > 0 && auditMemberId) {
+          loadMemberPenaltyAudit(auditMemberId);
+        }
+      } else {
+        setError(res.error || 'Reconciliation-penalty sweep failed.');
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Reconciliation-penalty sweep failed.');
+    } finally {
+      setReconSweepLoading(false);
     }
   };
 
@@ -667,6 +744,74 @@ export default function ComplianceDashboard() {
                 Times shown in your local timezone.
               </p>
             </div>
+            {/* One-shot backfill for legacy narrations. Idempotent — safe
+                to run more than once; records already carrying the rich
+                narration are skipped. Dry-run first to preview counts. */}
+            <div className="flex flex-col items-end gap-1">
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => runBackfillNarrations(true)}
+                  disabled={backfillLoading}
+                  className="px-3 py-1.5 border-2 border-blue-300 text-blue-700 rounded-lg text-xs font-semibold hover:bg-blue-50 disabled:opacity-50"
+                >
+                  {backfillLoading ? 'Working…' : 'Dry-run rewrite'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runBackfillNarrations(false)}
+                  disabled={backfillLoading}
+                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-xs font-semibold hover:bg-blue-700 disabled:opacity-50"
+                  title="Rewrite legacy penalty notes with the actual offending timestamp + missed-window audit line"
+                >
+                  {backfillLoading ? 'Working…' : 'Rewrite legacy narrations'}
+                </button>
+              </div>
+              {backfillResult && (
+                <p className="text-[11px] text-blue-700">
+                  {backfillResult.dry_run ? 'Dry-run: ' : 'Done: '}
+                  scanned <strong>{backfillResult.scanned}</strong>,
+                  {' '}rewritten <strong>{backfillResult.rewritten}</strong>,
+                  {' '}skipped <strong>{backfillResult.skipped}</strong>
+                  {' — '}
+                  Decl <strong>{backfillResult.by_kind['Late Declaration'] ?? 0}</strong>
+                  {' · '}Deposit <strong>{backfillResult.by_kind['Late Deposits'] ?? 0}</strong>
+                  {' · '}Loan-app <strong>{backfillResult.by_kind['Late Loan Application'] ?? 0}</strong>
+                </p>
+              )}
+              {/* Reconciliation-penalty sweep — reverses cycle-defined
+                  penalties (Late Declaration / Late Deposits / Late Loan
+                  Application) that were charged in error against
+                  declarations created via treasurer reconciliation. */}
+              <div className="flex gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => runReconciliationSweep(true)}
+                  disabled={reconSweepLoading}
+                  className="px-3 py-1.5 border-2 border-amber-300 text-amber-800 rounded-lg text-xs font-semibold hover:bg-amber-50 disabled:opacity-50"
+                >
+                  {reconSweepLoading ? 'Working…' : 'Dry-run reversal sweep'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runReconciliationSweep(false)}
+                  disabled={reconSweepLoading}
+                  className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-semibold hover:bg-amber-600 disabled:opacity-50"
+                  title="Auto-reverse any Late Declaration / Late Deposit / Late Loan Application penalty tied to a reconciliation-created declaration"
+                >
+                  {reconSweepLoading ? 'Working…' : 'Reverse reconciliation penalties'}
+                </button>
+              </div>
+              {reconSweepResult && (
+                <p className="text-[11px] text-amber-800">
+                  {reconSweepResult.dry_run ? 'Dry-run: ' : 'Done: '}
+                  scanned <strong>{reconSweepResult.scanned}</strong>,
+                  {' '}reversed <strong>{reconSweepResult.reversed}</strong>,
+                  {' '}skipped-not-reconciled <strong>{reconSweepResult.skipped_not_reconciled}</strong>,
+                  {' '}skipped-non-cycle <strong>{reconSweepResult.skipped_not_cycle_defined}</strong>
+                </p>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -776,7 +921,14 @@ export default function ComplianceDashboard() {
                       }
                     })();
                     return (
-                      <div key={p.id} className="bg-white border-2 border-blue-100 rounded-lg p-3 md:p-4">
+                      <div
+                        key={p.id}
+                        className={`bg-white border-2 rounded-lg p-3 md:p-4 ${
+                          p.is_reconciliation_penalty && p.status !== 'reversed'
+                            ? 'border-amber-300 ring-2 ring-amber-100'
+                            : 'border-blue-100'
+                        }`}
+                      >
                         <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
                           <div>
                             <h3 className="font-bold text-blue-900">{p.penalty_type_name}</h3>
@@ -786,9 +938,19 @@ export default function ComplianceDashboard() {
                               {p.created_by_name ? <> {' · by '}{p.created_by_name}</> : null}
                             </p>
                           </div>
-                          <span className={`px-2 py-0.5 text-xs font-semibold rounded border ${statusStyle}`}>
-                            {p.status.replace(/_/g, ' ')}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-1">
+                            {p.is_reconciliation_penalty && p.status !== 'reversed' && (
+                              <span
+                                className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded border bg-amber-100 text-amber-900 border-amber-300"
+                                title="This penalty was charged against a declaration that was created via treasurer reconciliation — it should be reversed. Use 'Reverse reconciliation penalties' above."
+                              >
+                                Reconciliation — should reverse
+                              </span>
+                            )}
+                            <span className={`px-2 py-0.5 text-xs font-semibold rounded border ${statusStyle}`}>
+                              {p.status.replace(/_/g, ' ')}
+                            </span>
+                          </div>
                         </div>
                         {p.notes && (
                           <p className="mt-2 text-sm text-blue-900 bg-blue-50 border border-blue-200 rounded px-3 py-2 whitespace-pre-wrap">

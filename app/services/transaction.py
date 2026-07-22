@@ -21,6 +21,7 @@ from uuid import UUID
 from decimal import Decimal
 from datetime import date, datetime
 from typing import Optional
+import re
 
 
 def is_cycle_defined_penalty_type(penalty_type_name: str) -> bool:
@@ -127,11 +128,11 @@ def build_late_penalty_narration(
     month_label = effective_month.strftime("%B %Y") if effective_month else "unknown month"
 
     action_label = {
-        "Late Declaration":       "Declaration",
-        "Late Deposits":          "Deposit proof",
-        "Late Deposit":           "Deposit proof",
-        "Late Loan Application":  "Loan application",
-    }.get(kind, "Action")
+        "Late Declaration":       "the declaration",
+        "Late Deposits":          "the deposit",
+        "Late Deposit":           "the deposit",
+        "Late Loan Application":  "the loan application",
+    }.get(kind, "the action")
 
     days_late = None
     if offending_at and period_end:
@@ -151,18 +152,450 @@ def build_late_penalty_narration(
     action_at_str = _fmt_dt(offending_at) if offending_at else "an unrecorded time"
 
     if period_start and period_end:
-        window_clause = f" Allowed window: {_fmt_date(period_start)} to {_fmt_date(period_end)}."
+        window_clause = f" (period: {_fmt_date(period_start)} to {_fmt_date(period_end)})"
     elif period_end:
-        window_clause = f" Cutoff: {_fmt_date(period_end)}."
+        window_clause = f" (cutoff: {_fmt_date(period_end)})"
     elif monthly_end_day:
-        window_clause = f" Cutoff: day {monthly_end_day} of the effective month."
+        window_clause = f" (cutoff: day {monthly_end_day} of the effective month)"
     else:
         window_clause = ""
 
+    # Second-person phrasing so a member reading their own record sees
+    # ownership clearly; a compliance officer reading it still parses
+    # naturally as "the member did this".
     return (
-        f"{kind} for {month_label} — {action_label} was made on {action_at_str}"
-        f"{days_late_clause}.{window_clause}"
+        f"{kind} for {month_label} — You made {action_label} on {action_at_str}"
+        f"{days_late_clause}{window_clause}."
     ).strip()
+
+
+def is_reconciliation_declaration(db: Session, declaration_id) -> bool:
+    """Return True when the declaration was created via treasurer
+    reconciliation (a `DepositProof` with the "reconciliation" sentinel
+    upload_path is linked to it).
+
+    Late-declaration / late-deposit / late-loan-application penalties
+    should not fire against records created this way — the treasurer is
+    entering the record on behalf of the member for a past month, not
+    a live submission missing a deadline.
+
+    The sentinel is set by ``reconcile_declaration_and_post`` in
+    `services/transaction_repair.py` (and the older chairman reconcile
+    path when a member subsequently uploads on top of a reconciled
+    declaration).
+    """
+    if not declaration_id:
+        return False
+    proof = (
+        db.query(DepositProof)
+        .filter(
+            DepositProof.declaration_id == declaration_id,
+            DepositProof.upload_path == "reconciliation",
+        )
+        .first()
+    )
+    return proof is not None
+
+
+def is_reconciliation_declaration_for_member_month(
+    db: Session, member_id, effective_year: int, effective_month_num: int
+) -> bool:
+    """Same detection as ``is_reconciliation_declaration`` but keyed by
+    (member × month) — for penalty sites that don't have a declaration
+    row in hand (e.g. late-loan-application on a member × application
+    month combination) or that operate before the declaration exists."""
+    from sqlalchemy import extract as _extract
+    if not member_id:
+        return False
+    row = (
+        db.query(DepositProof)
+        .join(Declaration, DepositProof.declaration_id == Declaration.id)
+        .filter(
+            DepositProof.upload_path == "reconciliation",
+            DepositProof.member_id == member_id,
+            _extract("year", Declaration.effective_month) == effective_year,
+            _extract("month", Declaration.effective_month) == effective_month_num,
+        )
+        .first()
+    )
+    return row is not None
+
+
+_MONTH_NAME_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+def _extract_effective_month_from_notes(notes: str) -> Optional[date]:
+    """Best-effort extraction of a `%B %Y` month name from a legacy penalty
+    notes string. Returns the first-of-month date, or None if nothing matches.
+    Used by the backfill so we don't misattribute a penalty when multiple
+    months appear in the same text (uses the first match)."""
+    if not notes:
+        return None
+    m = _MONTH_NAME_RE.search(notes)
+    if not m:
+        return None
+    from calendar import month_name as _mn
+    month_names = {mn.lower(): i for i, mn in enumerate(_mn) if mn}
+    idx = month_names.get(m.group(1).lower())
+    if not idx:
+        return None
+    try:
+        return date(int(m.group(2)), idx, 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def rewrite_legacy_penalty_narration(db: Session, penalty) -> Optional[str]:
+    """Rewrite a single PenaltyRecord's notes with the rich narration that
+    includes the actual offending timestamp. Returns the new notes on
+    success or None if the penalty isn't a cycle-defined type or the
+    corresponding offending action can't be found.
+
+    Idempotent — a note that already contains an ISO 8601 UTC token is
+    left alone.
+    """
+    from app.models.transaction import (
+        Declaration, DeclarationStatus,
+        DepositProof, DepositProofStatus,
+        LoanApplication,
+        PenaltyRecord, PenaltyType,
+    )
+    from app.models.cycle import CyclePhase, PhaseType
+    from sqlalchemy import extract as _extract, and_ as _and
+    import calendar as _cal
+
+    if not penalty or not penalty.penalty_type_id:
+        return None
+    ptype = db.query(PenaltyType).filter(PenaltyType.id == penalty.penalty_type_id).first()
+    if not ptype:
+        return None
+    ptype_name = (ptype.name or "").strip()
+    kind_lower = ptype_name.lower()
+    kind: Optional[str] = None
+    if "late" in kind_lower and "declaration" in kind_lower:
+        kind = "Late Declaration"
+    elif "late" in kind_lower and "loan" in kind_lower and "application" in kind_lower:
+        kind = "Late Loan Application"
+    elif "late" in kind_lower and "deposit" in kind_lower:
+        kind = "Late Deposits"
+    else:
+        return None  # not a cycle-defined kind we know how to backfill
+
+    # Skip if the note already carries an ISO timestamp — the rich
+    # narration has already been applied.
+    if penalty.notes and re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", penalty.notes):
+        return None
+
+    effective_month = _extract_effective_month_from_notes(penalty.notes or "")
+    if not effective_month:
+        # Fall back to date_issued's month if the notes don't reveal it.
+        if penalty.date_issued:
+            effective_month = date(penalty.date_issued.year, penalty.date_issued.month, 1)
+        else:
+            return None
+
+    offending_at = None
+    period_start = None
+    period_end = None
+
+    if kind == "Late Declaration":
+        # Look up the member's declaration for the effective month.
+        decl = db.query(Declaration).filter(
+            Declaration.member_id == penalty.member_id,
+            _extract("year", Declaration.effective_month) == effective_month.year,
+            _extract("month", Declaration.effective_month) == effective_month.month,
+        ).order_by(Declaration.created_at.asc()).first()
+        offending_at = getattr(decl, "created_at", None) if decl else None
+        # Phase window — look up the CyclePhase for the declaration's cycle.
+        cycle_id = decl.cycle_id if decl else None
+        if cycle_id:
+            phase = db.query(CyclePhase).filter(
+                CyclePhase.cycle_id == cycle_id,
+                CyclePhase.phase_type == PhaseType.DECLARATION,
+            ).first()
+            if phase and phase.monthly_end_day:
+                try:
+                    _, last_day = _cal.monthrange(effective_month.year, effective_month.month)
+                    period_end = date(
+                        effective_month.year,
+                        effective_month.month,
+                        min(int(phase.monthly_end_day), last_day),
+                    )
+                except Exception:
+                    period_end = None
+            if phase and phase.monthly_start_day:
+                try:
+                    _s = int(phase.monthly_start_day)
+                    if period_end and _s > int(phase.monthly_end_day):
+                        prev_month = effective_month.month - 1 or 12
+                        prev_year = effective_month.year - (1 if effective_month.month == 1 else 0)
+                        _, prev_last = _cal.monthrange(prev_year, prev_month)
+                        period_start = date(prev_year, prev_month, min(_s, prev_last))
+                    else:
+                        period_start = date(effective_month.year, effective_month.month, _s)
+                except Exception:
+                    period_start = None
+
+    elif kind == "Late Loan Application":
+        loan_app = db.query(LoanApplication).filter(
+            LoanApplication.member_id == penalty.member_id,
+            _extract("year", LoanApplication.application_date) == effective_month.year,
+            _extract("month", LoanApplication.application_date) == effective_month.month,
+        ).order_by(LoanApplication.application_date.asc()).first()
+        offending_at = getattr(loan_app, "application_date", None) if loan_app else None
+        cycle_id = loan_app.cycle_id if loan_app else None
+        if cycle_id:
+            phase = db.query(CyclePhase).filter(
+                CyclePhase.cycle_id == cycle_id,
+                CyclePhase.phase_type == PhaseType.LOAN_APPLICATION,
+            ).first()
+            if phase and phase.monthly_end_day:
+                try:
+                    _, last_day = _cal.monthrange(effective_month.year, effective_month.month)
+                    period_end = date(
+                        effective_month.year,
+                        effective_month.month,
+                        min(int(phase.monthly_end_day), last_day),
+                    )
+                except Exception:
+                    period_end = None
+            if phase and phase.monthly_start_day:
+                try:
+                    period_start = date(
+                        effective_month.year, effective_month.month, int(phase.monthly_start_day),
+                    )
+                except Exception:
+                    period_start = None
+
+    else:  # Late Deposits
+        # Deposit period ENDS in the next month; effective_month is the
+        # declaration's effective month. Find the DepositProof whose
+        # declaration was for that month.
+        deposit = db.query(DepositProof).join(
+            Declaration, DepositProof.declaration_id == Declaration.id,
+        ).filter(
+            DepositProof.member_id == penalty.member_id,
+            _extract("year", Declaration.effective_month) == effective_month.year,
+            _extract("month", Declaration.effective_month) == effective_month.month,
+        ).order_by(DepositProof.uploaded_at.asc()).first()
+        offending_at = getattr(deposit, "uploaded_at", None) if deposit else None
+        cycle_id = deposit.cycle_id if deposit else None
+        if cycle_id:
+            phase = db.query(CyclePhase).filter(
+                CyclePhase.cycle_id == cycle_id,
+                CyclePhase.phase_type == PhaseType.DEPOSITS,
+            ).first()
+            if phase and phase.monthly_end_day:
+                try:
+                    next_year = effective_month.year + (1 if effective_month.month == 12 else 0)
+                    next_month = 1 if effective_month.month == 12 else effective_month.month + 1
+                    _, last_day = _cal.monthrange(next_year, next_month)
+                    period_end = date(next_year, next_month, min(int(phase.monthly_end_day), last_day))
+                except Exception:
+                    period_end = None
+            if phase and phase.monthly_start_day:
+                try:
+                    period_start = date(
+                        effective_month.year, effective_month.month, int(phase.monthly_start_day),
+                    )
+                except Exception:
+                    period_start = None
+
+    # Fallback: no linked action row found → keep at least the issued
+    # timestamp so the narration still has SOME time reference.
+    if offending_at is None:
+        offending_at = penalty.date_issued
+
+    new_notes = build_late_penalty_narration(
+        kind=kind,
+        effective_month=effective_month,
+        offending_at=offending_at,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    penalty.notes = new_notes
+    return new_notes
+
+
+def backfill_penalty_narrations(db: Session, dry_run: bool = False) -> dict:
+    """Sweep every PenaltyRecord and rewrite legacy notes for cycle-defined
+    types. Idempotent — records already carrying an ISO 8601 UTC token in
+    their notes are skipped.
+
+    Returns a summary: ``{scanned, rewritten, skipped, by_kind}``.
+    """
+    from app.models.transaction import PenaltyRecord
+
+    scanned = 0
+    rewritten = 0
+    skipped = 0
+    by_kind: dict = {"Late Declaration": 0, "Late Deposits": 0, "Late Loan Application": 0}
+
+    penalties = db.query(PenaltyRecord).all()
+    for p in penalties:
+        scanned += 1
+        new_notes = rewrite_legacy_penalty_narration(db, p)
+        if new_notes is None:
+            skipped += 1
+            continue
+        # Bump the by-kind counter based on the leading token of the new
+        # narration ("Late Declaration for June 2026 — …").
+        for k in by_kind:
+            if new_notes.startswith(k):
+                by_kind[k] += 1
+                break
+        rewritten += 1
+
+    if not dry_run and rewritten > 0:
+        db.commit()
+    elif dry_run:
+        db.rollback()
+
+    return {
+        "scanned": scanned,
+        "rewritten": rewritten,
+        "skipped": skipped,
+        "by_kind": by_kind,
+        "dry_run": dry_run,
+    }
+
+
+def reverse_penalties_for_reconciliation_declarations(
+    db: Session, actor_user_id: UUID, dry_run: bool = False
+) -> dict:
+    """Sweep every live cycle-defined penalty (Late Declaration / Late
+    Deposits / Late Loan Application) and reverse the ones tied to
+    declarations that were created via treasurer reconciliation. These
+    penalties were charged in error under the old code path — the
+    treasurer's retrospective bookkeeping shouldn't have generated a
+    late fee against the member.
+
+    For each matching penalty:
+      * `status` flips to REVERSED (from APPROVED / PAID / REVERSAL_PENDING).
+      * `reversed_by / reversed_at / reversal_reason` are stamped.
+      * If a live ledger JE backed the penalty, a mirror-reversing JE is
+        posted (Cr MEM_SAV / Dr PENALTY_INCOME), the original JE is
+        marked reversed, and `reversal_journal_entry_id` is linked.
+
+    Idempotent. Runs safely against production; returns a summary. Uses
+    the existing `is_reconciliation_declaration` helper as the ground
+    truth so it agrees with the guards on the auto-issue sites.
+    """
+    from app.models.ledger import JournalEntry, JournalLine
+
+    reversible_statuses = {
+        PenaltyRecordStatus.APPROVED.value,
+        PenaltyRecordStatus.PAID.value,
+        PenaltyRecordStatus.REVERSAL_PENDING.value,
+    }
+
+    penalties = db.query(PenaltyRecord).filter(
+        PenaltyRecord.status.in_(list(reversible_statuses))
+    ).all()
+
+    scanned = 0
+    reversed_count = 0
+    skipped_not_cycle = 0
+    skipped_not_reconciled = 0
+    skipped_no_link = 0
+    reversed_ids = []
+
+    for p in penalties:
+        scanned += 1
+        ptype = p.penalty_type
+        ptype_name = (ptype.name if ptype else "") or ""
+        k_lower = ptype_name.strip().lower()
+        # Only touch cycle-defined kinds; manual compliance-created
+        # penalties are unrelated to reconciliation.
+        if not (
+            ("late" in k_lower and "declaration" in k_lower)
+            or ("late" in k_lower and "deposit" in k_lower)
+            or ("late" in k_lower and "loan" in k_lower and "application" in k_lower)
+        ):
+            skipped_not_cycle += 1
+            continue
+
+        # Match the penalty back to the effective month it fired for.
+        # Late Declaration / Late Deposits reference the declaration
+        # month; Late Loan Application references the application month.
+        effective_month = _extract_effective_month_from_notes(p.notes or "")
+        if not effective_month and p.date_issued:
+            effective_month = date(p.date_issued.year, p.date_issued.month, 1)
+        if not effective_month:
+            skipped_no_link += 1
+            continue
+
+        if not is_reconciliation_declaration_for_member_month(
+            db, p.member_id, effective_month.year, effective_month.month
+        ):
+            skipped_not_reconciled += 1
+            continue
+
+        reason = (
+            f"Auto-reversed by reconciliation-penalty sweep — the declaration for "
+            f"{effective_month.strftime('%B %Y')} was created via treasurer "
+            f"reconciliation, so no late-window penalty should have been charged."
+        )
+        reversal_je_id = None
+        if p.journal_entry_id:
+            orig_je = db.query(JournalEntry).filter(JournalEntry.id == p.journal_entry_id).first()
+            if orig_je and not orig_je.reversed_by:
+                orig_lines = db.query(JournalLine).filter(
+                    JournalLine.journal_entry_id == orig_je.id
+                ).all()
+                rev_lines = [
+                    {
+                        "account_id": ln.ledger_account_id,
+                        "debit_amount": ln.credit_amount,
+                        "credit_amount": ln.debit_amount,
+                        "description": f"Reversal: {ln.description or ''}",
+                    }
+                    for ln in orig_lines
+                ]
+                rev_je = create_journal_entry(
+                    db=db,
+                    description=(
+                        f"Penalty auto-reversal — {ptype_name} was wrongly charged on a "
+                        f"reconciliation-created declaration ({effective_month.strftime('%B %Y')})"
+                    ),
+                    lines=rev_lines,
+                    dealing_month=orig_je.dealing_month,
+                    cycle_id=orig_je.cycle_id,
+                    source_ref=str(p.id),
+                    source_type="penalty_reversal",
+                    created_by=actor_user_id,
+                )
+                orig_je.reversed_by = actor_user_id
+                orig_je.reversed_at = datetime.utcnow()
+                orig_je.reversal_reason = reason
+                reversal_je_id = rev_je.id
+
+        p.status = PenaltyRecordStatus.REVERSED.value
+        p.reversed_by = actor_user_id
+        p.reversed_at = datetime.utcnow()
+        p.reversal_reason = reason
+        if reversal_je_id:
+            p.reversal_journal_entry_id = reversal_je_id
+        reversed_count += 1
+        reversed_ids.append(str(p.id))
+
+    if dry_run:
+        db.rollback()
+    else:
+        db.commit()
+
+    return {
+        "scanned": scanned,
+        "reversed": reversed_count,
+        "skipped_not_cycle_defined": skipped_not_cycle,
+        "skipped_not_reconciled": skipped_not_reconciled,
+        "skipped_no_link": skipped_no_link,
+        "reversed_penalty_ids": reversed_ids,
+        "dry_run": dry_run,
+    }
 
 
 def create_declaration(
@@ -379,9 +812,20 @@ def create_declaration(
         if auto_apply and monthly_end_day and penalty_type_id:
             today = date_type.today()
             is_late = False
-            
+
+            # Skip when the declaration was created via treasurer
+            # reconciliation — the treasurer is entering the record on
+            # behalf of the member for a past month; the member didn't
+            # miss a live submission window and shouldn't be charged.
+            if is_reconciliation_declaration(db, declaration.id):
+                logger.info(
+                    "Declaration %s was created via reconciliation — skipping late-declaration penalty check",
+                    declaration.id,
+                )
+                # Fall through with is_late=False below.
+                pass
             # Check if declaration is late (after monthly_end_day)
-            if today.year == effective_month.year and today.month == effective_month.month:
+            elif today.year == effective_month.year and today.month == effective_month.month:
                 if today.day > monthly_end_day:
                     is_late = True
                     logger.info(f"Declaration is late: today.day ({today.day}) > monthly_end_day ({monthly_end_day})")
