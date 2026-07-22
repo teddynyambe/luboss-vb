@@ -574,6 +574,126 @@ def get_pending_penalties(
     }
 
 
+@router.get("/my-penalties")
+def get_my_penalties(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Full penalty history for the CURRENT member — every status,
+    newest first. Mirrors the compliance dashboard's per-member audit
+    but scoped to the caller so the member can see (in the Penalties
+    modal from their dashboard) exactly why they were charged, when,
+    and the current status of every penalty.
+
+    Reuses the narration in ``PenaltyRecord.notes`` (which now carries
+    the ISO 8601 offending timestamp + the missed window). Timestamps
+    are returned as ISO 8601 UTC — the frontend re-renders them in the
+    browser's local timezone.
+    """
+    from app.models.transaction import (
+        PenaltyRecord, PenaltyRecordStatus, PenaltyType,
+    )
+    from app.services.transaction import (
+        is_reconciliation_declaration_for_member_month,
+        _extract_effective_month_from_notes,
+    )
+    from datetime import date as _date
+
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        return {
+            "member_id": None,
+            "summary": {
+                "total_count": 0,
+                "pending_count": 0,
+                "approved_count": 0,
+                "reversal_pending_count": 0,
+                "reversed_count": 0,
+                "paid_count": 0,
+                "total_owed": 0.0,
+            },
+            "penalties": [],
+        }
+
+    penalties = (
+        db.query(PenaltyRecord)
+        .filter(PenaltyRecord.member_id == member_profile.id)
+        .order_by(PenaltyRecord.date_issued.desc())
+        .all()
+    )
+
+    summary = {
+        "total_count": len(penalties),
+        "pending_count": 0,
+        "approved_count": 0,
+        "reversal_pending_count": 0,
+        "reversed_count": 0,
+        "paid_count": 0,
+        "total_owed": 0.0,
+    }
+
+    rows = []
+    for p in penalties:
+        ptype = p.penalty_type
+        fee = float(ptype.fee_amount) if ptype and ptype.fee_amount is not None else 0.0
+        status_val = p.status.value if isinstance(p.status, PenaltyRecordStatus) else p.status
+
+        if status_val == PenaltyRecordStatus.PENDING.value:
+            summary["pending_count"] += 1
+        elif status_val == PenaltyRecordStatus.APPROVED.value:
+            summary["approved_count"] += 1
+            summary["total_owed"] += fee
+        elif status_val == PenaltyRecordStatus.REVERSAL_PENDING.value:
+            summary["reversal_pending_count"] += 1
+            summary["total_owed"] += fee
+        elif status_val == PenaltyRecordStatus.PAID.value:
+            summary["paid_count"] += 1
+            summary["total_owed"] += fee
+        elif status_val == PenaltyRecordStatus.REVERSED.value:
+            summary["reversed_count"] += 1
+
+        # Detect if this penalty was charged against a reconciliation
+        # declaration — the compliance sweep should reverse those, but
+        # showing the flag helps the member understand pending reversals.
+        ptype_name = (ptype.name if ptype else "") or ""
+        k_lower = ptype_name.strip().lower()
+        is_cycle_defined = (
+            ("late" in k_lower and "declaration" in k_lower)
+            or ("late" in k_lower and "deposit" in k_lower)
+            or ("late" in k_lower and "loan" in k_lower and "application" in k_lower)
+        )
+        is_reconciliation_penalty = False
+        if is_cycle_defined:
+            eff = _extract_effective_month_from_notes(p.notes or "")
+            if not eff and p.date_issued:
+                eff = _date(p.date_issued.year, p.date_issued.month, 1)
+            if eff and is_reconciliation_declaration_for_member_month(
+                db, member_profile.id, eff.year, eff.month,
+            ):
+                is_reconciliation_penalty = True
+
+        rows.append({
+            "id": str(p.id),
+            "penalty_type_name": ptype_name or "Unknown",
+            "penalty_type_description": ptype.description if ptype else None,
+            "fee_amount": fee,
+            "status": status_val,
+            "date_issued": p.date_issued.isoformat() if p.date_issued else None,
+            "approved_at": p.approved_at.isoformat() if p.approved_at else None,
+            "notes": p.notes,
+            "reversal_reason": p.reversal_reason,
+            "reversal_requested_at": p.reversal_requested_at.isoformat() if p.reversal_requested_at else None,
+            "reversed_at": p.reversed_at.isoformat() if p.reversed_at else None,
+            "is_reconciliation_penalty": is_reconciliation_penalty,
+        })
+
+    return {
+        "member_id": str(member_profile.id),
+        "summary": summary,
+        "penalties": rows,
+    }
+
+
 @router.get("/declarations/applicable-penalties")
 def get_applicable_penalties(
     cycle_id: str,

@@ -536,39 +536,45 @@ def get_member_penalties_balance(
     member_id: UUID,
     as_of_date: datetime = None
 ) -> Decimal:
-    """Get member's penalties balance from the ledger, excluding reversed entries.
+    """Total value of a member's live penalties (approved + paid +
+    reversal-pending). Excludes REVERSED (voided) and PENDING (not yet
+    approved).
 
-    Uses the Penalties Payable account (LIABILITY).  For a liability account
-    the balance is credits minus debits.  Only non-reversed journal entries
-    are included so that voided transactions don't inflate the total.
+    Sums `PenaltyType.fee_amount` across the member's `PenaltyRecord`
+    rows filtered by status. This is the same "Total exposure" figure
+    the compliance dashboard's Member Penalty Audit rollup uses, so the
+    number the member sees on their Account Status card matches what
+    compliance sees for them.
+
+    Why not the ledger any more: cycle-defined auto-issued penalties
+    post JEs to `MEM_SAV / PENALTY_INCOME` while deposit-approval JEs
+    credit `PENALTIES_PAYABLE`, so the two paths never offset each
+    other on a single account. That made the ledger-only approach drift
+    upwards over time (particularly after reversals, which also only
+    touch `MEM_SAV / PENALTY_INCOME`). Sourcing from PenaltyRecord.status
+    gives a single source of truth that everyone in the app agrees on.
     """
-    from app.models.ledger import JournalLine, JournalEntry
+    from app.models.transaction import PenaltyRecord, PenaltyRecordStatus, PenaltyType
 
-    account = db.query(LedgerAccount).filter(
-        LedgerAccount.member_id == member_id,
-        LedgerAccount.account_name.ilike("%penalties%")
-    ).first()
+    live_statuses = [
+        PenaltyRecordStatus.APPROVED.value,
+        PenaltyRecordStatus.PAID.value,
+        PenaltyRecordStatus.REVERSAL_PENDING.value,
+    ]
 
-    if not account:
-        return Decimal("0.00")
-
-    query = db.query(
-        func.sum(JournalLine.credit_amount).label("total_credits"),
-        func.sum(JournalLine.debit_amount).label("total_debits"),
-    ).join(JournalEntry).filter(
-        JournalLine.ledger_account_id == account.id,
-        JournalEntry.reversed_by.is_(None),
+    q = (
+        db.query(func.coalesce(func.sum(PenaltyType.fee_amount), 0))
+        .join(PenaltyRecord, PenaltyRecord.penalty_type_id == PenaltyType.id)
+        .filter(
+            PenaltyRecord.member_id == member_id,
+            PenaltyRecord.status.in_(live_statuses),
+        )
     )
-
     if as_of_date:
-        query = query.filter(JournalEntry.entry_date <= as_of_date)
+        q = q.filter(PenaltyRecord.date_issued <= as_of_date)
 
-    result = query.first()
-    total_credits = result.total_credits or Decimal("0.00")
-    total_debits = result.total_debits or Decimal("0.00")
-
-    # LIABILITY: balance = credits - debits
-    return max(Decimal("0.00"), total_credits - total_debits)
+    total = q.scalar()
+    return Decimal(str(total)) if total is not None else Decimal("0.00")
 
 
 def get_member_monthly_loan_balances(db: Session, member_id: UUID) -> list[dict]:

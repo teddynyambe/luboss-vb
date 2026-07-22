@@ -41,6 +41,36 @@ export default function MemberDashboard() {
   const [hasActiveCycles, setHasActiveCycles] = useState(true);
   const [hasCurrentMonthDeclaration, setHasCurrentMonthDeclaration] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  // Dedicated modal for the Penalties card — richer than the generic
+  // transaction history because it shows each penalty's audit narration,
+  // status, reversal reason, and reconciliation flag.
+  const [penaltyAuditOpen, setPenaltyAuditOpen] = useState(false);
+  const [penaltyAuditLoading, setPenaltyAuditLoading] = useState(false);
+  const [penaltyAudit, setPenaltyAudit] = useState<{
+    summary: {
+      total_count: number;
+      pending_count: number;
+      approved_count: number;
+      reversal_pending_count: number;
+      reversed_count: number;
+      paid_count: number;
+      total_owed: number;
+    };
+    penalties: {
+      id: string;
+      penalty_type_name: string;
+      penalty_type_description?: string | null;
+      fee_amount: number;
+      status: string;
+      date_issued: string | null;
+      approved_at?: string | null;
+      notes: string | null;
+      reversal_reason: string | null;
+      reversal_requested_at: string | null;
+      reversed_at: string | null;
+      is_reconciliation_penalty?: boolean;
+    }[];
+  } | null>(null);
   const [modalType, setModalType] = useState<'savings' | 'penalties' | 'social_fund' | 'admin_fund' | null>(null);
   const [currentLoan, setCurrentLoan] = useState<any>(null);
   const [loanModalOpen, setLoanModalOpen] = useState(false);
@@ -118,8 +148,54 @@ export default function MemberDashboard() {
   };
 
   const handleCardClick = (type: 'savings' | 'penalties' | 'social_fund' | 'admin_fund') => {
+    if (type === 'penalties') {
+      // Open the audit modal instead of the generic transaction history
+      // so members see the same rich narration compliance sees.
+      openPenaltyAudit();
+      return;
+    }
     setModalType(type);
     setModalOpen(true);
+  };
+
+  const openPenaltyAudit = async () => {
+    setPenaltyAuditOpen(true);
+    setPenaltyAuditLoading(true);
+    setPenaltyAudit(null);
+    try {
+      const res = await api.get<typeof penaltyAudit>('/api/member/my-penalties');
+      if (res.data) setPenaltyAudit(res.data);
+    } finally {
+      setPenaltyAuditLoading(false);
+    }
+  };
+
+  const closePenaltyAudit = () => {
+    setPenaltyAuditOpen(false);
+    setPenaltyAudit(null);
+  };
+
+  // Reuse the compliance dashboard's helpers so member-facing timestamps
+  // land in browser-local time and narration ISO tokens auto-translate.
+  const fmtIso = (iso: string | null | undefined, withTime: boolean) => {
+    if (!iso) return '—';
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      return withTime
+        ? d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+        : d.toLocaleDateString(undefined, { dateStyle: 'medium' });
+    } catch {
+      return iso;
+    }
+  };
+  const renderNarration = (text: string | null | undefined) => {
+    if (!text) return '';
+    let out = text.replace(/\b(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})Z\b/g, (m) =>
+      fmtIso(m, true)
+    );
+    out = out.replace(/\b(\d{4}-\d{2}-\d{2})\b(?!T)/g, (m) => fmtIso(m, false));
+    return out;
   };
 
   const handleCloseModal = () => {
@@ -436,6 +512,156 @@ export default function MemberDashboard() {
           type={modalType}
           title={getModalTitle(modalType)}
         />
+      )}
+
+      {/* Penalty Audit Modal — member-facing view of their own penalty
+          history with the same rich narration compliance sees. Opens
+          when the "Penalties" card on the Account Status strip is
+          tapped. Times render in the browser's local timezone. */}
+      {penaltyAuditOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50"
+          onClick={closePenaltyAudit}
+        >
+          <div
+            className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[92vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="bg-yellow-500 text-white px-6 py-4 shrink-0 flex justify-between items-start">
+              <div>
+                <h2 className="text-xl md:text-2xl font-bold">My Penalties</h2>
+                <p className="text-xs text-yellow-50 mt-1">
+                  Every penalty on your record — why it was charged and its current status. Times shown in your local timezone.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={closePenaltyAudit}
+                className="text-white hover:text-yellow-100 text-2xl leading-none"
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3">
+              {penaltyAuditLoading && (
+                <div className="text-center py-10">
+                  <div className="animate-spin rounded-full h-10 w-10 border-4 border-yellow-200 border-t-yellow-500 mx-auto"></div>
+                  <p className="mt-3 text-yellow-700 text-sm">Loading…</p>
+                </div>
+              )}
+              {!penaltyAuditLoading && penaltyAudit && (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-6 gap-2">
+                    <div className="p-2 bg-gray-50 border border-gray-200 rounded-lg text-center">
+                      <p className="text-[10px] text-gray-600 uppercase">Total</p>
+                      <p className="text-base font-bold text-gray-900">{penaltyAudit.summary.total_count}</p>
+                    </div>
+                    <div className="p-2 bg-yellow-50 border border-yellow-200 rounded-lg text-center">
+                      <p className="text-[10px] text-yellow-700 uppercase">Pending</p>
+                      <p className="text-base font-bold text-yellow-900">{penaltyAudit.summary.pending_count}</p>
+                    </div>
+                    <div className="p-2 bg-blue-50 border border-blue-200 rounded-lg text-center">
+                      <p className="text-[10px] text-blue-700 uppercase">Approved</p>
+                      <p className="text-base font-bold text-blue-900">{penaltyAudit.summary.approved_count}</p>
+                    </div>
+                    <div className="p-2 bg-orange-50 border border-orange-200 rounded-lg text-center">
+                      <p className="text-[10px] text-orange-700 uppercase">Rev. pending</p>
+                      <p className="text-base font-bold text-orange-900">{penaltyAudit.summary.reversal_pending_count}</p>
+                    </div>
+                    <div className="p-2 bg-green-50 border border-green-200 rounded-lg text-center">
+                      <p className="text-[10px] text-green-700 uppercase">Paid</p>
+                      <p className="text-base font-bold text-green-900">{penaltyAudit.summary.paid_count}</p>
+                    </div>
+                    <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-center">
+                      <p className="text-[10px] text-red-700 uppercase">Reversed</p>
+                      <p className="text-base font-bold text-red-900">{penaltyAudit.summary.reversed_count}</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-yellow-900 bg-yellow-50 border border-yellow-200 rounded px-3 py-2">
+                    Total currently on your account (approved + reversal-pending + paid):{' '}
+                    <strong>K{penaltyAudit.summary.total_owed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong>
+                  </p>
+
+                  {penaltyAudit.penalties.length === 0 ? (
+                    <p className="text-sm text-yellow-700 bg-yellow-50 border border-yellow-200 rounded p-3">
+                      No penalties on your record.
+                    </p>
+                  ) : (
+                    <div className="space-y-2">
+                      {penaltyAudit.penalties.map((p) => {
+                        const statusStyle = (() => {
+                          switch (p.status) {
+                            case 'approved':          return 'bg-blue-100 text-blue-800 border-blue-300';
+                            case 'reversal_pending':  return 'bg-orange-100 text-orange-800 border-orange-300';
+                            case 'reversed':          return 'bg-red-100 text-red-800 border-red-300';
+                            case 'paid':              return 'bg-green-100 text-green-800 border-green-300';
+                            case 'pending':           return 'bg-yellow-100 text-yellow-800 border-yellow-300';
+                            default:                  return 'bg-gray-100 text-gray-800 border-gray-300';
+                          }
+                        })();
+                        return (
+                          <div
+                            key={p.id}
+                            className={`bg-white border-2 rounded-lg p-3 ${
+                              p.is_reconciliation_penalty && p.status !== 'reversed'
+                                ? 'border-amber-300 ring-2 ring-amber-100'
+                                : 'border-yellow-100'
+                            }`}
+                          >
+                            <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                              <div>
+                                <h3 className="font-bold text-yellow-900">{p.penalty_type_name}</h3>
+                                <p className="text-xs text-yellow-700">
+                                  K{p.fee_amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                  {' · issued '}{fmtIso(p.date_issued, true)}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap items-center gap-1">
+                                {p.is_reconciliation_penalty && p.status !== 'reversed' && (
+                                  <span
+                                    className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide rounded border bg-amber-100 text-amber-900 border-amber-300"
+                                    title="This penalty was charged on a treasurer-reconciliation entry — compliance may reverse it."
+                                  >
+                                    Reconciliation
+                                  </span>
+                                )}
+                                <span className={`px-2 py-0.5 text-xs font-semibold rounded border ${statusStyle}`}>
+                                  {p.status.replace(/_/g, ' ')}
+                                </span>
+                              </div>
+                            </div>
+                            {p.notes && (
+                              <p className="mt-1 text-sm text-yellow-900 bg-yellow-50 border border-yellow-200 rounded px-3 py-2 whitespace-pre-wrap">
+                                {renderNarration(p.notes)}
+                              </p>
+                            )}
+                            {(p.approved_at || p.reversal_requested_at || p.reversed_at || p.reversal_reason) && (
+                              <div className="mt-2 text-[11px] text-yellow-800 space-y-0.5">
+                                {p.approved_at && (
+                                  <div>Approved at <strong>{fmtIso(p.approved_at, true)}</strong>.</div>
+                                )}
+                                {p.reversal_requested_at && (
+                                  <div>Reversal requested at <strong>{fmtIso(p.reversal_requested_at, true)}</strong>.</div>
+                                )}
+                                {p.reversal_reason && (
+                                  <div>Reversal reason: <em>{p.reversal_reason}</em></div>
+                                )}
+                                {p.reversed_at && (
+                                  <div>Reversed at <strong>{fmtIso(p.reversed_at, true)}</strong>.</div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Loan Repayment Modal */}
