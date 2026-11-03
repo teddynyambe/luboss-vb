@@ -225,6 +225,12 @@ export default function TreasurerDashboard() {
   const [reconcileSubmitting, setReconcileSubmitting] = useState(false);
   const [reconcileError, setReconcileError] = useState<string | null>(null);
 
+  // Declaration-details modal — treasurer uploads a proof-of-payment file on
+  // behalf of a member who sent their slip outside the system.
+  const [proofUploadFile, setProofUploadFile] = useState<File | null>(null);
+  const [proofUploading, setProofUploading] = useState(false);
+  const [proofUploadError, setProofUploadError] = useState<string | null>(null);
+
   // Loan-details modal — inline "Edit loan terms" editor. Amount / term /
   // rate correspond to the same knobs on the Reconciliation Loan State panel;
   // the backend `POST /api/chairman/reconcile/loan/{id}/edit-terms` is what
@@ -821,6 +827,42 @@ export default function TreasurerDashboard() {
     setReconcileRepayment('');
     setReconcileReason('');
     setReconcileError(null);
+    setProofUploadFile(null);
+    setProofUploadError(null);
+  };
+
+  const submitProofOnBehalf = async () => {
+    if (!declarationDetails?.declaration || !proofUploadFile) return;
+    setProofUploading(true);
+    setProofUploadError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', proofUploadFile);
+      const res = await api.postFormData<{ message: string }>(
+        `/api/treasurer/declarations/${declarationDetails.declaration.id}/proof`,
+        formData,
+      );
+      if (res.error) {
+        setProofUploadError(res.error);
+        return;
+      }
+      setProofUploadFile(null);
+      try {
+        const fresh = await api.get<DeclarationDetailsReport>(
+          `/api/treasurer/reports/declarations/details?member_id=${declarationDetails.member_id}&month=${selectedReportMonth}`,
+        );
+        if (fresh.data) setDeclarationDetails(fresh.data);
+      } catch {
+        /* ignore refresh failure — the upload already succeeded */
+      }
+      await loadReports();
+      setMessage({ type: 'success', text: `Proof of payment uploaded for ${declarationDetails.member_name}.` });
+      setTimeout(() => setMessage(null), 4000);
+    } catch (err) {
+      setProofUploadError(err instanceof Error ? err.message : 'Failed to upload proof');
+    } finally {
+      setProofUploading(false);
+    }
   };
 
   const openReconcileForm = () => {
@@ -3730,6 +3772,31 @@ export default function TreasurerDashboard() {
                               </p>
                             )}
                           </div>
+                          {declarationDetails.declaration.status !== 'approved' || declarationDetails.deposit_proof ? (
+                            <div className="mt-3 border-t border-gray-200 pt-3">
+                              <p className="text-xs font-semibold text-gray-700 mb-1">
+                                {declarationDetails.deposit_proof?.has_file ? 'Replace proof on behalf of member' : 'Upload proof on behalf of member'}
+                              </p>
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                <input
+                                  type="file"
+                                  accept=".pdf,.jpg,.jpeg,.png,.gif"
+                                  onChange={(e) => { setProofUploadFile(e.target.files?.[0] ?? null); setProofUploadError(null); }}
+                                  className="text-sm text-gray-700 file:mr-2 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-gray-200 file:text-gray-800 file:font-semibold hover:file:bg-gray-300"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={submitProofOnBehalf}
+                                  disabled={!proofUploadFile || proofUploading}
+                                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                >
+                                  {proofUploading ? 'Uploading…' : 'Upload proof'}
+                                </button>
+                              </div>
+                              <p className="text-xs text-gray-500 mt-1">PDF or image. Audit logged. Does not post to the ledger by itself.</p>
+                              {proofUploadError && <p className="text-xs text-red-700 mt-1">{proofUploadError}</p>}
+                            </div>
+                          ) : null}
                         </div>
                       ) : (
                         <div className="bg-gray-50 border-2 border-gray-200 rounded-xl p-4">
@@ -3737,6 +3804,31 @@ export default function TreasurerDashboard() {
                           <p className="text-sm italic text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-2">
                             No proof of payment was uploaded for this declaration.
                           </p>
+                          {declarationDetails.declaration.status !== 'approved' || declarationDetails.deposit_proof ? (
+                            <div className="mt-3 border-t border-gray-200 pt-3">
+                              <p className="text-xs font-semibold text-gray-700 mb-1">
+                                Upload proof on behalf of member
+                              </p>
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                <input
+                                  type="file"
+                                  accept=".pdf,.jpg,.jpeg,.png,.gif"
+                                  onChange={(e) => { setProofUploadFile(e.target.files?.[0] ?? null); setProofUploadError(null); }}
+                                  className="text-sm text-gray-700 file:mr-2 file:px-3 file:py-1.5 file:rounded-lg file:border-0 file:bg-gray-200 file:text-gray-800 file:font-semibold hover:file:bg-gray-300"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={submitProofOnBehalf}
+                                  disabled={!proofUploadFile || proofUploading}
+                                  className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                >
+                                  {proofUploading ? 'Uploading…' : 'Upload proof'}
+                                </button>
+                              </div>
+                              <p className="text-xs text-gray-500 mt-1">PDF or image. Audit logged. Does not post to the ledger by itself.</p>
+                              {proofUploadError && <p className="text-xs text-red-700 mt-1">{proofUploadError}</p>}
+                            </div>
+                          ) : null}
                         </div>
                       )}
                     </>

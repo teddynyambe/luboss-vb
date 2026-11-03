@@ -1830,6 +1830,134 @@ def post_reconcile_declaration(
     return result
 
 
+@router.post("/declarations/{declaration_id}/proof")
+def upload_declaration_proof_on_behalf(
+    declaration_id: str,
+    file: UploadFile = File(...),
+    reference: Optional[str] = Form(None),
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Upload a proof-of-payment file on behalf of a member.
+
+    Covers members who paid but never uploaded their slip (sent it to the
+    treasurer directly instead). Behaviour by the declaration's latest
+    DepositProof:
+
+    * **None** → creates a SUBMITTED proof for the declaration total and
+      moves a PENDING / REJECTED declaration to PROOF — the same state a
+      member upload produces. The treasurer then approves it from the
+      pending queue, or via "Save & post declaration".
+    * **REJECTED** → swaps in the new file and resets it to SUBMITTED
+      (declaration back to PROOF), like the member resubmit flow.
+    * **SUBMITTED / APPROVED** (incl. "reconciliation" placeholders) →
+      attaches/replaces the file only. No status or ledger change.
+
+    No late-deposit penalty is raised — the upload time here is the
+    treasurer's action, not when the member paid.
+    """
+    import os
+    from pathlib import Path
+    from app.core.config import DEPOSIT_PROOFS_DIR
+    from app.core.audit import write_audit_log
+
+    try:
+        declaration_uuid = UUID(declaration_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid declaration_id")
+
+    declaration = db.query(Declaration).filter(Declaration.id == declaration_uuid).first()
+    if not declaration:
+        raise HTTPException(status_code=404, detail="Declaration not found")
+
+    allowed_extensions = {".pdf", ".jpg", ".jpeg", ".png", ".gif"}
+    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid file type. Allowed: {', '.join(sorted(allowed_extensions))}",
+        )
+
+    deposit = db.query(DepositProof).filter(
+        DepositProof.declaration_id == declaration_uuid
+    ).order_by(DepositProof.uploaded_at.desc()).first()
+
+    if deposit is None and declaration.status == DeclarationStatus.APPROVED:
+        raise HTTPException(
+            status_code=400,
+            detail="Declaration is approved but has no deposit record to attach a proof to.",
+        )
+
+    DEPOSIT_PROOFS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    safe_filename = (
+        "".join(c for c in file.filename if c.isalnum() or c in "._- ")
+        if file.filename else "proof"
+    )
+    file_path = DEPOSIT_PROOFS_DIR / f"deposit_{declaration_uuid}_{timestamp}_{safe_filename}"
+    try:
+        with open(file_path, "wb") as f:
+            f.write(file.file.read())
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    if deposit is None:
+        total = sum(
+            (getattr(declaration, attr) or Decimal("0.00"))
+            for attr in ("declared_savings_amount", "declared_social_fund", "declared_admin_fund",
+                         "declared_penalties", "declared_interest_on_loan", "declared_loan_repayment")
+        )
+        deposit = DepositProof(
+            member_id=declaration.member_id,
+            declaration_id=declaration_uuid,
+            upload_path=str(file_path),
+            amount=Decimal(str(total)),
+            reference=reference,
+            cycle_id=declaration.cycle_id,
+            status=DepositProofStatus.SUBMITTED.value,
+        )
+        db.add(deposit)
+        action = "Deposit proof uploaded on behalf of member"
+    else:
+        old_path = deposit.upload_path
+        if old_path and old_path != "reconciliation":
+            try:
+                if os.path.isfile(old_path):
+                    os.remove(old_path)
+            except OSError:
+                pass
+        deposit.upload_path = str(file_path)
+        if reference:
+            deposit.reference = reference
+        if deposit.status == DepositProofStatus.REJECTED.value:
+            deposit.status = DepositProofStatus.SUBMITTED.value
+            action = "Rejected deposit proof replaced on behalf of member"
+        else:
+            action = "Deposit proof file attached on behalf of member"
+
+    if declaration.status in (DeclarationStatus.PENDING, DeclarationStatus.REJECTED):
+        declaration.status = DeclarationStatus.PROOF
+
+    db.commit()
+    db.refresh(deposit)
+
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action=action,
+        details=(
+            f"declaration={declaration_id} deposit={deposit.id} "
+            f"status={deposit.status} file={file_path.name}"
+        ),
+    )
+    return {
+        "message": "Proof of payment uploaded.",
+        "deposit_id": str(deposit.id),
+        "deposit_status": deposit.status,
+        "declaration_status": declaration.status.value,
+    }
+
+
 class PostRepaymentForDeclarationRequest(BaseModel):
     """Post a fresh Repayment against a chosen loan for a declaration that
     has non-zero loan_repayment / interest but no attributed Repayment row.
