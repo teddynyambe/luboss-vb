@@ -7,6 +7,17 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useRouter } from 'next/navigation';
 import UserMenu from '@/components/UserMenu';
 
+// One proof-of-payment file on a deposit. A declaration paid in several
+// deposits carries several; the first ('main') can be replaced, the others
+// can be removed.
+interface ProofFile {
+  id: string;
+  upload_path: string;
+  filename: string;
+  uploaded_at: string | null;
+  is_main: boolean;
+}
+
 interface PendingDeposit {
   id: string;
   amount: number;
@@ -24,6 +35,7 @@ interface PendingDeposit {
   declared_loan_repayment?: number;
   uploaded_at: string;
   upload_path: string;
+  files?: ProofFile[];
   treasurer_comment?: string;
   member_response?: string;
   rejected_at?: string;
@@ -407,6 +419,7 @@ export default function TreasurerDashboard() {
       uploaded_at: string | null;
       upload_path?: string | null;
       has_file?: boolean;
+      files?: ProofFile[];
     } | null;
     repayments_attributed?: {
       id: string;
@@ -831,13 +844,37 @@ export default function TreasurerDashboard() {
     setProofUploadError(null);
   };
 
-  const submitProofOnBehalf = async () => {
+  const refreshDeclarationDetails = async () => {
+    if (!declarationDetails) return;
+    try {
+      const fresh = await api.get<DeclarationDetailsReport>(
+        `/api/treasurer/reports/declarations/details?member_id=${declarationDetails.member_id}&month=${selectedReportMonth}`,
+      );
+      if (fresh.data) setDeclarationDetails(fresh.data);
+    } catch {
+      /* ignore refresh failure — the write already succeeded */
+    }
+  };
+
+  const removeProofFileOnBehalf = async (fileId: string) => {
+    const depositId = declarationDetails?.deposit_proof?.id;
+    if (!depositId || !window.confirm('Remove this proof file?')) return;
+    setProofUploadError(null);
+    const res = await api.delete(`/api/treasurer/deposits/${depositId}/files/${fileId}`);
+    if (res.error) setProofUploadError(res.error);
+    else await refreshDeclarationDetails();
+  };
+
+  // mode 'add' keeps any existing file(s) and adds this one (a second or
+  // third deposit slip); 'replace' swaps the first file.
+  const submitProofOnBehalf = async (mode: 'add' | 'replace' = 'add') => {
     if (!declarationDetails?.declaration || !proofUploadFile) return;
     setProofUploading(true);
     setProofUploadError(null);
     try {
       const formData = new FormData();
       formData.append('file', proofUploadFile);
+      formData.append('mode', mode);
       const res = await api.postFormData<{ message: string }>(
         `/api/treasurer/declarations/${declarationDetails.declaration.id}/proof`,
         formData,
@@ -847,14 +884,7 @@ export default function TreasurerDashboard() {
         return;
       }
       setProofUploadFile(null);
-      try {
-        const fresh = await api.get<DeclarationDetailsReport>(
-          `/api/treasurer/reports/declarations/details?member_id=${declarationDetails.member_id}&month=${selectedReportMonth}`,
-        );
-        if (fresh.data) setDeclarationDetails(fresh.data);
-      } catch {
-        /* ignore refresh failure — the upload already succeeded */
-      }
+      await refreshDeclarationDetails();
       await loadReports();
       setMessage({ type: 'success', text: `Proof of payment uploaded for ${declarationDetails.member_name}.` });
       setTimeout(() => setMessage(null), 4000);
@@ -2653,12 +2683,26 @@ export default function TreasurerDashboard() {
               {/* Proof File */}
               <div className="bg-gray-50 border-2 border-gray-300 rounded-xl p-4">
                 <h3 className="text-lg font-bold text-blue-900 mb-3">Proof of Payment</h3>
-                <button
-                  onClick={() => handleViewProof(selectedDeposit.upload_path, selectedDeposit)}
-                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
-                >
-                  View/Download Proof File
-                </button>
+                {(selectedDeposit.files?.length ?? 0) > 1 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {selectedDeposit.files!.map((pf, i) => (
+                      <button
+                        key={pf.id}
+                        onClick={() => handleViewProof(pf.upload_path, { ...selectedDeposit, upload_path: pf.upload_path })}
+                        className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
+                      >
+                        View/Download Proof {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => handleViewProof(selectedDeposit.upload_path, selectedDeposit)}
+                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-semibold transition-colors"
+                  >
+                    View/Download Proof File
+                  </button>
+                )}
               </div>
 
               {/* Footer */}
@@ -3756,16 +3800,36 @@ export default function TreasurerDashboard() {
                           </div>
                           <div className="mt-3">
                             {declarationDetails.deposit_proof.has_file && declarationDetails.deposit_proof.upload_path ? (
-                              <button
-                                type="button"
-                                onClick={() => handleViewProof(
-                                  declarationDetails.deposit_proof!.upload_path!,
-                                  { upload_path: declarationDetails.deposit_proof!.upload_path! } as PendingDeposit,
-                                )}
-                                className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors"
-                              >
-                                📎 View Proof of Payment
-                              </button>
+                              <ul className="space-y-1">
+                                {(declarationDetails.deposit_proof.files ?? []).map((pf, i, all) => (
+                                  <li key={pf.id} className="flex items-center justify-between gap-2 text-sm bg-white border border-gray-200 rounded-lg px-3 py-1.5">
+                                    <span className="font-medium text-gray-800">
+                                      📎 {all.length > 1 ? `Proof ${i + 1}` : 'Proof of Payment'}
+                                      {pf.uploaded_at && (
+                                        <span className="font-normal text-gray-500"> · {new Date(pf.uploaded_at).toLocaleDateString()}</span>
+                                      )}
+                                    </span>
+                                    <span className="flex items-center gap-3">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleViewProof(pf.upload_path, { upload_path: pf.upload_path } as PendingDeposit)}
+                                        className="text-blue-700 font-semibold hover:underline"
+                                      >
+                                        View
+                                      </button>
+                                      {!pf.is_main && (
+                                        <button
+                                          type="button"
+                                          onClick={() => removeProofFileOnBehalf(pf.id)}
+                                          className="text-red-700 font-semibold hover:underline"
+                                        >
+                                          Remove
+                                        </button>
+                                      )}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
                             ) : (
                               <p className="text-sm italic text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-2">
                                 No proof of payment was uploaded — this entry was created via reconciliation.
@@ -3775,7 +3839,7 @@ export default function TreasurerDashboard() {
                           {declarationDetails.declaration.status !== 'approved' || declarationDetails.deposit_proof ? (
                             <div className="mt-3 border-t border-gray-200 pt-3">
                               <p className="text-xs font-semibold text-gray-700 mb-1">
-                                {declarationDetails.deposit_proof?.has_file ? 'Replace proof on behalf of member' : 'Upload proof on behalf of member'}
+                                {declarationDetails.deposit_proof?.has_file ? 'Add another proof on behalf of member' : 'Upload proof on behalf of member'}
                               </p>
                               <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                                 <input
@@ -3786,12 +3850,25 @@ export default function TreasurerDashboard() {
                                 />
                                 <button
                                   type="button"
-                                  onClick={submitProofOnBehalf}
+                                  onClick={() => submitProofOnBehalf('add')}
                                   disabled={!proofUploadFile || proofUploading}
                                   className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
                                 >
-                                  {proofUploading ? 'Uploading…' : 'Upload proof'}
+                                  {proofUploading
+                                    ? 'Uploading…'
+                                    : declarationDetails.deposit_proof?.has_file ? 'Add proof' : 'Upload proof'}
                                 </button>
+                                {declarationDetails.deposit_proof?.has_file && declarationDetails.deposit_proof.status !== 'rejected' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => submitProofOnBehalf('replace')}
+                                    disabled={!proofUploadFile || proofUploading}
+                                    title="Use the chosen file in place of the first proof instead of adding it"
+                                    className="px-3 py-1.5 bg-amber-100 text-amber-900 rounded-lg text-sm font-semibold hover:bg-amber-200 transition-colors disabled:opacity-50"
+                                  >
+                                    {(declarationDetails.deposit_proof.files?.length ?? 0) > 1 ? 'Replace Proof 1' : 'Replace instead'}
+                                  </button>
+                                )}
                               </div>
                               <p className="text-xs text-gray-500 mt-1">PDF or image. Audit logged. Does not post to the ledger by itself.</p>
                               {proofUploadError && <p className="text-xs text-red-700 mt-1">{proofUploadError}</p>}
@@ -3818,7 +3895,7 @@ export default function TreasurerDashboard() {
                                 />
                                 <button
                                   type="button"
-                                  onClick={submitProofOnBehalf}
+                                  onClick={() => submitProofOnBehalf('add')}
                                   disabled={!proofUploadFile || proofUploading}
                                   className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
                                 >

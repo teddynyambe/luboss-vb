@@ -78,6 +78,17 @@ export interface DepositProof {
   rejected_at?: string;
   uploaded_at: string;
   upload_path: string;
+  // Every real file on the proof, main file first. A declaration paid in
+  // several deposits carries several.
+  files?: ProofFile[];
+}
+
+export interface ProofFile {
+  id: string;            // 'main' for the first file, otherwise the file's id
+  upload_path: string;
+  filename: string;
+  uploaded_at: string | null;
+  is_main: boolean;
 }
 
 export interface Transaction {

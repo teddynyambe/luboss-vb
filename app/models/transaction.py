@@ -150,6 +150,32 @@ class DepositProof(Base):
     member = relationship("MemberProfile", back_populates="deposit_proofs")
     declaration = relationship("Declaration", back_populates="deposit_proofs")
     approval = relationship("DepositApproval", back_populates="deposit_proof", uselist=False)
+    # Additional proof files beyond `upload_path` (a declaration can be paid
+    # in several deposits). Deleted with the proof row.
+    extra_files = relationship(
+        "DepositProofFile",
+        back_populates="deposit_proof",
+        cascade="all, delete-orphan",
+        order_by="DepositProofFile.uploaded_at",
+    )
+
+
+class DepositProofFile(Base):
+    """Additional proof-of-payment file on a DepositProof.
+
+    `DepositProof.upload_path` stays the first/main file; second and later
+    files for the same declaration live here. They carry no amount or status
+    of their own — approval is still per DepositProof.
+    """
+    __tablename__ = "deposit_proof_file"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    deposit_proof_id = Column(Uuid(as_uuid=True), ForeignKey("deposit_proof.id"), nullable=False, index=True)
+    upload_path = Column(String(500), nullable=False)
+    uploaded_by = Column(Uuid(as_uuid=True), ForeignKey("user.id"), nullable=True)
+    uploaded_at = Column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
+
+    deposit_proof = relationship("DepositProof", back_populates="extra_files")
 
 
 class DepositApproval(Base):

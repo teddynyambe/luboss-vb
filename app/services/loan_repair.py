@@ -374,6 +374,8 @@ def reject_declaration(
                     os.remove(proof.upload_path)
             except OSError:
                 pass
+        from app.services.deposit_proof_files import delete_extra_files
+        delete_extra_files(db, proof)
 
     declaration.status = DeclarationStatus.PENDING
     db.commit()
@@ -439,6 +441,8 @@ def reverse_repayment(
                         os.remove(proof.upload_path)
                 except OSError:
                     pass
+            from app.services.deposit_proof_files import delete_extra_files
+            delete_extra_files(db, proof)
             proof_id = str(proof.id)
             if proof.declaration_id:
                 decl = db.query(Declaration).filter(Declaration.id == proof.declaration_id).first()

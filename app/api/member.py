@@ -19,6 +19,7 @@ from app.services.accounting import (
 )
 from pydantic import BaseModel
 from typing import Optional, List
+from app.services.deposit_proof_files import proof_files_payload
 from decimal import Decimal
 from datetime import date, datetime
 from uuid import UUID
@@ -3710,6 +3711,7 @@ def upload_deposit_proof(
     declaration_id: str = Form(...),
     amount: float = Form(...),
     reference: Optional[str] = Form(None),
+    extra_files: Optional[List[UploadFile]] = File(None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -3720,6 +3722,10 @@ def upload_deposit_proof(
     1. Declaration status changes from PENDING to APPROVED
     2. Deposit proof status is SUBMITTED
     3. Proof goes to Treasurer Dashboard for approval
+
+    `extra_files` carries a second/third slip when the declaration was paid
+    in several deposits; more can be added later via
+    `POST /deposits/{id}/files`.
     """
     from app.models.cycle import Cycle, CycleStatus
     
@@ -3738,6 +3744,20 @@ def upload_deposit_proof(
             status_code=400,
             detail=f"Invalid file type. Allowed: {', '.join(allowed_extensions)}"
         )
+    from app.services.deposit_proof_files import (
+        validate_proof_upload, add_proof_file, delete_extra_files, MAX_FILES_PER_PROOF,
+    )
+    extra_files = [f for f in (extra_files or []) if f is not None and f.filename]
+    if 1 + len(extra_files) > MAX_FILES_PER_PROOF:
+        raise HTTPException(
+            status_code=400,
+            detail=f"A proof can hold at most {MAX_FILES_PER_PROOF} files.",
+        )
+    for extra in extra_files:
+        try:
+            validate_proof_upload(extra)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     
     # Get declaration
     try:
@@ -3804,6 +3824,7 @@ def upload_deposit_proof(
                 # If file removal fails (already gone, perms), keep going —
                 # the DB cleanup is more important than the filesystem.
                 pass
+        delete_extra_files(db, rp)
         db.delete(rp)
     if rejected_proofs:
         db.flush()
@@ -3841,6 +3862,8 @@ def upload_deposit_proof(
     )
     db.add(deposit_proof)
     db.flush()  # Flush to get deposit_proof.id
+    for extra in extra_files:
+        add_proof_file(db, deposit_proof, extra, current_user.id)
     
     # Update declaration status to PROOF (proof submitted, awaiting treasurer approval)
     declaration.status = DeclarationStatus.PROOF
@@ -3991,7 +4014,10 @@ def get_my_deposit_proofs(
             "member_response": dep.member_response,
             "rejected_at": dep.rejected_at.isoformat() if dep.rejected_at else None,
             "uploaded_at": dep.uploaded_at.isoformat() if dep.uploaded_at else None,
-            "upload_path": dep.upload_path
+            "upload_path": dep.upload_path,
+            # Every real file on the proof (main first) — a declaration paid
+            # in several deposits carries several.
+            "files": proof_files_payload(dep),
         })
     
     return result
@@ -4160,6 +4186,117 @@ def attach_deposit_proof_file(
         "deposit_id": str(deposit.id),
         "upload_path": deposit.upload_path,
         "status": deposit.status,
+    }
+
+
+def _own_deposit_for_files(db: Session, current_user: User, deposit_id: str) -> DepositProof:
+    """Load one of the current member's deposit proofs for a file add/remove."""
+    member_profile = get_member_profile_by_user_id(db, current_user.id)
+    if not member_profile:
+        raise HTTPException(status_code=403, detail="Member profile not found")
+    if member_profile.status != MemberStatus.ACTIVE:
+        raise HTTPException(status_code=403, detail="Member account is not active")
+    try:
+        deposit_uuid = UUID(deposit_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid deposit_id")
+    deposit = db.query(DepositProof).filter(DepositProof.id == deposit_uuid).first()
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Deposit proof not found")
+    if deposit.member_id != member_profile.id:
+        raise HTTPException(status_code=403, detail="You can only change your own deposit proofs")
+    return deposit
+
+
+@router.post("/deposits/{deposit_id}/files")
+def add_deposit_proof_file(
+    deposit_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Add another proof-of-payment file to an existing DepositProof.
+
+    For a declaration paid in two or three deposits: the member uploads the
+    first slip as usual, then adds the others here. Like `attach-file`, this
+    does NOT change the deposit's status, the declaration, or the ledger —
+    an approved deposit stays approved.
+
+    Refused for REJECTED deposits (use Resubmit so the treasurer re-reviews).
+    """
+    from app.services.deposit_proof_files import add_proof_file, proof_files_payload
+    deposit = _own_deposit_for_files(db, current_user, deposit_id)
+    if deposit.status == DepositProofStatus.REJECTED.value:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This deposit was rejected — use the Resubmit action instead so the "
+                "treasurer can review your revised proof."
+            ),
+        )
+    try:
+        added = add_proof_file(db, deposit, file, current_user.id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    db.commit()
+    db.refresh(deposit)
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Additional deposit proof file added",
+        details=f"deposit={deposit_id} status={deposit.status} new_file={added['filename']}",
+    )
+    return {
+        "message": "Proof file added.",
+        "deposit_id": str(deposit.id),
+        "status": deposit.status,
+        "files": proof_files_payload(deposit),
+    }
+
+
+@router.delete("/deposits/{deposit_id}/files/{file_id}")
+def remove_deposit_proof_file(
+    deposit_id: str,
+    file_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Remove one additional proof file the member added by mistake.
+
+    Only additional files can be removed (the main file is replaced, never
+    removed), and only while the deposit is not yet approved — once the
+    treasurer has approved against the evidence, only the treasurer can
+    take a file away.
+    """
+    from app.services.deposit_proof_files import remove_extra_file, proof_files_payload
+    deposit = _own_deposit_for_files(db, current_user, deposit_id)
+    if deposit.status == DepositProofStatus.APPROVED.value:
+        raise HTTPException(
+            status_code=400,
+            detail="This deposit is already approved — ask the treasurer to remove the file.",
+        )
+    try:
+        removed = remove_extra_file(db, deposit, UUID(file_id))
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=404, detail=str(e) if "not found" in str(e) else "Proof file not found.")
+    db.commit()
+    db.refresh(deposit)
+
+    from app.core.audit import write_audit_log
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "member",
+        action="Additional deposit proof file removed",
+        details=f"deposit={deposit_id} status={deposit.status} file={removed}",
+    )
+    return {
+        "message": "Proof file removed.",
+        "deposit_id": str(deposit.id),
+        "files": proof_files_payload(deposit),
     }
 
 

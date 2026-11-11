@@ -21,6 +21,7 @@ export default function PaymentProofPage() {
   const [amount, setAmount] = useState<string>('');
   const [reference, setReference] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
+  const [extraFiles, setExtraFiles] = useState<File[]>([]);
   const [uploadLoading, setUploadLoading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [uploadSuccess, setUploadSuccess] = useState(false);
@@ -47,6 +48,9 @@ export default function PaymentProofPage() {
   const [attachFile, setAttachFile] = useState<File | null>(null);
   const [attachLoading, setAttachLoading] = useState(false);
   const [attachError, setAttachError] = useState('');
+  // 'replace' swaps the main file; 'add' keeps it and adds another proof.
+  const [attachMode, setAttachMode] = useState<'replace' | 'add'>('replace');
+  const [removingFileId, setRemovingFileId] = useState<string | null>(null);
 
   // Resubmit state
   const [resubmittingDeposit, setResubmittingDeposit] = useState<DepositProof | null>(null);
@@ -219,7 +223,10 @@ export default function PaymentProofPage() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
+      // First file is the main proof; any others ride along as additional
+      // proofs (a declaration paid in two or three deposits).
       setFile(e.target.files[0]);
+      setExtraFiles(Array.from(e.target.files).slice(1));
     }
   };
 
@@ -261,6 +268,7 @@ export default function PaymentProofPage() {
     try {
       const formData = new FormData();
       formData.append('file', file);
+      extraFiles.forEach((f) => formData.append('extra_files', f));
       formData.append('declaration_id', selectedDeclaration);
       formData.append('amount', amount);
       if (reference) {
@@ -276,6 +284,7 @@ export default function PaymentProofPage() {
         setAmount('');
         setReference('');
         setFile(null);
+        setExtraFiles([]);
         // Reload declarations
         await loadDeclarations();
         // Switch to view tab after 2 seconds
@@ -457,7 +466,8 @@ export default function PaymentProofPage() {
     }
   };
 
-  const openAttachForm = (deposit: DepositProof) => {
+  const openAttachForm = (deposit: DepositProof, mode: 'replace' | 'add' = 'replace') => {
+    setAttachMode(mode);
     setAttachingDeposit(deposit);
     setAttachFile(null);
     setAttachError('');
@@ -481,11 +491,17 @@ export default function PaymentProofPage() {
       form.append('file', attachFile);
       // Use raw fetch — api.put doesn't accept multipart bodies out of the box.
       const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-      const res = await fetch(`/api/member/deposits/${attachingDeposit.id}/attach-file`, {
-        method: 'PUT',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        body: form,
-      });
+      // 'add' keeps the existing file(s) and adds one more; 'replace' swaps the main file.
+      const res = await fetch(
+        attachMode === 'add'
+          ? `/api/member/deposits/${attachingDeposit.id}/files`
+          : `/api/member/deposits/${attachingDeposit.id}/attach-file`,
+        {
+          method: attachMode === 'add' ? 'POST' : 'PUT',
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+          body: form,
+        },
+      );
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         setAttachError((errBody as any)?.detail || `Failed (${res.status})`);
@@ -497,6 +513,19 @@ export default function PaymentProofPage() {
       setAttachError(err?.message || 'Failed to attach file');
     } finally {
       setAttachLoading(false);
+    }
+  };
+
+  const removeProofFile = async (deposit: DepositProof, fileId: string) => {
+    if (!window.confirm('Remove this proof file?')) return;
+    setRemovingFileId(fileId);
+    setViewError('');
+    try {
+      const res = await api.delete(`/api/member/deposits/${deposit.id}/files/${fileId}`);
+      if (res.error) setViewError(res.error);
+      else await loadDeposits();
+    } finally {
+      setRemovingFileId(null);
     }
   };
 
@@ -721,16 +750,22 @@ export default function PaymentProofPage() {
                       accept=".pdf,.jpg,.jpeg,.png,.gif"
                       onChange={handleFileChange}
                       required
+                      multiple
                       className="w-full"
                     />
                     <p className="mt-2 text-sm md:text-base text-blue-700">
-                      Accepted formats: PDF, JPG, JPEG, PNG, GIF
+                      Accepted formats: PDF, JPG, JPEG, PNG, GIF. Paid in more than one deposit? Select all the slips together — you can also add more later under View Proofs.
                     </p>
                     {file && (
                       <p className="mt-2 text-sm text-green-700 font-medium">
                         Selected: {file.name} ({(file.size / 1024).toFixed(2)} KB)
                       </p>
                     )}
+                    {extraFiles.map((f, i) => (
+                      <p key={i} className="mt-1 text-sm text-green-700 font-medium">
+                        + {f.name} ({(f.size / 1024).toFixed(2)} KB)
+                      </p>
+                    ))}
                   </div>
 
                   <div className="pt-6 border-t-2 border-blue-200">
@@ -897,6 +932,15 @@ export default function PaymentProofPage() {
                                 : 'Replace'}
                             </button>
                           )}
+                          {deposit.status !== 'rejected' && deposit.upload_path && deposit.upload_path !== 'reconciliation' && (
+                            <button
+                              onClick={() => openAttachForm(deposit, 'add')}
+                              title="Add another proof of payment for this declaration (e.g. a second deposit)"
+                              className="px-3 py-1 rounded-lg text-sm font-medium bg-emerald-100 text-emerald-800 hover:bg-emerald-200"
+                            >
+                              Add another
+                            </button>
+                          )}
                           <button
                             onClick={() => toggleExpand(deposit.id)}
                             className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg"
@@ -906,14 +950,50 @@ export default function PaymentProofPage() {
                         </div>
                       </div>
 
+                      {/* All files on this proof — shown once there's more
+                          than one, so each slip can be opened separately. */}
+                      {(deposit.files?.length ?? 0) > 1 && (
+                        <ul className="mt-3 space-y-1">
+                          {deposit.files!.map((f, i) => (
+                            <li key={f.id} className="flex items-center justify-between gap-2 text-sm bg-blue-50 border border-blue-200 rounded-lg px-3 py-1.5">
+                              <span className="text-blue-900 font-medium">
+                                📎 Proof {i + 1}
+                                {f.uploaded_at && <span className="font-normal text-blue-600"> · {formatDate(f.uploaded_at)}</span>}
+                              </span>
+                              <span className="flex items-center gap-3">
+                                <button
+                                  onClick={() => handleViewProof({ ...deposit, upload_path: f.upload_path })}
+                                  className="text-blue-700 font-medium hover:underline"
+                                >
+                                  View
+                                </button>
+                                {!f.is_main && deposit.status !== 'approved' && (
+                                  <button
+                                    onClick={() => removeProofFile(deposit, f.id)}
+                                    disabled={removingFileId === f.id}
+                                    className="text-red-700 font-medium hover:underline disabled:opacity-50"
+                                  >
+                                    {removingFileId === f.id ? 'Removing…' : 'Remove'}
+                                  </button>
+                                )}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+
                       {/* Inline attach/replace form — opens under the card
                           header for the deposit whose button was clicked. */}
                       {attachingDeposit?.id === deposit.id && (
                         <div className="mt-4 p-4 bg-emerald-50 border-2 border-emerald-200 rounded-xl">
                           <div className="flex justify-between items-baseline mb-2">
                             <h4 className="font-semibold text-emerald-900 text-sm">
-                              {!deposit.upload_path || deposit.upload_path === 'reconciliation'
+                              {attachMode === 'add'
+                                ? 'Add another proof of payment file'
+                                : !deposit.upload_path || deposit.upload_path === 'reconciliation'
                                 ? 'Attach proof of payment file'
+                                : (deposit.files?.length ?? 0) > 1
+                                ? 'Replace Proof 1 (the first file)'
                                 : 'Replace attached proof of payment file'}
                             </h4>
                             <button
@@ -952,6 +1032,8 @@ export default function PaymentProofPage() {
                             >
                               {attachLoading
                                 ? 'Uploading…'
+                                : attachMode === 'add'
+                                ? 'Add proof'
                                 : !deposit.upload_path || deposit.upload_path === 'reconciliation'
                                 ? 'Attach'
                                 : 'Replace'}

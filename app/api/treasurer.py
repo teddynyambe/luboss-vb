@@ -15,6 +15,7 @@ from uuid import UUID
 from datetime import datetime, date as date_type
 from decimal import Decimal
 from app.core.config import BANK_STATEMENTS_DIR
+from app.services.deposit_proof_files import proof_files_payload
 
 router = APIRouter(prefix="/api/treasurer", tags=["treasurer"])
 
@@ -95,6 +96,7 @@ def get_pending_deposits(
                 "declared_loan_repayment": float(declaration.declared_loan_repayment) if declaration and declaration.declared_loan_repayment else None,
                 "uploaded_at": dep.uploaded_at.isoformat() if dep.uploaded_at else None,
                 "upload_path": dep.upload_path,
+                "files": proof_files_payload(dep),
                 "treasurer_comment": dep.treasurer_comment,
                 "member_response": dep.member_response,
                 "rejected_at": dep.rejected_at.isoformat() if dep.rejected_at else None,
@@ -131,6 +133,14 @@ def get_deposit_proof_file(
     
     # Verify user has permission (Treasurer or the member who uploaded it)
     deposit = db.query(DepositProof).filter(DepositProof.upload_path.like(f"%{safe_filename}")).first()
+    if not deposit:
+        # Not a main file — may be one of a proof's additional files.
+        from app.models.transaction import DepositProofFile
+        extra = db.query(DepositProofFile).filter(
+            DepositProofFile.upload_path.like(f"%{safe_filename}")
+        ).first()
+        if extra:
+            deposit = db.query(DepositProof).filter(DepositProof.id == extra.deposit_proof_id).first()
     if not deposit:
         raise HTTPException(status_code=404, detail="Deposit proof not found")
     
@@ -1835,6 +1845,7 @@ def upload_declaration_proof_on_behalf(
     declaration_id: str,
     file: UploadFile = File(...),
     reference: Optional[str] = Form(None),
+    mode: str = Form("add"),
     current_user: User = Depends(require_treasurer),
     db: Session = Depends(get_db),
 ):
@@ -1851,7 +1862,10 @@ def upload_declaration_proof_on_behalf(
     * **REJECTED** → swaps in the new file and resets it to SUBMITTED
       (declaration back to PROOF), like the member resubmit flow.
     * **SUBMITTED / APPROVED** (incl. "reconciliation" placeholders) →
-      attaches/replaces the file only. No status or ledger change.
+      file change only, no status or ledger change. With ``mode="add"``
+      (default) the upload is kept alongside the existing file(s) — a
+      declaration paid in several deposits carries several slips. With
+      ``mode="replace"`` it takes the place of the main file.
 
     No late-deposit penalty is raised — the upload time here is the
     treasurer's action, not when the member paid.
@@ -1870,13 +1884,15 @@ def upload_declaration_proof_on_behalf(
     if not declaration:
         raise HTTPException(status_code=404, detail="Declaration not found")
 
-    allowed_extensions = {".pdf", ".jpg", ".jpeg", ".png", ".gif"}
-    file_ext = Path(file.filename).suffix.lower() if file.filename else ""
-    if file_ext not in allowed_extensions:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file type. Allowed: {', '.join(sorted(allowed_extensions))}",
-        )
+    from app.services.deposit_proof_files import (
+        validate_proof_upload, save_proof_upload, add_proof_file, has_main_file,
+    )
+    if mode not in ("add", "replace"):
+        raise HTTPException(status_code=400, detail="mode must be 'add' or 'replace'")
+    try:
+        validate_proof_upload(file)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     deposit = db.query(DepositProof).filter(
         DepositProof.declaration_id == declaration_uuid
@@ -1888,52 +1904,57 @@ def upload_declaration_proof_on_behalf(
             detail="Declaration is approved but has no deposit record to attach a proof to.",
         )
 
-    DEPOSIT_PROOFS_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    safe_filename = (
-        "".join(c for c in file.filename if c.isalnum() or c in "._- ")
-        if file.filename else "proof"
-    )
-    file_path = DEPOSIT_PROOFS_DIR / f"deposit_{declaration_uuid}_{timestamp}_{safe_filename}"
     try:
-        with open(file_path, "wb") as f:
-            f.write(file.file.read())
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-
-    if deposit is None:
-        total = sum(
-            (getattr(declaration, attr) or Decimal("0.00"))
-            for attr in ("declared_savings_amount", "declared_social_fund", "declared_admin_fund",
-                         "declared_penalties", "declared_interest_on_loan", "declared_loan_repayment")
-        )
-        deposit = DepositProof(
-            member_id=declaration.member_id,
-            declaration_id=declaration_uuid,
-            upload_path=str(file_path),
-            amount=Decimal(str(total)),
-            reference=reference,
-            cycle_id=declaration.cycle_id,
-            status=DepositProofStatus.SUBMITTED.value,
-        )
-        db.add(deposit)
-        action = "Deposit proof uploaded on behalf of member"
-    else:
-        old_path = deposit.upload_path
-        if old_path and old_path != "reconciliation":
-            try:
-                if os.path.isfile(old_path):
-                    os.remove(old_path)
-            except OSError:
-                pass
-        deposit.upload_path = str(file_path)
-        if reference:
-            deposit.reference = reference
-        if deposit.status == DepositProofStatus.REJECTED.value:
-            deposit.status = DepositProofStatus.SUBMITTED.value
-            action = "Rejected deposit proof replaced on behalf of member"
+        if deposit is None:
+            file_path = save_proof_upload(file, declaration_uuid)
+            total = sum(
+                (getattr(declaration, attr) or Decimal("0.00"))
+                for attr in ("declared_savings_amount", "declared_social_fund", "declared_admin_fund",
+                             "declared_penalties", "declared_interest_on_loan", "declared_loan_repayment")
+            )
+            deposit = DepositProof(
+                member_id=declaration.member_id,
+                declaration_id=declaration_uuid,
+                upload_path=str(file_path),
+                amount=Decimal(str(total)),
+                reference=reference,
+                cycle_id=declaration.cycle_id,
+                status=DepositProofStatus.SUBMITTED.value,
+            )
+            db.add(deposit)
+            saved_name = file_path.name
+            action = "Deposit proof uploaded on behalf of member"
+        elif (
+            mode == "replace"
+            or deposit.status == DepositProofStatus.REJECTED.value
+            or not has_main_file(deposit)
+        ):
+            # Swap the main file. A rejected proof is always a replacement —
+            # the rejected slip is what the treasurer is correcting.
+            file_path = save_proof_upload(file, declaration_uuid)
+            old_path = deposit.upload_path
+            if old_path and old_path != "reconciliation":
+                try:
+                    if os.path.isfile(old_path):
+                        os.remove(old_path)
+                except OSError:
+                    pass
+            deposit.upload_path = str(file_path)
+            saved_name = file_path.name
+            if deposit.status == DepositProofStatus.REJECTED.value:
+                deposit.status = DepositProofStatus.SUBMITTED.value
+                action = "Rejected deposit proof replaced on behalf of member"
+            else:
+                action = "Deposit proof file attached on behalf of member"
         else:
-            action = "Deposit proof file attached on behalf of member"
+            saved_name = add_proof_file(db, deposit, file, current_user.id)["filename"]
+            action = "Additional deposit proof file added on behalf of member"
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+    if reference:
+        deposit.reference = reference
 
     if declaration.status in (DeclarationStatus.PENDING, DeclarationStatus.REJECTED):
         declaration.status = DeclarationStatus.PROOF
@@ -1947,7 +1968,7 @@ def upload_declaration_proof_on_behalf(
         action=action,
         details=(
             f"declaration={declaration_id} deposit={deposit.id} "
-            f"status={deposit.status} file={file_path.name}"
+            f"status={deposit.status} file={saved_name}"
         ),
     )
     return {
@@ -1955,6 +1976,46 @@ def upload_declaration_proof_on_behalf(
         "deposit_id": str(deposit.id),
         "deposit_status": deposit.status,
         "declaration_status": declaration.status.value,
+        "files": proof_files_payload(deposit),
+    }
+
+
+@router.delete("/deposits/{deposit_id}/files/{file_id}")
+def remove_deposit_proof_file_as_treasurer(
+    deposit_id: str,
+    file_id: str,
+    current_user: User = Depends(require_treasurer),
+    db: Session = Depends(get_db),
+):
+    """Remove one additional proof file from a deposit (e.g. the wrong slip
+    was attached). The main file can only be replaced, not removed. No
+    status or ledger change; audit logged."""
+    from app.services.deposit_proof_files import remove_extra_file
+    from app.core.audit import write_audit_log
+    try:
+        deposit_uuid = UUID(deposit_id)
+        file_uuid = UUID(file_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid deposit_id or file_id")
+    deposit = db.query(DepositProof).filter(DepositProof.id == deposit_uuid).first()
+    if not deposit:
+        raise HTTPException(status_code=404, detail="Deposit proof not found")
+    try:
+        removed = remove_extra_file(db, deposit, file_uuid)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.commit()
+    db.refresh(deposit)
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "treasurer",
+        action="Additional deposit proof file removed",
+        details=f"deposit={deposit_id} status={deposit.status} file={removed}",
+    )
+    return {
+        "message": "Proof file removed.",
+        "deposit_id": str(deposit.id),
+        "files": proof_files_payload(deposit),
     }
 
 
@@ -2459,6 +2520,8 @@ def get_declaration_details_report(
             "amount": float(deposit_proof.amount),
             "uploaded_at": deposit_proof.uploaded_at.isoformat() if deposit_proof.uploaded_at else None,
             "upload_path": deposit_proof.upload_path,
+            # Every real file on the proof, main first.
+            "files": proof_files_payload(deposit_proof),
             # Convenience flag for the UI: true when there's a real uploaded
             # file (not the "reconciliation" placeholder and not empty).
             "has_file": bool(

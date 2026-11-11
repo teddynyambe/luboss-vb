@@ -29,6 +29,7 @@ export default function UploadDepositProofPage() {
   const [amount, setAmount] = useState<string>('');
   const [reference, setReference] = useState<string>('');
   const [file, setFile] = useState<File | null>(null);
+  const [extraFiles, setExtraFiles] = useState<File[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
@@ -77,7 +78,10 @@ export default function UploadDepositProofPage() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
+      // First file is the main proof; any others ride along as additional
+      // proofs (a declaration paid in two or three deposits).
       setFile(e.target.files[0]);
+      setExtraFiles(Array.from(e.target.files).slice(1));
     }
   };
 
@@ -120,6 +124,7 @@ export default function UploadDepositProofPage() {
     try {
       const formData = new FormData();
       formData.append('file', file);
+      extraFiles.forEach((f) => formData.append('extra_files', f));
       formData.append('declaration_id', selectedDeclaration);
       formData.append('amount', amount);
       if (reference) {
@@ -329,16 +334,22 @@ export default function UploadDepositProofPage() {
                   accept=".pdf,.jpg,.jpeg,.png,.gif"
                   onChange={handleFileChange}
                   required
+                  multiple
                   className="w-full"
                 />
                 <p className="mt-2 text-sm md:text-base text-blue-700">
-                  Accepted formats: PDF, JPG, JPEG, PNG, GIF
+                  Accepted formats: PDF, JPG, JPEG, PNG, GIF. Paid in more than one deposit? Select all the slips together — you can also add more later under View Proofs.
                 </p>
                 {file && (
                   <p className="mt-2 text-sm text-green-700 font-medium">
                     Selected: {file.name} ({(file.size / 1024).toFixed(2)} KB)
                   </p>
                 )}
+                {extraFiles.map((f, i) => (
+                  <p key={i} className="mt-1 text-sm text-green-700 font-medium">
+                    + {f.name} ({(f.size / 1024).toFixed(2)} KB)
+                  </p>
+                ))}
               </div>
 
               <div className="flex flex-col sm:flex-row justify-end gap-3 md:gap-4 pt-6 border-t-2 border-blue-200">
