@@ -504,6 +504,7 @@ def get_reconciliation_notes(
         # already-approved declaration from the Reports → Declaration Details
         # modal. Shows up under the affected member/month in reconciliation notes.
         "declaration_edit": "Declaration edited",
+        "savings_to_loan": "Savings used to pay loan",
     }
 
     member_account_ids = (

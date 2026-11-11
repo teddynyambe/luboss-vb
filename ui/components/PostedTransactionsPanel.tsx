@@ -40,6 +40,18 @@ interface TxState {
   member_id: string;
   months: MonthBucket[];
   today_month: string;  // YYYY-MM
+  savings_balance?: number;
+}
+
+// Subset of the Loan State payload used by the "Pay loan from savings" modal.
+interface RunningLoan {
+  id: string;
+  loan_amount: number;
+  loan_status: string | null;
+  disbursement_date: string | null;
+  has_live_disbursement_je: boolean;
+  outstanding: number;
+  interest_outstanding: number;
 }
 
 const fmt = (n: number) =>
@@ -50,6 +62,7 @@ const SOURCE_LABEL: Record<string, string> = {
   excess_contribution: 'Excess transfer',
   penalty_charge: 'Penalty charge',
   transaction_split: 'Split',
+  savings_to_loan: 'Paid to loan',
 };
 
 export default function PostedTransactionsPanel({ memberId }: { memberId: string }) {
@@ -99,6 +112,18 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
   const [moveTarget, setMoveTarget] = useState('');
   const [moveDesc, setMoveDesc] = useState('');
   const [moveBusy, setMoveBusy] = useState(false);
+
+  // "Pay loan from savings" modal
+  const [payOpen, setPayOpen] = useState(false);
+  const [payLoans, setPayLoans] = useState<RunningLoan[] | null>(null);
+  const [payLoanId, setPayLoanId] = useState('');
+  const [payPrincipal, setPayPrincipal] = useState('');
+  const [payInterest, setPayInterest] = useState('');
+  const [payMonth, setPayMonth] = useState('');
+  const [payDesc, setPayDesc] = useState('');
+  const [payBusy, setPayBusy] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(() => {
     if (!memberId) {
@@ -189,6 +214,75 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
     } finally { setMoveBusy(false); }
   };
 
+  const openPay = async () => {
+    setPayOpen(true);
+    setPayLoans(null);
+    setPayLoanId('');
+    setPayPrincipal('');
+    setPayInterest('');
+    setPayMonth(state?.today_month || '');
+    setPayDesc('');
+    setPayError(null);
+    const res = await api.get<{ loans: RunningLoan[] }>(`/api/chairman/reconcile/loan-state/${memberId}`);
+    if (!res.data) {
+      setPayLoans([]);
+      setPayError(res.error || 'Failed to load loans');
+      return;
+    }
+    const running = res.data.loans.filter(
+      (L) => (L.loan_status === 'open' || L.loan_status === 'disbursed') && L.has_live_disbursement_je,
+    );
+    setPayLoans(running);
+    if (running.length === 1) setPayLoanId(running[0].id);
+  };
+
+  const payLoan = payLoans?.find((L) => L.id === payLoanId) || null;
+  const payP = parseFloat(payPrincipal) || 0;
+  const payI = parseFloat(payInterest) || 0;
+  const payTotal = payP + payI;
+  const savingsBalance = state?.savings_balance ?? 0;
+  const payProblem = !payLoan
+    ? null
+    : payP < 0 || payI < 0
+    ? 'Amounts cannot be negative.'
+    : payP > payLoan.outstanding + 0.005
+    ? `Principal is more than the outstanding principal (${fmt(payLoan.outstanding)}).`
+    : payI > payLoan.interest_outstanding + 0.005
+    ? `Interest is more than the outstanding interest (${fmt(payLoan.interest_outstanding)}).`
+    : payTotal > savingsBalance + 0.005
+    ? `Total is more than the savings balance (${fmt(savingsBalance)}).`
+    : null;
+
+  const doPay = async () => {
+    if (!payLoan || payTotal <= 0 || payProblem || tooShort(payDesc)) return;
+    setPayBusy(true);
+    setPayError(null);
+    try {
+      const res = await api.post<{ total: number; loan_closed: boolean; principal_outstanding_after: number }>(
+        '/api/chairman/reconcile/savings-to-loan',
+        {
+          member_id: memberId,
+          loan_id: payLoan.id,
+          principal: payP,
+          interest: payI,
+          target_month: payMonth || null,
+          description: payDesc.trim(),
+        },
+      );
+      if (res.error || !res.data) setPayError(res.error || 'Failed to post the payment');
+      else {
+        setPayOpen(false);
+        setNotice(
+          `${fmt(res.data.total)} moved from savings to the loan. ` +
+          (res.data.loan_closed
+            ? 'The loan is now fully paid and closed.'
+            : `Outstanding principal is now ${fmt(res.data.principal_outstanding_after)}.`),
+        );
+        load();
+      }
+    } finally { setPayBusy(false); }
+  };
+
   if (!memberId) return null;
   if (loading && !state) {
     return <div className="card"><p className="text-sm text-gray-600">Loading transactions…</p></div>;
@@ -204,14 +298,32 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
             Per-month ledger lines for this member. Loan disbursements, repayments and interest
             are managed in the Loan State tab — they don&apos;t appear here.
           </p>
+          <p className="text-xs text-gray-700 mt-1">
+            Savings balance: <strong>{fmt(savingsBalance)}</strong>
+          </p>
         </div>
-        <button
-          onClick={load}
-          className="text-xs px-2 py-1 border border-blue-300 rounded hover:bg-blue-50"
-        >
-          Refresh
-        </button>
+        <div className="flex gap-2 shrink-0">
+          <button
+            onClick={openPay}
+            className="text-xs px-2 py-1 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700"
+          >
+            Pay loan from savings
+          </button>
+          <button
+            onClick={load}
+            className="text-xs px-2 py-1 border border-blue-300 rounded hover:bg-blue-50"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
+
+      {notice && (
+        <div className="px-3 py-2 mb-3 bg-green-100 border border-green-300 text-green-900 rounded text-sm flex justify-between gap-3">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="text-xs font-semibold">Dismiss</button>
+        </div>
+      )}
 
       {error && (
         <div className="px-3 py-2 mb-3 bg-red-100 border border-red-300 text-red-800 rounded text-sm">
@@ -306,6 +418,97 @@ export default function PostedTransactionsPanel({ memberId }: { memberId: string
               </table>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Pay loan from savings modal */}
+      {payOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-md mx-4 space-y-3">
+            <h3 className="text-lg font-bold text-blue-900">Pay Loan from Savings</h3>
+            <p className="text-sm text-gray-700">
+              Takes the amount out of this member&apos;s savings and posts it as a repayment on their
+              running loan. No bank cash moves. Savings available: <strong>{fmt(savingsBalance)}</strong>.
+            </p>
+            {payLoans === null ? (
+              <p className="text-sm text-gray-600">Loading loans…</p>
+            ) : payLoans.length === 0 ? (
+              <p className="text-sm italic text-amber-700 bg-amber-50 border border-amber-300 rounded px-3 py-2">
+                This member has no running loan to pay.
+              </p>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-blue-900">Loan</label>
+                  <select value={payLoanId} onChange={(e) => setPayLoanId(e.target.value)}
+                    className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm">
+                    {payLoans.length > 1 && <option value="">Pick the loan…</option>}
+                    {payLoans.map((L) => (
+                      <option key={L.id} value={L.id}>
+                        {fmt(L.loan_amount)} disbursed {L.disbursement_date || '—'} — owes {fmt(L.outstanding)} + {fmt(L.interest_outstanding)} interest
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {payLoan && (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-blue-900">Principal (K)</label>
+                        <input type="number" inputMode="decimal" step="0.01" min="0" value={payPrincipal}
+                          onChange={(e) => setPayPrincipal(e.target.value)}
+                          className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                        <button type="button" onClick={() => setPayPrincipal(String(payLoan.outstanding))}
+                          className="mt-1 text-[11px] text-blue-700 hover:underline">
+                          Outstanding: {fmt(payLoan.outstanding)}
+                        </button>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-blue-900">Interest (K)</label>
+                        <input type="number" inputMode="decimal" step="0.01" min="0" value={payInterest}
+                          onChange={(e) => setPayInterest(e.target.value)}
+                          className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                        <button type="button" onClick={() => setPayInterest(String(payLoan.interest_outstanding))}
+                          className="mt-1 text-[11px] text-blue-700 hover:underline">
+                          Outstanding: {fmt(payLoan.interest_outstanding)}
+                        </button>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-blue-900">Month</label>
+                      <input type="month" value={payMonth} max={state.today_month}
+                        onChange={(e) => setPayMonth(e.target.value)}
+                        className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm" />
+                    </div>
+                    <p className="text-sm text-gray-700">
+                      Total from savings: <strong>{fmt(payTotal)}</strong>
+                      {payTotal > 0 && !payProblem && <> — savings after: <strong>{fmt(savingsBalance - payTotal)}</strong></>}
+                    </p>
+                    <label className="block text-xs font-semibold text-blue-900">Reason (required)</label>
+                    <textarea
+                      rows={3}
+                      value={payDesc}
+                      onChange={(e) => setPayDesc(e.target.value)}
+                      placeholder="e.g. Member asked to settle the loan from savings (min 5 characters)"
+                      className="w-full px-3 py-2 border-2 border-blue-300 rounded text-sm"
+                    />
+                  </>
+                )}
+              </>
+            )}
+            {(payProblem || payError) && (
+              <p className="text-xs text-red-700">{payProblem || payError}</p>
+            )}
+            <div className="flex justify-end gap-3 pt-1">
+              <button onClick={() => setPayOpen(false)} disabled={payBusy}
+                className="px-4 py-2 text-sm font-semibold text-gray-600 hover:text-gray-800">Cancel</button>
+              <button onClick={doPay}
+                disabled={payBusy || !payLoan || payTotal <= 0 || !!payProblem || tooShort(payDesc)}
+                className="px-5 py-2 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 disabled:opacity-50">
+                {payBusy ? 'Posting…' : 'Confirm Payment'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

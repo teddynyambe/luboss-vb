@@ -2137,6 +2137,59 @@ def post_move_transaction(
     return result
 
 
+class SavingsToLoanRequest(BaseModel):
+    member_id: str
+    principal: float = 0
+    interest: float = 0
+    description: str
+    # Optional — required only when the member has more than one running loan.
+    loan_id: str | None = None
+    # Optional YYYY-MM reporting month; defaults to the current month.
+    target_month: str | None = None
+
+
+@router.post("/reconcile/savings-to-loan")
+def post_savings_to_loan(
+    body: SavingsToLoanRequest,
+    current_user: User = Depends(require_any_role("Chairman", "Treasurer", "Admin")),
+    db: Session = Depends(get_db),
+):
+    """Use part of a member's savings to pay their running loan (Posted
+    Transactions tab). Debits savings, posts a Repayment on the loan."""
+    from app.services.transaction_repair import pay_loan_from_savings
+    from app.core.audit import write_audit_log
+    try:
+        member_uuid = UUID(body.member_id)
+        loan_uuid = UUID(body.loan_id) if body.loan_id else None
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid member_id or loan_id")
+    try:
+        result = pay_loan_from_savings(
+            db=db,
+            member_id=member_uuid,
+            principal=Decimal(str(body.principal or 0)),
+            interest=Decimal(str(body.interest or 0)),
+            description=body.description,
+            user_id=current_user.id,
+            loan_id=loan_uuid,
+            target_month=body.target_month,
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit_log(
+        user_name=f"{current_user.first_name or ''} {current_user.last_name or ''}".strip(),
+        user_role=current_user.role.value if current_user.role else "chairman",
+        action="Savings used to pay loan",
+        details=(
+            f"member={body.member_id} loan={result['loan_id']} "
+            f"P={result['principal']} I={result['interest']} month={result['month']} "
+            f"closed={result['loan_closed']} reason={body.description[:120]}"
+        ),
+    )
+    return result
+
+
 @router.post("/reconcile/declaration/{declaration_id}/reject")
 def post_reject_declaration(
     declaration_id: str,

@@ -13,6 +13,8 @@ corrections without re-running a whole reconciliation. Operations:
   - move     : update the parent JournalEntry's entry_date (and cycle_id) so
                the line falls into a different month. Cannot move into the
                future.
+  - savings → loan : take part of the member's savings and post it as a
+               repayment (principal and/or interest) on their running loan.
 
 Every action requires a non-empty description (min 5 chars) which lands on
 the relevant JE field plus the audit log.
@@ -39,6 +41,10 @@ from app.services.accounting import create_journal_entry
 
 CATEGORIES = ("savings", "social_fund", "admin_fund", "penalty")
 MIN_DESCRIPTION_CHARS = 5
+# JE source_type for "pay loan from savings". The JE carries both the savings
+# debit and the Repayment row, so it can only be undone as a whole (Loan
+# State → Reverse repayment) — never line-by-line from Posted Transactions.
+SAVINGS_TO_LOAN_SOURCE = "savings_to_loan"
 
 
 def _account_category(name: str | None) -> str | None:
@@ -143,6 +149,8 @@ def _humanise_note(
         return (line_description or je_description or f"{month_label} — {cat} split").strip()
     if src == "transaction_reverse":
         return (line_description or je_description or f"{month_label} — {cat} reversal").strip()
+    if src == SAVINGS_TO_LOAN_SOURCE:
+        return (line_description or f"{month_label} — Savings used to pay loan for {who}").strip()
     if src == "penalty":
         return f"{month_label} — {cat} charged to {who}".strip(" —")
     if src == "penalty_reversal":
@@ -265,7 +273,7 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
             ),
             "reversed_at": reversed_at,
             "reversal_reason": reversal_reason,
-            "can_act": is_live,
+            "can_act": is_live and je.source_type != SAVINGS_TO_LOAN_SOURCE,
         })
         if is_live:
             months[m_key]["totals"][category] += signed_amount
@@ -276,10 +284,12 @@ def list_member_transactions(db: Session, member_id: UUID) -> dict:
         key=lambda m: m["month"],
         reverse=True,
     )
+    from app.services.accounting import get_member_savings_balance
     return {
         "member_id": str(member_id),
         "months": ordered,
         "today_month": f"{today_month[0]:04d}-{today_month[1]:02d}",
+        "savings_balance": float(get_member_savings_balance(db, member_id)),
     }
 
 
@@ -301,6 +311,11 @@ def _load_line_and_entry(
         )
     if _account_category(account.account_name) is None:
         raise ValueError("This account category is not editable from Posted Transactions.")
+    if je.source_type == SAVINGS_TO_LOAN_SOURCE:
+        raise ValueError(
+            "This line is the savings side of a loan payment. To undo it, use "
+            "Loan State → Reverse on the matching repayment — that restores the savings too."
+        )
     return line, je, account
 
 
@@ -615,6 +630,198 @@ def move_transaction(
         "journal_entry_id": str(je.id),
         "moved_to": target_month,
         "cycle_id": str(je.cycle_id) if je.cycle_id else None,
+        "reason": desc,
+    }
+
+
+def pay_loan_from_savings(
+    db: Session,
+    member_id: UUID,
+    principal: Decimal,
+    interest: Decimal,
+    description: str,
+    user_id: UUID,
+    loan_id: UUID | None = None,
+    target_month: str | None = None,   # "YYYY-MM"; defaults to the current month
+) -> dict:
+    """Use part of a member's savings to pay down their running loan.
+
+    Posts one JournalEntry (source_type ``savings_to_loan``):
+        Debit  member Savings account      principal + interest
+        Credit LOANS_RECEIVABLE            principal
+        Credit INTEREST_RECEIVABLE         interest
+    and a Repayment row on the loan pointing at that JE. No bank cash moves —
+    the money was already banked when the savings were deposited.
+
+    The loan is closed here when this payment clears both principal and
+    interest (the scheduler's auto-close only counts declared repayments, so
+    it would never see this one).
+
+    Undo via Loan State → Reverse repayment: that marks this JE reversed,
+    which restores the savings and the loan balance together.
+    """
+    from app.models.transaction import Loan, LoanStatus, Repayment
+    from app.services.accounting import get_member_savings_balance, get_dealing_month_date
+    from app.services.loan_repair import loan_has_live_disbursement
+    import uuid as _uuid
+
+    desc = _require_description(description)
+    cents = Decimal("0.01")
+    principal = Decimal(str(principal or 0)).quantize(cents)
+    interest = Decimal(str(interest or 0)).quantize(cents)
+    if principal < 0 or interest < 0:
+        raise ValueError("Amounts cannot be negative.")
+    total = principal + interest
+    if total <= 0:
+        raise ValueError("Enter a principal and/or interest amount to pay.")
+
+    today = date.today()
+    if target_month:
+        try:
+            y_str, m_str = target_month.split("-")
+            month_date = date(int(y_str), int(m_str), 1)
+        except (ValueError, AttributeError):
+            raise ValueError("target_month must be YYYY-MM.")
+        if (month_date.year, month_date.month) > (today.year, today.month):
+            raise ValueError("Cannot post a loan payment into a future month.")
+    else:
+        month_date = date(today.year, today.month, 1)
+
+    active_statuses = [LoanStatus.OPEN, LoanStatus.DISBURSED]
+    if loan_id is not None:
+        loan = db.query(Loan).filter(Loan.id == loan_id).first()
+        if not loan or loan.member_id != member_id:
+            raise ValueError("Loan not found for this member.")
+        if loan.loan_status not in active_statuses:
+            raise ValueError("That loan is not running — pick an open loan.")
+    else:
+        running = [
+            L for L in db.query(Loan).filter(
+                Loan.member_id == member_id,
+                Loan.loan_status.in_(active_statuses),
+            ).order_by(Loan.created_at.asc()).all()
+            if loan_has_live_disbursement(db, L.id)
+        ]
+        if not running:
+            raise ValueError("This member has no running loan to pay.")
+        if len(running) > 1:
+            raise ValueError("This member has more than one running loan — pick which one to pay.")
+        loan = running[0]
+    if not loan_has_live_disbursement(db, loan.id):
+        raise ValueError("That loan's disbursement has been reversed — it cannot take payments.")
+
+    # What is still owed on the loan (live repayments only).
+    paid_p, paid_i = (
+        db.query(
+            func.coalesce(func.sum(Repayment.principal_amount), 0),
+            func.coalesce(func.sum(Repayment.interest_amount), 0),
+        )
+        .join(JournalEntry, JournalEntry.id == Repayment.journal_entry_id)
+        .filter(
+            Repayment.loan_id == loan.id,
+            JournalEntry.reversed_by.is_(None),
+            JournalEntry.reversed_at.is_(None),
+        )
+        .one()
+    )
+    loan_amount = Decimal(str(loan.loan_amount or 0))
+    expected_interest = (
+        loan_amount * Decimal(str(loan.percentage_interest or 0)) / Decimal("100")
+    ).quantize(cents)
+    principal_owed = max(Decimal("0.00"), loan_amount - Decimal(str(paid_p or 0)))
+    interest_owed = max(Decimal("0.00"), expected_interest - Decimal(str(paid_i or 0)))
+    if principal > principal_owed:
+        raise ValueError(
+            f"Principal (K{principal}) is more than the loan's outstanding principal (K{principal_owed})."
+        )
+    if interest > interest_owed:
+        raise ValueError(
+            f"Interest (K{interest}) is more than the loan's outstanding interest (K{interest_owed})."
+        )
+
+    savings_account = _get_member_category_account(db, member_id, "savings")
+    if not savings_account:
+        raise ValueError("This member has no savings account.")
+    savings_balance = get_member_savings_balance(db, member_id)
+    if total > savings_balance:
+        raise ValueError(
+            f"Total (K{total}) is more than the member's savings balance (K{savings_balance})."
+        )
+
+    lines = [{
+        "account_id": savings_account.id,
+        "debit_amount": total,
+        "credit_amount": Decimal("0.00"),
+        "description": f"Savings used to pay loan — K{total} (principal K{principal}, interest K{interest})"[:255],
+    }]
+    if principal > 0:
+        loans_rec = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code.like("LOANS_RECEIVABLE%")
+        ).first()
+        if not loans_rec:
+            raise ValueError("LOANS_RECEIVABLE account missing")
+        lines.append({
+            "account_id": loans_rec.id,
+            "debit_amount": Decimal("0.00"),
+            "credit_amount": principal,
+            "description": "Loan principal repayment (from savings)",
+        })
+    if interest > 0:
+        # Same account choice as approve_deposit: draw down the receivable,
+        # falling back to INTEREST_INCOME on pre-accrual data.
+        int_acct = db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == "INTEREST_RECEIVABLE"
+        ).first() or db.query(LedgerAccount).filter(
+            LedgerAccount.account_code == "INTEREST_INCOME"
+        ).first()
+        if not int_acct:
+            raise ValueError("INTEREST_RECEIVABLE account missing")
+        lines.append({
+            "account_id": int_acct.id,
+            "debit_amount": Decimal("0.00"),
+            "credit_amount": interest,
+            "description": "Interest collected (from savings)",
+        })
+
+    new_rep_id = _uuid.uuid4()
+    new_je = create_journal_entry(
+        db=db,
+        description=f"Savings used to pay loan {str(loan.id)[:8]} — K{total}: {desc}"[:255],
+        lines=lines,
+        dealing_month=get_dealing_month_date(db, loan.cycle_id, month_date),
+        cycle_id=loan.cycle_id,
+        source_type=SAVINGS_TO_LOAN_SOURCE,
+        source_ref=str(new_rep_id),
+        created_by=user_id,
+    )
+    db.add(Repayment(
+        id=new_rep_id,
+        loan_id=loan.id,
+        repayment_date=month_date,
+        principal_amount=principal,
+        interest_amount=interest,
+        total_amount=total,
+        journal_entry_id=new_je.id,
+    ))
+
+    loan_closed = False
+    if principal_owed - principal <= cents and interest_owed - interest <= 0:
+        loan.loan_status = LoanStatus.CLOSED
+        loan_closed = True
+
+    db.commit()
+    return {
+        "repayment_id": str(new_rep_id),
+        "journal_entry_id": str(new_je.id),
+        "loan_id": str(loan.id),
+        "principal": float(principal),
+        "interest": float(interest),
+        "total": float(total),
+        "month": month_date.strftime("%Y-%m"),
+        "savings_balance_after": float(savings_balance - total),
+        "principal_outstanding_after": float(principal_owed - principal),
+        "interest_outstanding_after": float(interest_owed - interest),
+        "loan_closed": loan_closed,
         "reason": desc,
     }
 
